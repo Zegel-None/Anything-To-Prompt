@@ -5,6 +5,7 @@ pub mod process;
 use crate::captures::{
     capture_target_window_bitblt, save_annotated_capture, RawScreenCapture, ScreenRect,
 };
+use crate::pick::adapters::office::{self, OfficeAppKind};
 use crate::pick::adapters::{collect_deep_adapter_outputs, AdapterContext};
 use crate::pick::fs_meta::{format_human_bytes, inspect_path_metadata};
 use crate::pick::process::inspect_process;
@@ -369,6 +370,76 @@ pub fn is_desktop_window_class(win_class: &str) -> bool {
     matches!(win_class, "Progman" | "WorkerW")
 }
 
+/// Returns true for Office / WPS suite and similar document, code-editor, PDF, note,
+/// and creative/design canvas apps where hovering over the canvas must NEVER trigger
+/// the 0.5s background dwell ring or select the entire window background.
+pub fn should_ignore_background_for_app(exe_name: &str, win_class: &str) -> bool {
+    let exe = exe_name.trim().to_ascii_lowercase();
+    if matches!(
+        exe.as_str(),
+        // Microsoft Office & WPS Office
+        "winword.exe"
+            | "excel.exe"
+            | "powerpnt.exe"
+            | "wps.exe"
+            | "wpsoffice.exe"
+            | "et.exe"
+            | "wpp.exe"
+            | "wpspdf.exe"
+            | "visio.exe"
+            | "onenote.exe"
+            | "msaccess.exe"
+            | "mspub.exe"
+            // PDF / Document / Markdown / Note / Text editors
+            | "acrobat.exe"
+            | "acrord32.exe"
+            | "foxitpdfreader.exe"
+            | "foxitreader.exe"
+            | "sumatrapdf.exe"
+            | "obsidian.exe"
+            | "notion.exe"
+            | "typora.exe"
+            | "xmind.exe"
+            | "notepad.exe"
+            | "notepad++.exe"
+            | "sublime_text.exe"
+            // Code editors & IDEs
+            | "code.exe"
+            | "cursor.exe"
+            | "windsurf.exe"
+            | "antigravity.exe"
+            | "devenv.exe"
+            | "idea64.exe"
+            | "pycharm64.exe"
+            | "webstorm64.exe"
+            | "clion64.exe"
+            | "goland64.exe"
+            | "rider64.exe"
+            | "fleet.exe"
+            // Design / Creative / Canvas / CAD / Video editors
+            | "photoshop.exe"
+            | "illustrator.exe"
+            | "indesign.exe"
+            | "afterfx.exe"
+            | "premiere pro.exe"
+            | "figma.exe"
+            | "blender.exe"
+            | "acad.exe"
+            | "mspaint.exe"
+            | "krita.exe"
+            | "inkscape.exe"
+            | "jianyingpro.exe"
+            | "capcut.exe"
+    ) {
+        return true;
+    }
+
+    matches!(
+        win_class,
+        "OpusApp" | "XLMAIN" | "PPTFrameClass" | "ETMain" | "WPPMain" | "SunAwtFrame"
+    )
+}
+
 /// Classifies a hovered UIA target into an immediate foreground `Element` vs a
 /// dwell-gated `Background` (desktop wallpaper, root window, or genuine full-window backdrop).
 pub fn classify_hover_target(
@@ -518,6 +589,24 @@ pub fn inspect_hover_at_with_uia(
     }
 
     let win_rect = get_window_screen_rect(root_hwnd);
+    let target_exe = office::fast_exe_basename_for_pid(target_pid);
+    let ignore_bg = should_ignore_background_for_app(&target_exe, &win_class);
+
+    // Inside Office / WPS document/grid/slide canvases, keep hover completely clean & distraction-free
+    // (no giant pane frame, no 0.5s background dwell ring) so text drag / cell pick / shape click feel native.
+    if let Some(hit) = office::detect_office_canvas_at(x, y) {
+        if hit.in_canvas {
+            return HoverInspection {
+                ok: false,
+                kind: HoverTargetKind::None,
+                target_key: String::new(),
+                rect: None,
+                cursor,
+                label: String::new(),
+            };
+        }
+    }
+
     let uia_info = uia.and_then(|(automation, walker)| {
         let el = find_target_uia_element(automation, walker, root_hwnd, target_pid, x, y)?;
         Some(extract_uia_element_info(&el, walker, false))
@@ -555,7 +644,7 @@ pub fn inspect_hover_at_with_uia(
                     label,
                 };
             }
-            HoverTargetKind::Background => {
+            HoverTargetKind::Background if !ignore_bg => {
                 let bg_rect = if is_desktop_window_class(&win_class) {
                     if win_rect.w > 24 && win_rect.h > 24 {
                         win_rect
@@ -582,9 +671,9 @@ pub fn inspect_hover_at_with_uia(
                     };
                 }
             }
-            HoverTargetKind::None => {}
+            HoverTargetKind::Background | HoverTargetKind::None => {}
         }
-    } else if win_rect.w > 24 && win_rect.h > 24 {
+    } else if !ignore_bg && win_rect.w > 24 && win_rect.h > 24 {
         let target_key = format!(
             "bg:{}:{}:{}:{}:{}",
             target_pid, win_rect.x, win_rect.y, win_rect.w, win_rect.h
@@ -754,26 +843,42 @@ pub fn execute_tap_pick(
     let Some(shared) = app.try_state::<AppShared>() else {
         return;
     };
+
+    // Specialized Office / WPS tap handling:
+    // - Excel / WPS Spreadsheets: single-click picks a single worksheet cell
+    // - PowerPoint / WPS Presentation: single-click picks a single design element (text/shape/table/picture)
+    if try_execute_office_tap_pick(app, &shared, x, y, pre_capture.as_ref()) {
+        return;
+    }
+
     let (root_hwnd, target_pid, win_title, win_class) = resolve_root_window_at(x, y);
     if target_pid == 0 {
         return;
     }
 
     let win_rect = get_window_screen_rect(root_hwnd);
+    let target_exe = office::fast_exe_basename_for_pid(target_pid);
+    let ignore_bg = should_ignore_background_for_app(&target_exe, &win_class);
+
     let uia_info = UIAutomation::new().ok().and_then(|auto| {
         let walker = auto.get_control_view_walker().ok()?;
         let el = find_target_uia_element(&auto, &walker, root_hwnd, target_pid, x, y)?;
         Some(extract_uia_element_info(&el, &walker, true))
     });
 
-    let kind = match uia_info.as_ref() {
+    let mut kind = match uia_info.as_ref() {
         Some(info) => classify_hover_target(info, win_rect, &win_class),
         None if win_rect.w > 24 && win_rect.h > 24 => HoverTargetKind::Background,
         None => HoverTargetKind::None,
     };
+    if ignore_bg && kind == HoverTargetKind::Background {
+        kind = HoverTargetKind::None;
+    }
 
     if kind == HoverTargetKind::None {
-        emit_pick_toast(app, "无法抓取有效信息 · 仅可涂鸦");
+        if !ignore_bg {
+            emit_pick_toast(app, "无法抓取有效信息 · 仅可涂鸦");
+        }
         return;
     }
 
@@ -898,6 +1003,14 @@ pub fn execute_stroke_pick(
         return;
     };
 
+    // Specialized Office / WPS drag handling:
+    // - Word / WPS Writer: I-beam cursor text selection (NO red stroke)
+    // - Excel / WPS Spreadsheets: rectangular cell range box selection (NO red stroke)
+    // - PowerPoint / WPS Presentation: intentionally falls through to keep red freehand stroke unchanged!
+    if try_execute_office_drag_pick(app, &shared, &points, pre_capture.as_ref()) {
+        return;
+    }
+
     let (mut min_x, mut min_y) = points[0];
     let (mut max_x, mut max_y) = points[0];
     for &(px, py) in &points[1..] {
@@ -985,6 +1098,626 @@ pub fn execute_stroke_pick(
         screenshot_path
     );
     inject_capsule_into_bar(app, &capsule);
+}
+
+fn is_wps_exe(exe_name: &str) -> bool {
+    matches!(exe_name, "wps.exe" | "wpsoffice.exe" | "et.exe" | "wpp.exe")
+}
+
+fn office_app_display_name(exe_name: &str, kind: OfficeAppKind) -> &'static str {
+    let is_wps = is_wps_exe(exe_name);
+    match (is_wps, kind) {
+        (true, OfficeAppKind::Word) => "WPS 文字",
+        (true, OfficeAppKind::Excel) => "WPS 表格",
+        (true, OfficeAppKind::PowerPoint) => "WPS 演示",
+        (false, OfficeAppKind::Word) => "Word",
+        (false, OfficeAppKind::Excel) => "Excel",
+        (false, OfficeAppKind::PowerPoint) => "PowerPoint",
+    }
+}
+
+fn try_execute_office_tap_pick(
+    app: &AppHandle,
+    shared: &AppShared,
+    x: i32,
+    y: i32,
+    pre_capture: Option<&RawScreenCapture>,
+) -> bool {
+    let Some(hit) = office::detect_office_canvas_at(x, y) else {
+        return false;
+    };
+    if !hit.in_canvas {
+        return false;
+    }
+
+    match hit.kind {
+        OfficeAppKind::Excel => {
+            let Some(ex) = office::pick_excel_cell_com(&shared.broker, x, y, hit.dpi_scale) else {
+                return false;
+            };
+            let cfg = shared.config.lock().map(|c| c.clone()).unwrap_or_default();
+            let n = shared.allocate_pick_number();
+            let badge = circled_badge(n);
+            let rect = ex.screen_rect.unwrap_or(ScreenRect {
+                x: x - 42,
+                y: y - 13,
+                w: 84,
+                h: 26,
+            });
+            if let Some(ov) = app.get_webview_window("overlay") {
+                let _ = ov.emit(
+                    "pen:picked",
+                    serde_json::json!({ "n": n, "rect": rect, "mode": "excel_cell" }),
+                );
+            }
+            let owned_cap;
+            let raw_ref = match pre_capture {
+                Some(r) => Some(r),
+                None => {
+                    owned_cap = capture_target_window_bitblt(hit.root_hwnd, x, y).ok();
+                    owned_cap.as_ref()
+                }
+            };
+            let screenshot_path = raw_ref.and_then(|raw| {
+                save_annotated_capture(app, raw, Some(rect), &[], n, &cfg)
+                    .ok()
+                    .map(|p| p.to_string_lossy().to_string())
+            });
+            let proc_meta = inspect_process(hit.pid, &cfg.app_source_map);
+            let app_label = office_app_display_name(&proc_meta.exe_name, OfficeAppKind::Excel);
+            let cell_ref = if ex.sheet.is_empty() {
+                ex.address.clone()
+            } else {
+                format!("{}!{}", ex.sheet, ex.address)
+            };
+            let disp_short = truncate_chars(ex.display_text.trim(), 16);
+            let chip_title = if disp_short.is_empty() {
+                format!("{badge} {cell_ref}")
+            } else {
+                format!("{badge} {cell_ref} · {disp_short}")
+            };
+            let wb_badge = if !ex.workbook_name.is_empty() {
+                ex.workbook_name.as_str()
+            } else {
+                hit.win_title.trim()
+            };
+            let chip_detail = format!("{app_label} · {}", truncate_chars(wb_badge, 26));
+
+            let mut lines = Vec::new();
+            lines.push(format!(
+                "[DSB-PICK #{n} badge={badge} kind=office_excel_cell app=\"{}\"]",
+                proc_meta.exe_name
+            ));
+            lines.push(format!("office_app: {app_label}"));
+            if !ex.prog_id.is_empty() {
+                lines.push(format!("office_prog_id: {}", ex.prog_id));
+            }
+            lines.push(format!("window_hwnd: {}", hit.root_hwnd.0 as isize));
+            if !ex.full_name.is_empty() {
+                lines.push(format!("office_document_path: {}", ex.full_name));
+            }
+            lines.push(format!("office_workbook: {}", ex.workbook_name));
+            lines.push(format!("excel_sheet: {}", ex.sheet));
+            lines.push(format!("excel_address: {}", ex.address));
+            if !ex.col_header.is_empty() {
+                lines.push(format!("excel_col_header: {}", ex.col_header));
+            }
+            if !ex.row_header.is_empty() {
+                lines.push(format!("excel_row_header: {}", ex.row_header));
+            }
+            if !ex.display_text.is_empty() {
+                lines.push(format!("excel_display_text: {}", ex.display_text));
+            }
+            if !ex.value.is_empty() && ex.value != ex.display_text {
+                lines.push(format!("excel_raw_value: {}", ex.value));
+            }
+            if !ex.formula.is_empty() {
+                lines.push(format!("excel_formula: {}", ex.formula));
+            }
+            let target_locator = if ex.full_name.is_empty() {
+                format!("{} | {cell_ref}", ex.workbook_name)
+            } else {
+                format!("{} | {cell_ref}", ex.full_name)
+            };
+            lines.extend(office::format_live_edit_guidance(
+                "excel",
+                is_wps_exe(&proc_meta.exe_name),
+                &target_locator,
+            ));
+            if let Some(sp) = screenshot_path.as_deref() {
+                lines.push(format!(
+                    "debug_screenshot_path: {sp} (仅当以上信息不足或可疑时再打开查看)"
+                ));
+            }
+            lines.push("[/DSB-PICK]".to_string());
+
+            let capsule = CapsulePayload {
+                summary: CapsuleQuoteSummary {
+                    label: badge,
+                    title: chip_title,
+                    detail: chip_detail,
+                    body: format!("{cell_ref} = {}", ex.display_text),
+                },
+                text: lines.join("\n"),
+            };
+            log::info!(
+                "Committed Excel Cell Pick #{n}: ref='{cell_ref}' val='{}' screenshot={:?}",
+                truncate_chars(&ex.display_text, 40),
+                screenshot_path
+            );
+            inject_capsule_into_bar(app, &capsule);
+            true
+        }
+        OfficeAppKind::PowerPoint => {
+            let Some(ppt) = office::pick_ppt_element_com(&shared.broker, x, y, hit.dpi_scale)
+            else {
+                return false;
+            };
+            let cfg = shared.config.lock().map(|c| c.clone()).unwrap_or_default();
+            let n = shared.allocate_pick_number();
+            let badge = circled_badge(n);
+            let rect = ppt.screen_rect.unwrap_or(ScreenRect {
+                x: x - 48,
+                y: y - 24,
+                w: 96,
+                h: 48,
+            });
+            if let Some(ov) = app.get_webview_window("overlay") {
+                let _ = ov.emit(
+                    "pen:picked",
+                    serde_json::json!({ "n": n, "rect": rect, "mode": "ppt_element" }),
+                );
+            }
+            let owned_cap;
+            let raw_ref = match pre_capture {
+                Some(r) => Some(r),
+                None => {
+                    owned_cap = capture_target_window_bitblt(hit.root_hwnd, x, y).ok();
+                    owned_cap.as_ref()
+                }
+            };
+            let screenshot_path = raw_ref.and_then(|raw| {
+                save_annotated_capture(app, raw, Some(rect), &[], n, &cfg)
+                    .ok()
+                    .map(|p| p.to_string_lossy().to_string())
+            });
+            let proc_meta = inspect_process(hit.pid, &cfg.app_source_map);
+            let app_label = office_app_display_name(&proc_meta.exe_name, OfficeAppKind::PowerPoint);
+            let first_line = ppt
+                .text
+                .lines()
+                .map(str::trim)
+                .find(|l| !l.is_empty())
+                .unwrap_or("");
+            let elem_label = if !first_line.is_empty() {
+                truncate_chars(first_line, 20)
+            } else if !ppt.shape_name.is_empty() {
+                truncate_chars(&ppt.shape_name, 22)
+            } else {
+                ppt.shape_type.clone()
+            };
+            let chip_title = format!("{badge} Slide {} · {elem_label}", ppt.slide_index);
+            let pres_badge = if !ppt.pres_name.is_empty() {
+                ppt.pres_name.as_str()
+            } else {
+                hit.win_title.trim()
+            };
+            let chip_detail = format!(
+                "{app_label} · {} ({})",
+                truncate_chars(pres_badge, 22),
+                ppt.shape_type
+            );
+
+            let mut lines = Vec::new();
+            lines.push(format!(
+                "[DSB-PICK #{n} badge={badge} kind=office_ppt_element app=\"{}\"]",
+                proc_meta.exe_name
+            ));
+            lines.push(format!("office_app: {app_label}"));
+            if !ppt.prog_id.is_empty() {
+                lines.push(format!("office_prog_id: {}", ppt.prog_id));
+            }
+            lines.push(format!("window_hwnd: {}", hit.root_hwnd.0 as isize));
+            if !ppt.full_name.is_empty() {
+                lines.push(format!("office_document_path: {}", ppt.full_name));
+            }
+            lines.push(format!("ppt_presentation: {}", ppt.pres_name));
+            lines.push(format!(
+                "ppt_slide: {} / {}",
+                ppt.slide_index, ppt.slide_count
+            ));
+            lines.push(format!(
+                "ppt_shape: id={} name=\"{}\" type={}",
+                ppt.shape_id, ppt.shape_name, ppt.shape_type
+            ));
+            if let Some(gid) = ppt.parent_group_id {
+                lines.push(format!(
+                    "ppt_parent_group: id={gid} name=\"{}\"",
+                    ppt.parent_group_name
+                ));
+            }
+            if !ppt.geometry.is_empty() {
+                lines.push(format!("ppt_geometry: {}", ppt.geometry));
+            }
+            if !ppt.style.is_empty() {
+                lines.push(format!("ppt_style: {}", ppt.style));
+            }
+            if !ppt.text.is_empty() {
+                lines.push(format!("ppt_shape_text:\n{}", ppt.text));
+            }
+            let mut target_locator = format!(
+                "{} | slide={} shape_id={} shape_name=\"{}\"",
+                if ppt.full_name.is_empty() {
+                    ppt.pres_name.as_str()
+                } else {
+                    ppt.full_name.as_str()
+                },
+                ppt.slide_index,
+                ppt.shape_id,
+                ppt.shape_name
+            );
+            if let Some(gid) = ppt.parent_group_id {
+                target_locator.push_str(&format!(" parent_group_id={gid}"));
+            }
+            lines.extend(office::format_live_edit_guidance(
+                "ppt",
+                is_wps_exe(&proc_meta.exe_name),
+                &target_locator,
+            ));
+            if let Some(sp) = screenshot_path.as_deref() {
+                lines.push(format!(
+                    "debug_screenshot_path: {sp} (仅当以上信息不足或可疑时再打开查看)"
+                ));
+            }
+            lines.push("[/DSB-PICK]".to_string());
+
+            let capsule = CapsulePayload {
+                summary: CapsuleQuoteSummary {
+                    label: badge,
+                    title: chip_title,
+                    detail: chip_detail,
+                    body: if ppt.text.is_empty() {
+                        format!("{} ({})", ppt.shape_name, ppt.shape_type)
+                    } else {
+                        truncate_chars(&ppt.text, 120)
+                    },
+                },
+                text: lines.join("\n"),
+            };
+            log::info!(
+                "Committed PPT Element Pick #{n}: slide={} shape='{}' (id={}) screenshot={:?}",
+                ppt.slide_index,
+                ppt.shape_name,
+                ppt.shape_id,
+                screenshot_path
+            );
+            inject_capsule_into_bar(app, &capsule);
+            true
+        }
+        OfficeAppKind::Word => false,
+    }
+}
+
+fn try_execute_office_drag_pick(
+    app: &AppHandle,
+    shared: &AppShared,
+    points: &[(i32, i32)],
+    pre_capture: Option<&RawScreenCapture>,
+) -> bool {
+    if points.len() < 2 {
+        return false;
+    }
+    let start = points[0];
+    let end = *points.last().unwrap_or(&start);
+    let Some(hit) = office::detect_office_canvas_at(start.0, start.1) else {
+        return false;
+    };
+    if !hit.in_canvas {
+        return false;
+    }
+
+    let bbox = ScreenRect {
+        x: start.0.min(end.0),
+        y: start.1.min(end.1),
+        w: (start.0 - end.0).abs().max(24),
+        h: (start.1 - end.1).abs().max(18),
+    };
+
+    match hit.kind {
+        OfficeAppKind::PowerPoint => {
+            // PowerPoint / WPS Presentation drag MUST keep drawing the red freehand stroke unchanged!
+            false
+        }
+        OfficeAppKind::Word => {
+            let uia_text = office::select_word_text_uia(hit.root_hwnd, start, end, true);
+            let com_res = office::pick_word_text_com(
+                &shared.broker,
+                start.0,
+                start.1,
+                end.0,
+                end.1,
+                hit.dpi_scale,
+            );
+            let selected_text = com_res
+                .as_ref()
+                .map(|r| r.selected_text.trim())
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .or(uia_text)
+                .unwrap_or_default();
+
+            let cfg = shared.config.lock().map(|c| c.clone()).unwrap_or_default();
+            let n = shared.allocate_pick_number();
+            let badge = circled_badge(n);
+            if let Some(ov) = app.get_webview_window("overlay") {
+                let _ = ov.emit(
+                    "pen:picked",
+                    serde_json::json!({ "n": n, "rect": bbox, "mode": "word_text" }),
+                );
+            }
+            let owned_cap;
+            let raw_ref = match pre_capture {
+                Some(r) => Some(r),
+                None => {
+                    owned_cap = capture_target_window_bitblt(
+                        hit.root_hwnd,
+                        bbox.x + bbox.w / 2,
+                        bbox.y + bbox.h / 2,
+                    )
+                    .ok();
+                    owned_cap.as_ref()
+                }
+            };
+            // Save clean rectangular box screenshot (NO red freehand squiggle!)
+            let screenshot_path = raw_ref.and_then(|raw| {
+                save_annotated_capture(app, raw, Some(bbox), &[], n, &cfg)
+                    .ok()
+                    .map(|p| p.to_string_lossy().to_string())
+            });
+            let proc_meta = inspect_process(hit.pid, &cfg.app_source_map);
+            let app_label = office_app_display_name(&proc_meta.exe_name, OfficeAppKind::Word);
+
+            let (prog_id, full_name, doc_name, page_num, para_text, range_start, range_end) =
+                match com_res {
+                    Some(r) => (
+                        r.prog_id,
+                        r.full_name,
+                        r.doc_name,
+                        r.page_number,
+                        r.paragraph_text,
+                        r.range_start,
+                        r.range_end,
+                    ),
+                    None => (
+                        String::new(),
+                        String::new(),
+                        hit.win_title.trim().to_string(),
+                        String::new(),
+                        String::new(),
+                        None,
+                        None,
+                    ),
+                };
+
+            let single_line = selected_text
+                .replace(['\r', '\n'], " ")
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ");
+            let chip_title = if !single_line.is_empty() {
+                format!("{badge} 「{}」", truncate_chars(&single_line, 20))
+            } else {
+                format!("{badge} {} 选区", truncate_chars(&doc_name, 18))
+            };
+            let doc_badge = if !doc_name.is_empty() {
+                doc_name.as_str()
+            } else {
+                hit.win_title.trim()
+            };
+            let chip_detail = if !page_num.is_empty() {
+                format!(
+                    "{app_label} · {} · P{page_num}",
+                    truncate_chars(doc_badge, 20)
+                )
+            } else {
+                format!("{app_label} · {}", truncate_chars(doc_badge, 24))
+            };
+
+            let mut lines = Vec::new();
+            lines.push(format!(
+                "[DSB-PICK #{n} badge={badge} kind=office_word_text app=\"{}\"]",
+                proc_meta.exe_name
+            ));
+            lines.push(format!("office_app: {app_label}"));
+            if !prog_id.is_empty() {
+                lines.push(format!("office_prog_id: {prog_id}"));
+            }
+            lines.push(format!("window_hwnd: {}", hit.root_hwnd.0 as isize));
+            if !full_name.is_empty() {
+                lines.push(format!("office_document_path: {full_name}"));
+            }
+            lines.push(format!("word_document: {doc_name}"));
+            if !page_num.is_empty() {
+                lines.push(format!("word_page: {page_num}"));
+            }
+            if let (Some(rs), Some(re)) = (range_start, range_end) {
+                lines.push(format!("word_range_offsets: {rs}..{re}"));
+            }
+            if !selected_text.is_empty() {
+                lines.push(format!("word_selected_text:\n{selected_text}"));
+            } else {
+                lines.push(
+                    "word_selected_text: (未读取到文本字符，可能划选在空白/图片区域，请参考截图)"
+                        .to_string(),
+                );
+            }
+            if !para_text.is_empty() && para_text != selected_text {
+                lines.push(format!("word_paragraph_context:\n{para_text}"));
+            }
+            let doc_id = if full_name.is_empty() {
+                doc_name.as_str()
+            } else {
+                full_name.as_str()
+            };
+            let target_locator = match (range_start, range_end) {
+                (Some(rs), Some(re)) => format!("{doc_id} | range={rs}..{re}"),
+                _ => doc_id.to_string(),
+            };
+            lines.extend(office::format_live_edit_guidance(
+                "word",
+                is_wps_exe(&proc_meta.exe_name),
+                &target_locator,
+            ));
+            if let Some(sp) = screenshot_path.as_deref() {
+                lines.push(format!(
+                    "debug_screenshot_path: {sp} (仅当以上信息不足或可疑时再打开查看)"
+                ));
+            }
+            lines.push("[/DSB-PICK]".to_string());
+
+            let capsule = CapsulePayload {
+                summary: CapsuleQuoteSummary {
+                    label: badge,
+                    title: chip_title,
+                    detail: chip_detail,
+                    body: if !single_line.is_empty() {
+                        truncate_chars(&single_line, 120)
+                    } else {
+                        format!("{app_label} — {}", truncate_chars(doc_badge, 80))
+                    },
+                },
+                text: lines.join("\n"),
+            };
+            log::info!(
+                "Committed Word Text Pick #{n}: chars={} range={:?}..{:?} screenshot={:?}",
+                selected_text.chars().count(),
+                range_start,
+                range_end,
+                screenshot_path
+            );
+            inject_capsule_into_bar(app, &capsule);
+            true
+        }
+        OfficeAppKind::Excel => {
+            let Some(ex) = office::pick_excel_range_com(
+                &shared.broker,
+                start.0,
+                start.1,
+                end.0,
+                end.1,
+                hit.dpi_scale,
+            ) else {
+                return false;
+            };
+            let cfg = shared.config.lock().map(|c| c.clone()).unwrap_or_default();
+            let n = shared.allocate_pick_number();
+            let badge = circled_badge(n);
+            let rect = ex.screen_rect.unwrap_or(bbox);
+            if let Some(ov) = app.get_webview_window("overlay") {
+                let _ = ov.emit(
+                    "pen:picked",
+                    serde_json::json!({ "n": n, "rect": rect, "mode": "excel_box" }),
+                );
+            }
+            let owned_cap;
+            let raw_ref = match pre_capture {
+                Some(r) => Some(r),
+                None => {
+                    owned_cap = capture_target_window_bitblt(
+                        hit.root_hwnd,
+                        rect.x + rect.w / 2,
+                        rect.y + rect.h / 2,
+                    )
+                    .ok();
+                    owned_cap.as_ref()
+                }
+            };
+            // Save clean rectangular box screenshot (NO red freehand squiggle!)
+            let screenshot_path = raw_ref.and_then(|raw| {
+                save_annotated_capture(app, raw, Some(rect), &[], n, &cfg)
+                    .ok()
+                    .map(|p| p.to_string_lossy().to_string())
+            });
+            let proc_meta = inspect_process(hit.pid, &cfg.app_source_map);
+            let app_label = office_app_display_name(&proc_meta.exe_name, OfficeAppKind::Excel);
+            let range_ref = if ex.sheet.is_empty() {
+                ex.address.clone()
+            } else {
+                format!("{}!{}", ex.sheet, ex.address)
+            };
+            let chip_title = if ex.is_range {
+                format!("{badge} {range_ref} ({}×{})", ex.rows, ex.cols)
+            } else {
+                format!("{badge} {range_ref}")
+            };
+            let wb_badge = if !ex.workbook_name.is_empty() {
+                ex.workbook_name.as_str()
+            } else {
+                hit.win_title.trim()
+            };
+            let chip_detail = format!("{app_label} · {}", truncate_chars(wb_badge, 26));
+
+            let mut lines = Vec::new();
+            lines.push(format!(
+                "[DSB-PICK #{n} badge={badge} kind=office_excel_range app=\"{}\"]",
+                proc_meta.exe_name
+            ));
+            lines.push(format!("office_app: {app_label}"));
+            if !ex.prog_id.is_empty() {
+                lines.push(format!("office_prog_id: {}", ex.prog_id));
+            }
+            lines.push(format!("window_hwnd: {}", hit.root_hwnd.0 as isize));
+            if !ex.full_name.is_empty() {
+                lines.push(format!("office_document_path: {}", ex.full_name));
+            }
+            lines.push(format!("office_workbook: {}", ex.workbook_name));
+            lines.push(format!("excel_sheet: {}", ex.sheet));
+            lines.push(format!(
+                "excel_address: {} ({} rows × {} cols)",
+                ex.address, ex.rows, ex.cols
+            ));
+            if !ex.table_preview.is_empty() {
+                lines.push(format!("excel_table_preview:\n{}", ex.table_preview));
+            }
+            if !ex.formulas_preview.is_empty() {
+                lines.push(format!("excel_formulas: {}", ex.formulas_preview));
+            }
+            let target_locator = if ex.full_name.is_empty() {
+                format!("{} | {range_ref}", ex.workbook_name)
+            } else {
+                format!("{} | {range_ref}", ex.full_name)
+            };
+            lines.extend(office::format_live_edit_guidance(
+                "excel",
+                is_wps_exe(&proc_meta.exe_name),
+                &target_locator,
+            ));
+            if let Some(sp) = screenshot_path.as_deref() {
+                lines.push(format!(
+                    "debug_screenshot_path: {sp} (仅当以上信息不足或可疑时再打开查看)"
+                ));
+            }
+            lines.push("[/DSB-PICK]".to_string());
+
+            let capsule = CapsulePayload {
+                summary: CapsuleQuoteSummary {
+                    label: badge,
+                    title: chip_title,
+                    detail: chip_detail,
+                    body: format!("{range_ref} ({}×{})", ex.rows, ex.cols),
+                },
+                text: lines.join("\n"),
+            };
+            log::info!(
+                "Committed Excel Range Pick #{n}: ref='{range_ref}' ({}x{}) screenshot={:?}",
+                ex.rows,
+                ex.cols,
+                screenshot_path
+            );
+            inject_capsule_into_bar(app, &capsule);
+            true
+        }
+    }
 }
 
 pub fn maybe_auto_attach_explorer_selection(app: &AppHandle, fg_hwnd_raw: isize) {
@@ -1510,5 +2243,40 @@ mod tests {
             ),
             HoverTargetKind::Element
         );
+    }
+
+    #[test]
+    fn ignores_background_selection_in_office_wps_and_canvas_editor_apps() {
+        assert!(should_ignore_background_for_app("winword.exe", "OpusApp"));
+        assert!(should_ignore_background_for_app("excel.exe", "XLMAIN"));
+        assert!(should_ignore_background_for_app(
+            "powerpnt.exe",
+            "PPTFrameClass"
+        ));
+        assert!(should_ignore_background_for_app("wps.exe", "Qt5QWindow"));
+        assert!(should_ignore_background_for_app("et.exe", "XLMAIN"));
+        assert!(should_ignore_background_for_app("wpp.exe", "WPPMain"));
+        assert!(should_ignore_background_for_app(
+            "Code.exe",
+            "Chrome_WidgetWin_1"
+        ));
+        assert!(should_ignore_background_for_app(
+            "photoshop.exe",
+            "Photoshop"
+        ));
+        assert!(should_ignore_background_for_app(
+            "figma.exe",
+            "Chrome_WidgetWin_1"
+        ));
+        assert!(should_ignore_background_for_app(
+            "obsidian.exe",
+            "Chrome_WidgetWin_1"
+        ));
+        // Desktop & regular apps still allow background picking
+        assert!(!should_ignore_background_for_app("explorer.exe", "Progman"));
+        assert!(!should_ignore_background_for_app(
+            "msedge.exe",
+            "Chrome_WidgetWin_1"
+        ));
     }
 }

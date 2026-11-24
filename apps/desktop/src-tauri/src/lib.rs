@@ -655,16 +655,67 @@ fn start_hook_event_router(app: AppHandle, rx: mpsc::Receiver<HookEvent>) {
             .expect("failed to start UIA hover worker");
     }
 
+    type WordSelRequest = (isize, (i32, i32), (i32, i32));
+    let word_sel_slot: Arc<(Mutex<Option<WordSelRequest>>, std::sync::Condvar)> =
+        Arc::new((Mutex::new(None), std::sync::Condvar::new()));
+
+    {
+        let word_slot = word_sel_slot.clone();
+        let word_pen_active = pen_active.clone();
+        std::thread::Builder::new()
+            .name("dsb-word-text-sel".to_string())
+            .spawn(move || {
+                let (lock, cv) = &*word_slot;
+                loop {
+                    let req = {
+                        let mut guard = match lock.lock() {
+                            Ok(g) => g,
+                            Err(_) => break,
+                        };
+                        while guard.is_none() {
+                            guard = match cv.wait(guard) {
+                                Ok(g) => g,
+                                Err(_) => return,
+                            };
+                        }
+                        guard.take()
+                    };
+                    let Some((hwnd_raw, start, end)) = req else {
+                        continue;
+                    };
+                    if !word_pen_active.load(Ordering::Acquire) || hwnd_raw == 0 {
+                        continue;
+                    }
+                    let hwnd = windows::Win32::Foundation::HWND(hwnd_raw as *mut std::ffi::c_void);
+                    let _ = pick::adapters::office::select_word_text_uia(hwnd, start, end, true);
+                    std::thread::sleep(Duration::from_millis(28));
+                }
+            })
+            .expect("failed to start Word text-selection worker");
+    }
+
     std::thread::Builder::new()
         .name("dsb-hook-router".to_string())
         .spawn(move || {
             let mut pending_raw_capture: Option<captures::RawScreenCapture> = None;
             let mut pending_tap_allow_bg = false;
+            let mut active_drag_mode = pick::adapters::office::OfficeDragMode::NormalStroke;
+            let mut active_drag_hwnd: isize = 0;
+            let mut hover_ibeam_active = false;
+            let mut last_office_hover_check = std::time::Instant::now() - Duration::from_secs(1);
 
             let push_hover = |req_gen: u64, x: i32, y: i32| {
                 let (lock, cv) = &*hover_slot;
                 if let Ok(mut guard) = lock.lock() {
                     *guard = Some((req_gen, x, y));
+                    cv.notify_one();
+                }
+            };
+
+            let push_word_sel = |hwnd_raw: isize, start: (i32, i32), end: (i32, i32)| {
+                let (lock, cv) = &*word_sel_slot;
+                if let Ok(mut guard) = lock.lock() {
+                    *guard = Some((hwnd_raw, start, end));
                     cv.notify_one();
                 }
             };
@@ -712,11 +763,24 @@ fn start_hook_event_router(app: AppHandle, rx: mpsc::Receiver<HookEvent>) {
                         log::info!("PenStart (gen={gen}) at ({cursor_x}, {cursor_y})");
                         pending_raw_capture = None;
                         pending_tap_allow_bg = false;
+                        active_drag_mode = pick::adapters::office::OfficeDragMode::NormalStroke;
+                        active_drag_hwnd = 0;
+                        hover_ibeam_active = false;
                         if let Ok(mut d) = bg_dwell.lock() {
                             *d = None;
                         }
                         dispatch_state_event(&app, StateEvent::PenStarted);
                         cursor::enable_tech_cursor();
+                        if let Some(hit) =
+                            pick::adapters::office::detect_office_canvas_at(cursor_x, cursor_y)
+                        {
+                            if hit.in_canvas
+                                && hit.kind == pick::adapters::office::OfficeAppKind::Word
+                            {
+                                cursor::set_ibeam_override(true);
+                                hover_ibeam_active = true;
+                            }
+                        }
                         if let Some(ov) = app.get_webview_window("overlay") {
                             let (mon, scale) = position_and_show_overlay(&ov);
                             let _ = ov.emit(
@@ -740,6 +804,19 @@ fn start_hook_event_router(app: AppHandle, rx: mpsc::Receiver<HookEvent>) {
                             continue;
                         }
                         let cur_gen = pen_gen.load(Ordering::Acquire);
+                        if last_office_hover_check.elapsed() >= Duration::from_millis(60) {
+                            last_office_hover_check = std::time::Instant::now();
+                            let want_ibeam = pick::adapters::office::detect_office_canvas_at(x, y)
+                                .map(|h| {
+                                    h.in_canvas
+                                        && h.kind == pick::adapters::office::OfficeAppKind::Word
+                                })
+                                .unwrap_or(false);
+                            if want_ibeam != hover_ibeam_active {
+                                cursor::set_ibeam_override(want_ibeam);
+                                hover_ibeam_active = want_ibeam;
+                            }
+                        }
                         if let Ok(mut d) = bg_dwell.lock() {
                             if let Some(st) = d.as_mut() {
                                 if !st.unlocked {
@@ -767,20 +844,81 @@ fn start_hook_event_router(app: AppHandle, rx: mpsc::Receiver<HookEvent>) {
                             .map(|mut d| is_bg_dwell_unlocked(&mut d))
                             .unwrap_or(false);
                         pending_raw_capture = pick::capture_mousedown_snapshot(x, y);
+                        if let Some(hit) = pick::adapters::office::detect_office_canvas_at(x, y) {
+                            if hit.in_canvas {
+                                active_drag_mode = hit.kind.drag_mode();
+                                active_drag_hwnd = hit.root_hwnd.0 as isize;
+                                if active_drag_mode
+                                    == pick::adapters::office::OfficeDragMode::WordTextSelect
+                                {
+                                    cursor::set_ibeam_override(true);
+                                    hover_ibeam_active = true;
+                                }
+                            } else {
+                                active_drag_mode =
+                                    pick::adapters::office::OfficeDragMode::NormalStroke;
+                                active_drag_hwnd = 0;
+                            }
+                        } else {
+                            active_drag_mode = pick::adapters::office::OfficeDragMode::NormalStroke;
+                            active_drag_hwnd = 0;
+                        }
                     }
                     HookEvent::PenDrag { points } => {
-                        if let Some(ov) = app.get_webview_window("overlay") {
-                            let pts: Vec<serde_json::Value> = points
-                                .into_iter()
-                                .map(|(x, y)| serde_json::json!({ "x": x, "y": y }))
-                                .collect();
-                            let _ = ov.emit("pen:stroke", serde_json::json!({ "points": pts }));
+                        if points.len() < 2 {
+                            continue;
+                        }
+                        let first = points[0];
+                        let last = *points.last().unwrap_or(&first);
+                        match active_drag_mode {
+                            pick::adapters::office::OfficeDragMode::WordTextSelect => {
+                                push_word_sel(active_drag_hwnd, first, last);
+                                if let Some(ov) = app.get_webview_window("overlay") {
+                                    let _ = ov.emit(
+                                        "pen:stroke",
+                                        serde_json::json!({
+                                            "mode": "word_text",
+                                            "start": { "x": first.0, "y": first.1 },
+                                            "end": { "x": last.0, "y": last.1 },
+                                        }),
+                                    );
+                                }
+                            }
+                            pick::adapters::office::OfficeDragMode::ExcelCellBox => {
+                                if let Some(ov) = app.get_webview_window("overlay") {
+                                    let _ = ov.emit(
+                                        "pen:stroke",
+                                        serde_json::json!({
+                                            "mode": "excel_box",
+                                            "start": { "x": first.0, "y": first.1 },
+                                            "end": { "x": last.0, "y": last.1 },
+                                        }),
+                                    );
+                                }
+                            }
+                            pick::adapters::office::OfficeDragMode::NormalStroke => {
+                                if let Some(ov) = app.get_webview_window("overlay") {
+                                    let pts: Vec<serde_json::Value> = points
+                                        .into_iter()
+                                        .map(|(x, y)| serde_json::json!({ "x": x, "y": y }))
+                                        .collect();
+                                    let _ = ov.emit(
+                                        "pen:stroke",
+                                        serde_json::json!({
+                                            "mode": "stroke",
+                                            "points": pts,
+                                        }),
+                                    );
+                                }
+                            }
                         }
                     }
                     HookEvent::PenTap { x, y } => {
                         let pre = pending_raw_capture.take();
                         let allow_bg = pending_tap_allow_bg;
                         pending_tap_allow_bg = false;
+                        active_drag_mode = pick::adapters::office::OfficeDragMode::NormalStroke;
+                        active_drag_hwnd = 0;
                         let tap_app = app.clone();
                         std::thread::spawn(move || {
                             pick::execute_tap_pick(&tap_app, x, y, pre, allow_bg);
@@ -789,6 +927,11 @@ fn start_hook_event_router(app: AppHandle, rx: mpsc::Receiver<HookEvent>) {
                     HookEvent::PenStroke { points } => {
                         let pre = pending_raw_capture.take();
                         pending_tap_allow_bg = false;
+                        active_drag_mode = pick::adapters::office::OfficeDragMode::NormalStroke;
+                        active_drag_hwnd = 0;
+                        if let Ok(mut guard) = word_sel_slot.0.lock() {
+                            *guard = None;
+                        }
                         let stroke_app = app.clone();
                         std::thread::spawn(move || {
                             pick::execute_stroke_pick(&stroke_app, points, pre);
@@ -800,10 +943,16 @@ fn start_hook_event_router(app: AppHandle, rx: mpsc::Receiver<HookEvent>) {
                         log::info!("PenEnd (picked_any={picked_any})");
                         pending_raw_capture = None;
                         pending_tap_allow_bg = false;
+                        active_drag_mode = pick::adapters::office::OfficeDragMode::NormalStroke;
+                        active_drag_hwnd = 0;
+                        hover_ibeam_active = false;
                         if let Ok(mut d) = bg_dwell.lock() {
                             *d = None;
                         }
                         if let Ok(mut guard) = hover_slot.0.lock() {
+                            *guard = None;
+                        }
+                        if let Ok(mut guard) = word_sel_slot.0.lock() {
                             *guard = None;
                         }
                         cursor::restore_system_cursors();

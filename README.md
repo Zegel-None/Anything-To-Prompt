@@ -32,7 +32,30 @@
   - **文件 / Office / 专业软件**：资源管理器选区自动附带（含目录统计与 Git 分支）、Word / Excel / PPT / WPS / Outlook / SolidWorks / AutoCAD（通过中完整性 Broker 安全读取 COM）、微信 / 飞书 / 钉钉 / QQ / Obsidian / Unity / Unreal / Blender / Steam。
 - **红框编号调试截图自动轮转**：本地保存在 `%LOCALAPPDATA%\AnythingToPrompt\captures\`，不直接上传图片，仅在胶囊隐藏上下文附带路径供智能体按需查阅，发送满 20 条消息或超时 60 分钟自动清理。
 
-### 3. 极简无遮挡悬浮卡片
+### 3. Office / WPS 原生选择模式 & 实时原地修改生态依赖
+- **专为办公三件套定制的拾取手感**（兼容 **Microsoft Office 2016 ~ 2026** 与 **WPS 最新版**）：
+  - **Word / WPS 文字**：选择模式下拖拽**不再画红线**，自动切换发光 I-beam 光标实时划选文字，胶囊附带选中文本、页码、段落上下文及精确字符偏移 `rangeStart..rangeEnd`。
+  - **Excel / WPS 表格**：单击精准选中单个单元格（`Sheet!C5`，含显示值/原值/公式/行列标题），滑动拖拽显示绿色框选（**不画红线**）抓取区域表格与公式。
+  - **PowerPoint / WPS 演示**：单击精准选中单个设计元素（文本框、形状、图片、表格及组合子元素），抓取 `SlideIndex`、`ShapeId`、几何坐标与样式；**拖拽仍保持画红线批注不变**。
+  - **办公/画布类软件自动忽略背景**：在 Office / WPS 三件套、IDE、PDF、笔记及设计画布软件中自动关闭背景 0.5s 停顿框选，专注内容本身不误触。
+- **不关闭原文档的实时修改生态依赖（全 MIT 协议）**：
+  - 传统 `python-docx` / `openpyxl` / `python-pptx` 在文档打开时会撞文件锁。Anything-to-Prompt 的胶囊输出精准定位坐标，并自动路由到以下成熟开源实时 MCP 依赖：
+
+  | 兼容套件 | MCP 名称 | 依赖项目 | License |
+  | :--- | :--- | :--- | :---: |
+  | **MS Office 2016 ~ 2026**（Excel） | `excel-live` | [`negokaz/excel-mcp-server`](https://github.com/negokaz/excel-mcp-server) | MIT |
+  | **MS Office 2016 ~ 2026**（Word） | `word-live` | [`ykarapazar/word-mcp-live`](https://github.com/ykarapazar/word-mcp-live) | MIT |
+  | **MS Office 2016 ~ 2026**（PPT） | `ppt-live` | [`ykuwai/ppt-mcp`](https://github.com/ykuwai/ppt-mcp) | MIT |
+  | **WPS 最新版**（文字 / 表格 / 演示） | `wps-office` | [`lc2panda/wps-skills`](https://github.com/lc2panda/wps-skills) | MIT |
+
+  一键自动探测并安装对应生态依赖（可加 `-ConfigureDsh` 自动写入 DSH MCP 配置）：
+
+  ```powershell
+  powershell -ExecutionPolicy Bypass -File .\scripts\install-office-mcp.ps1 -ConfigureDsh
+  # 或显式指定：-Suite wps | -Suite msoffice | -Suite all
+  ```
+
+### 4. 极简无遮挡悬浮卡片
 - **零隐形点击遮挡**：Win32 `SetWindowRgn` 动态圆角并集裁剪，折叠态仅为 `56px` 干净两行窄条，展开态向上生长，收起后原展开区 **100% 鼠标穿透**。
 - **纯净对话流**：展开态自动过滤工具调用与思考块，相邻消息以精致深色阴影线分隔；左上角一排同心圆点代表 AI 历次回复（最左为最新回复，点击跳转），正中绝对居中拖拽调高把手，右上角无框斜图钉（空心/纯白实心固定）。
 - **零侵入 DSH WebUI**：内置唯一配套插件 `@local/anything-to-prompt` 仅在 Anything-to-Prompt 自身悬浮窗（`?dsh_bar_clone=1`）生效，绝不向浏览器打开的 DSH 正常对话页注入任何样式或组件。
@@ -48,7 +71,8 @@ anything-to-prompt/
 ├── packages/
 │   └── anything-to-prompt/           # 内置 DSH 配套插件 (@local/anything-to-prompt) 源码
 ├── scripts/
-│   └── install-plugin.ps1            # 可选：手动安装/修复 @local/anything-to-prompt 插件脚本
+│   ├── install-plugin.ps1            # 可选：手动安装/修复 @local/anything-to-prompt 插件脚本
+│   └── install-office-mcp.ps1        # 可选：一键安装 Office 2016-2026 / WPS 实时编辑 MCP 生态依赖
 ├── LICENSE                           # MIT License
 └── README.md
 ```

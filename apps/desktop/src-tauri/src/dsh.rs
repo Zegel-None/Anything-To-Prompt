@@ -96,13 +96,13 @@ pub fn scan_live_instances(dsh_home: &Path, preferred_port: u16) -> Option<Insta
             if rec.port == 0 || rec.launch_url.trim().is_empty() {
                 continue;
             }
-            if is_pid_alive(rec.pid) && is_port_listening(rec.port, 300) {
-                if !valid
+            if is_pid_alive(rec.pid)
+                && is_port_listening(rec.port, 300)
+                && !valid
                     .iter()
                     .any(|existing: &InstanceRecord| existing.port == rec.port)
-                {
-                    valid.push(rec);
-                }
+            {
+                valid.push(rec);
             }
         }
     }

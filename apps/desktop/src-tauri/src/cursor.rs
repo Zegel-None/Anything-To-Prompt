@@ -10,10 +10,13 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 static TECH_CURSOR_ACTIVE: AtomicBool = AtomicBool::new(false);
+static IBEAM_OVERRIDE_ACTIVE: AtomicBool = AtomicBool::new(false);
 
 const CURSOR_SIZE: usize = 64;
 const HOTSPOT_X: u32 = 16;
 const HOTSPOT_Y: u32 = 16;
+const IBEAM_HOTSPOT_X: u32 = 32;
+const IBEAM_HOTSPOT_Y: u32 = 32;
 
 fn dist_to_segment(px: f32, py: f32, ax: f32, ay: f32, bx: f32, by: f32) -> f32 {
     let abx = bx - ax;
@@ -141,8 +144,58 @@ pub fn render_tech_cursor_bgra(size: usize) -> Vec<u8> {
     buf
 }
 
-fn create_tech_hcursor() -> Option<HCURSOR> {
-    let pixels = render_tech_cursor_bgra(CURSOR_SIZE);
+/// Signed distance to a crisp 20px-tall text I-beam cursor centered at `(32.0, 32.0)`.
+fn ibeam_sdf(px: f32, py: f32) -> f32 {
+    let d_stem = dist_to_segment(px, py, 32.0, 22.0, 32.0, 42.0);
+    let d_top = dist_to_segment(px, py, 28.0, 22.0, 36.0, 22.0);
+    let d_bot = dist_to_segment(px, py, 28.0, 42.0, 36.0, 42.0);
+    d_stem.min(d_top).min(d_bot) - 1.05
+}
+
+/// Renders a matching 64x64 32-bit BGRA text I-beam cursor with razor-crisp white core
+/// and tight electric-blue outer glow for Word / WPS text selection mode.
+pub fn render_tech_ibeam_bgra(size: usize) -> Vec<u8> {
+    let mut buf = vec![0u8; size * size * 4];
+    for y in 0..size {
+        for x in 0..size {
+            let px = x as f32 + 0.5;
+            let py = y as f32 + 0.5;
+            let sdf = ibeam_sdf(px, py);
+            let (mut r, mut g, mut b, mut a) = (0.0f32, 0.0f32, 0.0f32, 0.0f32);
+            if sdf < 0.0 {
+                // Crisp dark-bordered white I-beam readable on both white Word pages and dark themes
+                let dist_in = -sdf;
+                r = 255.0;
+                g = 255.0;
+                b = 255.0;
+                a = (dist_in * 1.4).clamp(0.88, 1.0);
+            } else if sdf < 6.0 {
+                let dark_rim = (1.0 - sdf / 1.15).clamp(0.0, 1.0) * 0.72;
+                let glow = (-(sdf * sdf) / (2.0 * 2.0 * 2.0)).exp() * 0.78;
+                let color_t = (sdf / 3.0).clamp(0.0, 1.0);
+                let gr = lerp(135.0, 0.0, color_t);
+                let gg = lerp(228.0, 136.0, color_t);
+                let gb = 255.0;
+                a = (dark_rim + glow * (1.0 - dark_rim)).clamp(0.0, 1.0);
+                if a > 0.001 {
+                    r = (18.0 * dark_rim + gr * glow * (1.0 - dark_rim)) / a;
+                    g = (28.0 * dark_rim + gg * glow * (1.0 - dark_rim)) / a;
+                    b = (48.0 * dark_rim + gb * glow * (1.0 - dark_rim)) / a;
+                }
+            }
+            if a > 0.001 {
+                let idx = (y * size + x) * 4;
+                buf[idx] = (b * a).round().clamp(0.0, 255.0) as u8;
+                buf[idx + 1] = (g * a).round().clamp(0.0, 255.0) as u8;
+                buf[idx + 2] = (r * a).round().clamp(0.0, 255.0) as u8;
+                buf[idx + 3] = (a * 255.0).round().clamp(0.0, 255.0) as u8;
+            }
+        }
+    }
+    buf
+}
+
+fn create_hcursor_from_bgra(pixels: &[u8], hotspot_x: u32, hotspot_y: u32) -> Option<HCURSOR> {
     unsafe {
         let mut bi = BITMAPV5HEADER {
             bV5Size: std::mem::size_of::<BITMAPV5HEADER>() as u32,
@@ -187,8 +240,8 @@ fn create_tech_hcursor() -> Option<HCURSOR> {
 
         let icon_info = ICONINFO {
             fIcon: false.into(),
-            xHotspot: HOTSPOT_X,
-            yHotspot: HOTSPOT_Y,
+            xHotspot: hotspot_x,
+            yHotspot: hotspot_y,
             hbmMask: hbm_mask,
             hbmColor: hbm_color,
         };
@@ -207,18 +260,29 @@ fn create_tech_hcursor() -> Option<HCURSOR> {
     }
 }
 
+fn create_tech_hcursor() -> Option<HCURSOR> {
+    let pixels = render_tech_cursor_bgra(CURSOR_SIZE);
+    create_hcursor_from_bgra(&pixels, HOTSPOT_X, HOTSPOT_Y)
+}
+
+fn create_tech_ibeam_hcursor() -> Option<HCURSOR> {
+    let pixels = render_tech_ibeam_bgra(CURSOR_SIZE);
+    create_hcursor_from_bgra(&pixels, IBEAM_HOTSPOT_X, IBEAM_HOTSPOT_Y)
+}
+
 pub fn enable_tech_cursor() {
     if TECH_CURSOR_ACTIVE.swap(true, Ordering::AcqRel) {
         return;
     }
+    IBEAM_OVERRIDE_ACTIVE.store(false, Ordering::Release);
     let Some(base_cursor) = create_tech_hcursor() else {
         TECH_CURSOR_ACTIVE.store(false, Ordering::Release);
         return;
     };
+    let ibeam_cursor = create_tech_ibeam_hcursor();
 
-    const SLOTS: &[SYSTEM_CURSOR_ID] = &[
+    const ARROW_SLOTS: &[SYSTEM_CURSOR_ID] = &[
         OCR_NORMAL,
-        OCR_IBEAM,
         OCR_HAND,
         OCR_CROSS,
         OCR_APPSTARTING,
@@ -227,16 +291,50 @@ pub fn enable_tech_cursor() {
     ];
 
     unsafe {
-        for &slot in SLOTS {
+        for &slot in ARROW_SLOTS {
             if let Ok(copy) = CopyIcon(HICON(base_cursor.0)) {
                 let _ = SetSystemCursor(HCURSOR(copy.0), slot);
             }
+        }
+        if let Some(ib) = ibeam_cursor {
+            if let Ok(copy) = CopyIcon(HICON(ib.0)) {
+                let _ = SetSystemCursor(HCURSOR(copy.0), OCR_IBEAM);
+            }
+            let _ = DestroyIcon(HICON(ib.0));
+        } else if let Ok(copy) = CopyIcon(HICON(base_cursor.0)) {
+            let _ = SetSystemCursor(HCURSOR(copy.0), OCR_IBEAM);
         }
         let _ = DestroyIcon(HICON(base_cursor.0));
     }
 }
 
+/// Switches the primary selection cursor (`OCR_NORMAL`) to the glowing text I-beam while
+/// dragging over Word / WPS text, and switches it back to the glass arrow once done.
+pub fn set_ibeam_override(enable: bool) {
+    if !TECH_CURSOR_ACTIVE.load(Ordering::Acquire) {
+        return;
+    }
+    let prev = IBEAM_OVERRIDE_ACTIVE.swap(enable, Ordering::AcqRel);
+    if prev == enable {
+        return;
+    }
+    let next = if enable {
+        create_tech_ibeam_hcursor()
+    } else {
+        create_tech_hcursor()
+    };
+    if let Some(cur) = next {
+        unsafe {
+            if let Ok(copy) = CopyIcon(HICON(cur.0)) {
+                let _ = SetSystemCursor(HCURSOR(copy.0), OCR_NORMAL);
+            }
+            let _ = DestroyIcon(HICON(cur.0));
+        }
+    }
+}
+
 pub fn restore_system_cursors() {
+    IBEAM_OVERRIDE_ACTIVE.store(false, Ordering::Release);
     if !TECH_CURSOR_ACTIVE.swap(false, Ordering::AcqRel) {
         return;
     }

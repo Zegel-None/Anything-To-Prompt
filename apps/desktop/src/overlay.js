@@ -22,6 +22,7 @@
     hover: null,
     dwell: null, // { key, originX, originY, startTs, unlocked }
     liveStroke: [],
+    liveDrag: null, // { mode: 'word_text' | 'excel_box', start: {x,y}, end: {x,y} }
     pickedItems: [],
     toastTimer: null,
     rafId: 0,
@@ -140,7 +141,7 @@
     while (state.trail.length > 0 && state.trail[0].ts < cutoff) {
       state.trail.shift();
     }
-    if (state.trail.length < 2 || state.liveStroke.length > 0) return;
+    if (state.trail.length < 2 || state.liveStroke.length > 0 || state.liveDrag) return;
 
     ctx.save();
     ctx.lineCap = 'round';
@@ -226,21 +227,36 @@
         const fy = Math.max(3, r.y);
         const fw = Math.min(window.innerWidth - 3, r.x + r.w) - fx;
         const fh = Math.min(window.innerHeight - 3, r.y + r.h) - fy;
+        const isExcel = item.mode === 'excel_box' || item.mode === 'excel_cell';
+        const isWord = item.mode === 'word_text';
+        const strokeColor = isExcel ? '#10b981' : isWord ? '#38bdf8' : '#ffffff';
+        const glowColor = isExcel
+          ? 'rgba(16, 185, 129, 0.72)'
+          : isWord
+          ? 'rgba(56, 189, 248, 0.72)'
+          : 'rgba(0, 140, 255, 0.85)';
+        const badgeColor = isExcel ? '#10b981' : isWord ? '#0284c7' : '#0084ff';
         ctx.save();
-        ctx.strokeStyle = '#ffffff';
-        ctx.shadowColor = 'rgba(0, 140, 255, 0.85)';
+        if (isExcel) {
+          ctx.fillStyle = 'rgba(16, 185, 129, 0.10)';
+        } else if (isWord) {
+          ctx.fillStyle = 'rgba(56, 189, 248, 0.12)';
+        }
+        ctx.strokeStyle = strokeColor;
+        ctx.shadowColor = glowColor;
         ctx.shadowBlur = 12;
-        ctx.lineWidth = 1.8;
+        ctx.lineWidth = isExcel ? 2.0 : 1.8;
         ctx.beginPath();
-        ctx.roundRect(fx, fy, fw, fh, 6);
+        ctx.roundRect(fx, fy, fw, fh, isExcel ? 3 : 6);
+        if (isExcel || isWord) ctx.fill();
         ctx.stroke();
         ctx.restore();
-        drawNumberBadge(Math.min(window.innerWidth - 14, fx + fw + 8), Math.max(14, fy - 6), item.n, '#0084ff');
+        drawNumberBadge(Math.min(window.innerWidth - 14, fx + fw + 8), Math.max(14, fy - 6), item.n, badgeColor);
       }
     }
 
     // 2. Hover feedback: immediate for foreground elements; 0.5s dwell ring -> highlight for backgrounds/desktop
-    if (state.liveStroke.length === 0 && state.hover) {
+    if (state.liveStroke.length === 0 && !state.liveDrag && state.hover) {
       const kind = state.hover.kind || (state.hover.ok ? 'element' : 'none');
       if (kind === 'element' && state.hover.rect) {
         drawHighlightFrame(
@@ -270,8 +286,46 @@
       }
     }
 
-    // 3. Live red freehand stroke
-    if (state.liveStroke.length > 1) {
+    // 3. Live drag feedback:
+    //    - word_text: subtle sky-blue text-selection band (NO red line)
+    //    - excel_box: crisp emerald rectangular cell marquee (NO red line)
+    //    - stroke (default + PPT): classic red freehand line
+    if (state.liveDrag && state.liveDrag.start && state.liveDrag.end) {
+      const a = toCssPt(state.liveDrag.start.x, state.liveDrag.start.y);
+      const b = toCssPt(state.liveDrag.end.x, state.liveDrag.end.y);
+      const rx = Math.min(a.x, b.x);
+      const ry = Math.min(a.y, b.y);
+      const rw = Math.max(4, Math.abs(b.x - a.x));
+      const rh = Math.max(16, Math.abs(b.y - a.y));
+
+      ctx.save();
+      if (state.liveDrag.mode === 'excel_box') {
+        ctx.fillStyle = 'rgba(16, 185, 129, 0.12)';
+        ctx.strokeStyle = '#10b981';
+        ctx.shadowColor = 'rgba(16, 185, 129, 0.55)';
+        ctx.shadowBlur = 10;
+        ctx.lineWidth = 2.0;
+        ctx.beginPath();
+        ctx.roundRect(rx, ry, rw, rh, 3);
+        ctx.fill();
+        ctx.stroke();
+        ctx.restore();
+        drawRoundedTag(b.x + 14, b.y + 14, '框选单元格', true);
+      } else if (state.liveDrag.mode === 'word_text') {
+        ctx.fillStyle = 'rgba(56, 189, 248, 0.13)';
+        ctx.strokeStyle = 'rgba(56, 189, 248, 0.65)';
+        ctx.setLineDash([4, 3]);
+        ctx.lineWidth = 1.2;
+        ctx.beginPath();
+        ctx.roundRect(rx, ry, rw, rh, 3);
+        ctx.fill();
+        ctx.stroke();
+        ctx.restore();
+        drawRoundedTag(b.x + 14, b.y + 14, '光标选字', true);
+      } else {
+        ctx.restore();
+      }
+    } else if (state.liveStroke.length > 1) {
       ctx.save();
       ctx.strokeStyle = '#ef4444';
       ctx.shadowColor = 'rgba(239, 68, 68, 0.6)';
@@ -297,7 +351,7 @@
   function needsAnimationLoop() {
     if (!state.active) return false;
     if (state.trail.length > 0) return true;
-    if (state.dwell && !state.dwell.unlocked && state.liveStroke.length === 0) return true;
+    if (state.dwell && !state.dwell.unlocked && state.liveStroke.length === 0 && !state.liveDrag) return true;
     return false;
   }
 
@@ -429,6 +483,7 @@
       state.hover = null;
       state.dwell = null;
       state.liveStroke = [];
+      state.liveDrag = null;
       state.pickedItems = [];
       state.trail = [];
       redraw();
@@ -466,7 +521,13 @@
 
     evApi.listen('pen:stroke', (ev) => {
       const p = ev.payload || {};
-      state.liveStroke = Array.isArray(p.points) ? p.points : [];
+      if (p.mode === 'word_text' || p.mode === 'excel_box') {
+        state.liveStroke = [];
+        state.liveDrag = { mode: p.mode, start: p.start, end: p.end };
+      } else {
+        state.liveDrag = null;
+        state.liveStroke = Array.isArray(p.points) ? p.points : [];
+      }
       state.trail = [];
       state.dwell = null;
       redraw();
@@ -475,6 +536,7 @@
     evApi.listen('pen:picked', (ev) => {
       const p = ev.payload || {};
       state.liveStroke = [];
+      state.liveDrag = null;
       state.pickedItems.push(p);
       redraw();
     });
@@ -495,6 +557,7 @@
       state.dwell = null;
       state.trail = [];
       state.liveStroke = [];
+      state.liveDrag = null;
       state.pickedItems = [];
       stopAnimLoop();
       if (toastEl) toastEl.style.display = 'none';
