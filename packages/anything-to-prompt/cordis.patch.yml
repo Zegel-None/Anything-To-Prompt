@@ -1,0 +1,4 @@
+# @local/anything-to-prompt — Anything-to-Prompt 官方内置插件
+- insert:
+    - id: anything-to-prompt-host
+      name: '@local/anything-to-prompt'

@@ -1,0 +1,7 @@
+{
+  "meta": {
+    "title": "Anything-to-Prompt (Built-in Companion)",
+    "description": "Managed automatically by Anything-to-Prompt desktop: powers the floating ambient bar, session picker chip, and desktop element-to-prompt context chips without modifying DSH WebUI.",
+    "detail": "docs/DETAIL.zh.md"
+  }
+}

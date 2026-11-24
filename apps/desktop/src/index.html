@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Anything-to-Prompt</title>
+  <style>
+    html, body {
+      margin: 0;
+      padding: 0;
+      width: 100vw;
+      height: 100vh;
+      overflow: hidden;
+      background: transparent;
+      user-select: none;
+      font-family: system-ui, -apple-system, "Segoe UI", Roboto, "PingFang SC", sans-serif;
+    }
+    .pill {
+      position: fixed;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      height: 56px;
+      box-sizing: border-box;
+      border-radius: 24px;
+      background: #2c2c2e;
+      box-shadow: 0 0 0 0.5px rgba(255, 255, 255, 0.14) inset;
+      color: #f3f4f6;
+      padding: 0 16px 0 18px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+    }
+    .left {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      min-width: 0;
+      font-size: 13px;
+    }
+    .prefix {
+      font-weight: 650;
+      color: #ffffff;
+      flex-shrink: 0;
+    }
+    .status {
+      color: #d1d5db;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 999px;
+      background: #60a5fa;
+      flex-shrink: 0;
+      animation: pulse 1.3s ease-in-out infinite;
+    }
+    @keyframes pulse {
+      0%, 100% { opacity: 0.35; }
+      50% { opacity: 1; }
+    }
+    .retry {
+      padding: 4px 12px;
+      border-radius: 999px;
+      border: 1px solid rgba(255, 255, 255, 0.22);
+      background: rgba(255, 255, 255, 0.09);
+      color: #f9fafb;
+      font-size: 12px;
+      font-weight: 500;
+      cursor: pointer;
+      flex-shrink: 0;
+    }
+    .retry:hover {
+      background: rgba(255, 255, 255, 0.16);
+    }
+  </style>
+</head>
+<body>
+  <div class="pill">
+    <div class="left">
+      <span class="dot" id="dot"></span>
+      <span class="prefix">Anything-to-Prompt：</span>
+      <span class="status" id="msg">正在连接 DeepSeek Harness…</span>
+    </div>
+    <button type="button" class="retry" id="retryBtn">重试连接</button>
+  </div>
+  <script>
+    const params = new URLSearchParams(window.location.search);
+    const customMsg = params.get('msg');
+    if (customMsg) {
+      document.getElementById('msg').textContent = customMsg;
+      if (params.get('warn') === '1') {
+        document.getElementById('dot').style.background = '#f59e0b';
+      }
+    }
+    document.getElementById('retryBtn').addEventListener('click', () => {
+      document.getElementById('msg').textContent = '正在重新探测并连接 DeepSeek Harness…';
+      if (window.__TAURI__ && window.__TAURI__.core) {
+        window.__TAURI__.core.invoke('bar_reconnect').catch(() => {});
+      }
+    });
+  </script>
+</body>
+</html>

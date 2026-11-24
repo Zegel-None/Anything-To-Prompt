@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-bar-report"
+description = "Enables the bar_report command without any pre-configured scope."
+commands.allow = ["bar_report"]
+
+[[permission]]
+identifier = "deny-bar-report"
+description = "Denies the bar_report command without any pre-configured scope."
+commands.deny = ["bar_report"]

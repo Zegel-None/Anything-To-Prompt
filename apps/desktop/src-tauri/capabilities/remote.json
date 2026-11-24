@@ -1,0 +1,20 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "remote-dsh-capability",
+  "description": "Allow Bar window loaded from local DSH HTTP server to call Tauri commands",
+  "windows": ["bar"],
+  "remote": {
+    "urls": [
+      "http://127.0.0.1:*",
+      "http://127.0.0.1:*/*",
+      "http://localhost:*",
+      "http://localhost:*/*"
+    ]
+  },
+  "permissions": [
+    "core:default",
+    "core:event:default",
+    "allow-bar-report",
+    "allow-bar-reconnect"
+  ]
+}

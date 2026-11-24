@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Anything-to-Prompt Overlay</title>
+  <style>
+    html, body {
+      margin: 0;
+      padding: 0;
+      width: 100vw;
+      height: 100vh;
+      overflow: hidden;
+      background: transparent;
+      pointer-events: none;
+      user-select: none;
+      font-family: system-ui, -apple-system, "Segoe UI", Roboto, "PingFang SC", sans-serif;
+    }
+    canvas {
+      position: fixed;
+      inset: 0;
+      width: 100vw;
+      height: 100vh;
+      pointer-events: none;
+    }
+    #toast {
+      position: fixed;
+      left: 50%;
+      bottom: 92px;
+      transform: translateX(-50%);
+      padding: 7px 14px;
+      border-radius: 10px;
+      font-size: 12.5px;
+      font-weight: 600;
+      background: rgba(24, 24, 27, 0.90);
+      color: #fde68a;
+      border: 1px solid rgba(251, 191, 36, 0.45);
+      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.38);
+      display: none;
+      pointer-events: none;
+    }
+  </style>
+</head>
+<body>
+  <canvas id="cv"></canvas>
+  <div id="toast"></div>
+  <script src="./overlay.js"></script>
+</body>
+</html>

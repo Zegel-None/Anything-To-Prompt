@@ -1,0 +1,7 @@
+{
+  "meta": {
+    "title": "Anything-to-Prompt (内置配套插件)",
+    "description": "由 Anything-to-Prompt 桌面端自动管理：为悬浮条提供极简对话卡、工作区/对话多级胶囊与桌面指针引用胶囊注入（不注入 DSH 普通 WebUI）。",
+    "detail": "docs/DETAIL.zh.md"
+  }
+}
