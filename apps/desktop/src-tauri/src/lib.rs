@@ -667,6 +667,84 @@ fn apply_capture_affinity_to_windows(app: &AppHandle, exclude: bool) {
     }
 }
 
+fn pick_folder_dialog_blocking(initial_dir: Option<String>) -> Option<String> {
+    use std::ffi::OsStr;
+    use std::os::windows::ffi::OsStrExt;
+    use std::path::{Path, PathBuf};
+    use windows::core::{PCWSTR, PWSTR};
+    use windows::Win32::System::Com::{
+        CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize, CLSCTX_INPROC_SERVER,
+        COINIT_APARTMENTTHREADED,
+    };
+    use windows::Win32::UI::Shell::{
+        FileOpenDialog, IFileOpenDialog, IShellItem, SHCreateItemFromParsingName,
+        FOS_FORCEFILESYSTEM, FOS_PATHMUSTEXIST, FOS_PICKFOLDERS, SIGDN_FILESYSPATH,
+    };
+
+    let resolved_dir: Option<PathBuf> = initial_dir
+        .as_deref()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(|s| PathBuf::from(s))
+        .and_then(|p| {
+            if p.is_dir() {
+                Some(p)
+            } else {
+                p.parent().filter(|par| par.is_dir()).map(Path::to_path_buf)
+            }
+        })
+        .or_else(dirs::home_dir);
+
+    unsafe {
+        let hr = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        let com_inited = hr.is_ok();
+        let result = (|| -> Option<String> {
+            let dialog: IFileOpenDialog =
+                CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER).ok()?;
+            let opts = dialog.GetOptions().ok()?;
+            dialog
+                .SetOptions(opts | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST)
+                .ok()?;
+            let title_w: Vec<u16> = OsStr::new("选择或新建工作区文件夹")
+                .encode_wide()
+                .chain(std::iter::once(0))
+                .collect();
+            let _ = dialog.SetTitle(PCWSTR(title_w.as_ptr()));
+            if let Some(dir) = resolved_dir {
+                let dir_w: Vec<u16> = OsStr::new(&dir.to_string_lossy().to_string())
+                    .encode_wide()
+                    .chain(std::iter::once(0))
+                    .collect();
+                if let Ok(item) =
+                    SHCreateItemFromParsingName::<_, _, IShellItem>(PCWSTR(dir_w.as_ptr()), None)
+                {
+                    let _ = dialog.SetFolder(&item);
+                }
+            }
+            if dialog.Show(None).is_err() {
+                return None;
+            }
+            let item = dialog.GetResult().ok()?;
+            let display: PWSTR = item.GetDisplayName(SIGDN_FILESYSPATH).ok()?;
+            let picked = display.to_string().ok();
+            CoTaskMemFree(Some(display.0 as *const std::ffi::c_void));
+            picked.filter(|s| !s.trim().is_empty())
+        })();
+        if com_inited {
+            CoUninitialize();
+        }
+        result
+    }
+}
+
+#[tauri::command]
+async fn app_pick_folder(initial_dir: Option<String>) -> Option<String> {
+    tauri::async_runtime::spawn_blocking(move || pick_folder_dialog_blocking(initial_dir))
+        .await
+        .ok()
+        .flatten()
+}
+
 #[tauri::command]
 fn app_get_settings(app: AppHandle) -> AppSettingsSnapshot {
     build_settings_snapshot(&app)
@@ -1932,6 +2010,7 @@ pub fn run() {
             app_get_settings,
             app_update_settings,
             app_settings_action,
+            app_pick_folder,
             quick_search_query,
             quick_search_status,
             quick_search_build_capsule,

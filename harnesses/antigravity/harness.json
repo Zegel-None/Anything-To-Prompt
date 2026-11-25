@@ -16,7 +16,7 @@
   "cornerRadius": 16,
   "fallbackSlabHeight": 158,
   "chipIconStyle": "dot",
-  "newWorkspaceLabel": "指定目录新开…",
+  "newWorkspaceLabel": "新建工作区…",
   "detailButtonTitle": "点击将 Antigravity 拉到最前并展示这个对话",
   "emptyHistoryHint": "Antigravity 已就绪 — 发消息后自动同步到桌面端 CLI Project",
   "emptyLipHint": "Antigravity · CLI Project 已就绪 · 双击 Ctrl 唤出输入框",

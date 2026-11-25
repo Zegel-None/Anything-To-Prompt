@@ -233,25 +233,16 @@ impl BarStateMachine {
                 }
                 match self.visibility {
                     VisibilityState::Hidden => TransitionEffects::none(),
-                    VisibilityState::Summon => {
-                        self.visibility = VisibilityState::Lip;
+                    VisibilityState::Summon | VisibilityState::Lip => {
+                        // Never leave a lingering Lip bubble on dismiss — Lip is exclusively
+                        // reserved for incoming new-message notifications.
+                        self.visibility = VisibilityState::Hidden;
                         self.pinned = false;
                         self.popup_open = false;
                         self.composer_focused = false;
                         TransitionEffects {
-                            window_action: Some(WindowAction::ShowNoActivate),
-                            bridge_mode: Some(BridgeMode::Lip),
-                            reset_pick_counter: false,
-                            record_sent_message: false,
-                        }
-                    }
-                    VisibilityState::Lip => {
-                        self.visibility = VisibilityState::Hidden;
-                        self.pinned = false;
-                        self.popup_open = false;
-                        TransitionEffects {
                             window_action: Some(WindowAction::Hide),
-                            bridge_mode: None,
+                            bridge_mode: Some(BridgeMode::Lip),
                             reset_pick_counter: false,
                             record_sent_message: false,
                         }
@@ -267,9 +258,12 @@ impl BarStateMachine {
                     record_sent_message: true,
                 };
                 if self.visibility == VisibilityState::Summon && !self.pinned {
-                    self.visibility = VisibilityState::Lip;
+                    // Close cleanly after sending instead of leaving a lingering empty Lip bubble.
+                    // The Lip bubble will pop up automatically when a real new AI reply arrives.
+                    self.visibility = VisibilityState::Hidden;
+                    self.popup_open = false;
                     self.composer_focused = false;
-                    fx.window_action = Some(WindowAction::ShowNoActivate);
+                    fx.window_action = Some(WindowAction::Hide);
                     fx.bridge_mode = Some(BridgeMode::Lip);
                 }
                 fx
@@ -502,19 +496,21 @@ mod tests {
     }
 
     #[test]
-    fn submitted_collapses_summon_unless_pinned_and_resets_counter() {
+    fn submitted_hides_summon_directly_without_lingering_lip_and_resets_counter() {
         let mut sm = BarStateMachine::new();
         sm.apply(StateEvent::DoubleCtrlOpen);
 
         let fx = sm.apply(StateEvent::Submitted);
-        assert_eq!(sm.visibility, VisibilityState::Lip);
+        assert_eq!(sm.visibility, VisibilityState::Hidden);
+        assert_eq!(fx.window_action, Some(WindowAction::Hide));
         assert!(fx.reset_pick_counter);
         assert!(fx.record_sent_message);
 
-        // Outside click while in Lip also hides all
-        let fx_out = sm.apply(StateEvent::OutsideClickHide);
+        // Esc (StepDown) from Summon also hides cleanly without leaving a Lip bubble
+        sm.apply(StateEvent::DoubleCtrlOpen);
+        let fx_esc = sm.apply(StateEvent::StepDown);
         assert_eq!(sm.visibility, VisibilityState::Hidden);
-        assert_eq!(fx_out.window_action, Some(WindowAction::Hide));
+        assert_eq!(fx_esc.window_action, Some(WindowAction::Hide));
     }
 
     #[test]

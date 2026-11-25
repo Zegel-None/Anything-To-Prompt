@@ -16,7 +16,7 @@
   "cornerRadius": 18,
   "fallbackSlabHeight": 168,
   "chipIconStyle": "dot",
-  "newWorkspaceLabel": "指定目录新开…",
+  "newWorkspaceLabel": "新建工作区…",
   "detailButtonTitle": "点击将 My Custom Harness 拉到最前并展示这个对话",
   "emptyHistoryHint": "My Custom Harness 已就绪 — 发消息后对话流将在此实时展开",
   "emptyLipHint": "My Custom Harness 已就绪 · 双击 Ctrl 唤出输入框",

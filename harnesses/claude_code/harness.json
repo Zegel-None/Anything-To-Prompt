@@ -16,7 +16,7 @@
   "cornerRadius": 18,
   "fallbackSlabHeight": 174,
   "chipIconStyle": "dot",
-  "newWorkspaceLabel": "指定目录新开…",
+  "newWorkspaceLabel": "新建工作区…",
   "detailButtonTitle": "点击将 Claude Code 拉到最前并展示这个对话",
   "emptyHistoryHint": "Claude Code CLI 已就绪 — 发消息后自动同步至 ~/.claude/projects 会话历史",
   "emptyLipHint": "Claude Code · CLI 已就绪 · 双击 Ctrl 唤出输入框",

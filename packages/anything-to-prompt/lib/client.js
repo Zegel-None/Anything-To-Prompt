@@ -162,7 +162,7 @@ window.__ModuleLoader__.load({
         cornerRadius: Number.isFinite(raw.cornerRadius) ? raw.cornerRadius : 18,
         fallbackSlabHeight: Number.isFinite(raw.fallbackSlabHeight) ? raw.fallbackSlabHeight : 168,
         chipIconStyle: raw.chipIconStyle || 'dot',
-        newWorkspaceLabel: raw.newWorkspaceLabel || (raw.useNativeComposer ? '新建工作区…' : '指定目录新开…'),
+        newWorkspaceLabel: raw.newWorkspaceLabel || '新建工作区…',
         detailButtonTitle: raw.detailButtonTitle || ('点击将 ' + (raw.label || id) + ' 拉到最前并展示这个对话'),
         emptyHistoryHint: raw.emptyHistoryHint || ((raw.fullLabel || raw.label || id) + ' 已就绪 — 发消息后对话流将在此实时展开'),
         emptyLipHint: raw.emptyLipHint || ((raw.label || id) + ' 已就绪 · 双击 Ctrl 唤出输入框'),
@@ -2705,14 +2705,19 @@ window.__ModuleLoader__.load({
           };
         }, []);
 
-        // Activity & explicit-intent message-submitted report
+        // Activity & explicit-intent message-submitted report.
+        // Only report an assistant reply once it contains non-empty text so blank streaming
+        // placeholders created right on Send never pop up an empty Lip bubble.
+        const latestAssistantHasText = Boolean(
+          latestAssistant && String(latestAssistant.text || '').trim().length > 0,
+        );
         useEffect(() => {
           if (!IS_BAR) return;
           sendBarReport({
             kind: 'activity',
             sessionId: effectiveSessionId,
-            latestAssistantId: latestAssistant ? String(latestAssistant.id) : '',
-            streaming: Boolean(latestAssistant && latestAssistant.streaming),
+            latestAssistantId: latestAssistantHasText ? String(latestAssistant.id) : '',
+            streaming: Boolean(latestAssistantHasText && latestAssistant && latestAssistant.streaming),
             userMessageCount,
           });
           if (activeHarness !== 'dsh') return;
@@ -2728,7 +2733,14 @@ window.__ModuleLoader__.load({
           } else if (userMessageCount < prev.userCount) {
             sessionSubBaselineRef.current = { sessionId, userCount: userMessageCount };
           }
-        }, [activeHarness, effectiveSessionId, sessionId, latestAssistant ? latestAssistant.id : '', Boolean(latestAssistant && latestAssistant.streaming), userMessageCount]);
+        }, [
+          activeHarness,
+          effectiveSessionId,
+          sessionId,
+          latestAssistantHasText ? String(latestAssistant.id) : '',
+          Boolean(latestAssistantHasText && latestAssistant && latestAssistant.streaming),
+          userMessageCount,
+        ]);
 
         // Also detect queued message submission while streaming in Bar mode
         useEffect(() => {
@@ -5206,16 +5218,46 @@ window.__ModuleLoader__.load({
           }
         };
 
+        const inferDefaultWorkspaceParent = (wsList) => {
+          if (!Array.isArray(wsList)) return null;
+          for (const g of wsList) {
+            const raw = g && g.path ? String(g.path).trim() : '';
+            if (!raw) continue;
+            const cleaned = raw.replace(/[\\/]+$/, '');
+            const idx = Math.max(cleaned.lastIndexOf('\\'), cleaned.lastIndexOf('/'));
+            if (idx > 2) {
+              return cleaned.slice(0, idx);
+            }
+            if (cleaned) return cleaned;
+          }
+          return null;
+        };
+
         const createWorkspaceAtPath = async (pickedPath, targetHarness = browsedHarness) => {
           if (!pickedPath) return;
           const targetMeta = getHarnessMeta(targetHarness);
           if (!targetMeta.useNativeComposer) {
             const label = workspaceBasename(pickedPath);
-            startNewExternalConversation(targetHarness, {
-              workspaceId: targetHarness === 'antigravity' ? 'default-cli-project' : pickedPath,
+            const newGroup = {
+              workspaceId: pickedPath,
               label,
               path: pickedPath,
-            });
+              convs: [],
+            };
+            const curCat = dsbRuntime.externalCatalogs[targetHarness];
+            if (curCat && Array.isArray(curCat.groups)) {
+              const normKey = pickedPath.replace(/[\\/]+$/, '').toLowerCase();
+              const exists = curCat.groups.some(
+                (g) => g && g.path && String(g.path).replace(/[\\/]+$/, '').toLowerCase() === normKey,
+              );
+              if (!exists) {
+                dsbRuntime.externalCatalogs[targetHarness] = {
+                  ...curCat,
+                  groups: [newGroup, ...curCat.groups],
+                };
+              }
+            }
+            startNewExternalConversation(targetHarness, newGroup);
             if (targetHarness !== activeHarness) {
               setActiveHarness(targetHarness, true, true);
             }
@@ -5236,22 +5278,28 @@ window.__ModuleLoader__.load({
 
         const handleCreateWorkspace = async () => {
           setPickerError('');
-          if (!browsedMeta.useNativeComposer) {
-            setManualPathMode(true);
-            return;
-          }
+          const initialDir = inferDefaultWorkspaceParent(groups);
           dsbRuntime.modalOpen = true;
           notifyBarRuntime();
           try {
             let pickedPath = null;
-            if (uiWorkspace && typeof uiWorkspace.pickDirectory === 'function') {
-              pickedPath = await uiWorkspace.pickDirectory();
-            } else if (directoryPicker && typeof directoryPicker.pick === 'function') {
-              const res = await directoryPicker.pick();
-              if (res && res.ok) pickedPath = res.value;
-            } else {
-              setManualPathMode(true);
-              return;
+            try {
+              pickedPath = await tauriInvoke('app_pick_folder', { initialDir });
+            } catch {
+              if (browsedMeta.useNativeComposer) {
+                if (uiWorkspace && typeof uiWorkspace.pickDirectory === 'function') {
+                  pickedPath = await uiWorkspace.pickDirectory();
+                } else if (directoryPicker && typeof directoryPicker.pick === 'function') {
+                  const res = await directoryPicker.pick();
+                  if (res && res.ok) pickedPath = res.value;
+                } else {
+                  setManualPathMode(true);
+                  return;
+                }
+              } else {
+                setManualPathMode(true);
+                return;
+              }
             }
             if (pickedPath) {
               await createWorkspaceAtPath(pickedPath, browsedHarness);
