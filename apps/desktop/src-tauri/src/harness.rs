@@ -546,6 +546,18 @@ fn parse_first_workspace_uri(raw: &str) -> String {
     clean_windows_path(trimmed)
 }
 
+fn is_antigravity_archived(home: &Path, conv_id: &str) -> bool {
+    let pbtxt = home
+        .join(".gemini")
+        .join("antigravity")
+        .join("annotations")
+        .join(format!("{conv_id}.pbtxt"));
+    let Ok(raw) = fs::read_to_string(&pbtxt) else {
+        return false;
+    };
+    raw.contains("archived:true") || raw.contains("archived: true")
+}
+
 pub fn load_antigravity_catalog() -> ExternalHarnessCatalog {
     let exe = resolve_agy_exe();
     let Some(home) = dirs::home_dir() else {
@@ -559,31 +571,24 @@ pub fn load_antigravity_catalog() -> ExternalHarnessCatalog {
     };
 
     let gemini_dir = home.join(".gemini");
-    let dbs = [
-        gemini_dir
-            .join("antigravity")
-            .join("conversation_summaries.db"),
-        gemini_dir
-            .join("antigravity-cli")
-            .join("conversation_summaries.db"),
-    ];
+    // Use Antigravity Desktop's authoritative DB only so archived/deleted CLI probes never pollute the list
+    let db_path = gemini_dir
+        .join("antigravity")
+        .join("conversation_summaries.db");
 
     // Map project_id -> (label, path, Vec<ExternalConversation>)
     let mut by_project: HashMap<String, (String, String, Vec<ExternalConversation>)> =
         HashMap::new();
     let mut seen_conv_ids: HashMap<String, usize> = HashMap::new();
 
-    // Always provide default CLI Project at the top so user can start a synced CLI session anytime
+    // Provide CLI Project at the bottom (matching Antigravity Desktop sidebar order)
     by_project.insert(
         "default-cli-project".to_string(),
-        ("CLI Project (桌面端同步)".to_string(), String::new(), Vec::new()),
+        ("CLI Project".to_string(), String::new(), Vec::new()),
     );
 
-    for db_path in dbs {
-        let Some(conn) = open_sqlite_readonly(&db_path) else {
-            continue;
-        };
-        let Ok(mut stmt) = conn.prepare(
+    if let Some(conn) = open_sqlite_readonly(&db_path) {
+        if let Ok(mut stmt) = conn.prepare(
             "SELECT conversation_id, COALESCE(title, ''), COALESCE(preview, ''), \
              COALESCE(CAST(strftime('%s', substr(last_modified_time, 1, 19)) AS INTEGER) * 1000, \
                       CAST(last_modified_time AS INTEGER), 0), \
@@ -592,86 +597,94 @@ pub fn load_antigravity_catalog() -> ExternalHarnessCatalog {
              FROM conversation_summaries \
              WHERE COALESCE(killed, 0) = 0 \
              ORDER BY last_modified_time DESC LIMIT 120",
-        ) else {
-            continue;
-        };
+        ) {
+            if let Ok(rows) = stmt.query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, String>(6)?,
+                    row.get::<_, String>(7)?,
+                ))
+            }) {
+                for row in rows.flatten() {
+                    let (conv_id, title, preview, updated_at, ws_uris, source, project_id, parent_id) =
+                        row;
+                    if conv_id.trim().is_empty() || !parent_id.trim().is_empty() {
+                        continue;
+                    }
+                    if seen_conv_ids.contains_key(&conv_id) {
+                        continue;
+                    }
+                    seen_conv_ids.insert(conv_id.clone(), 1);
 
-        let rows = stmt.query_map([], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, i64>(3)?,
-                row.get::<_, String>(4)?,
-                row.get::<_, String>(5)?,
-                row.get::<_, String>(6)?,
-                row.get::<_, String>(7)?,
-            ))
-        });
+                    // Match Antigravity Desktop sidebar: exclude archived conversations (stored in annotations/*.pbtxt)
+                    if is_antigravity_archived(&home, &conv_id) {
+                        continue;
+                    }
 
-        let Ok(rows) = rows else {
-            continue;
-        };
+                    // Exclude headless CLI one-shot/probe runs (empty title + CLI source) hidden by Antigravity Desktop
+                    if source.eq_ignore_ascii_case("CORTEX_TRAJECTORY_SOURCE_CLI")
+                        && title.trim().is_empty()
+                    {
+                        continue;
+                    }
 
-        for row in rows.flatten() {
-            let (conv_id, title, preview, updated_at, ws_uris, source, project_id, parent_id) = row;
-            if conv_id.trim().is_empty() || !parent_id.trim().is_empty() {
-                continue;
-            }
-            if seen_conv_ids.contains_key(&conv_id) {
-                continue;
-            }
-            seen_conv_ids.insert(conv_id.clone(), 1);
+                    let ws_path = parse_first_workspace_uri(&ws_uris);
+                    let normalized_pid = if project_id.trim().is_empty() {
+                        "default-cli-project".to_string()
+                    } else {
+                        project_id.trim().to_string()
+                    };
 
-            let ws_path = parse_first_workspace_uri(&ws_uris);
-            let normalized_pid = if project_id.trim().is_empty() {
-                "default-cli-project".to_string()
-            } else {
-                project_id.trim().to_string()
-            };
+                    let label = if normalized_pid == "default-cli-project" {
+                        "CLI Project".to_string()
+                    } else if normalized_pid == "outside-of-project" {
+                        "自由对话".to_string()
+                    } else if !ws_path.is_empty() {
+                        basename_of_path(&ws_path)
+                    } else {
+                        format!("项目 {}", &normalized_pid[..normalized_pid.len().min(8)])
+                    };
 
-            let label = if normalized_pid == "default-cli-project" {
-                "CLI Project (桌面端同步)".to_string()
-            } else if normalized_pid == "outside-of-project" {
-                "自由对话".to_string()
-            } else if !ws_path.is_empty() {
-                basename_of_path(&ws_path)
-            } else {
-                format!("项目 {}", &normalized_pid[..normalized_pid.len().min(8)])
-            };
+                    let display_title = if !title.trim().is_empty() {
+                        sanitize_title(&title, "新对话")
+                    } else if !preview.trim().is_empty() {
+                        sanitize_title(&preview, "新对话")
+                    } else {
+                        format!("对话 {}", &conv_id[..conv_id.len().min(8)])
+                    };
 
-            let display_title = if !title.trim().is_empty() {
-                sanitize_title(&title, "新对话")
-            } else if !preview.trim().is_empty() {
-                sanitize_title(&preview, "新对话")
-            } else {
-                format!("对话 {}", &conv_id[..conv_id.len().min(8)])
-            };
+                    let updated_ms = if updated_at > 0 && updated_at < 10_000_000_000 {
+                        updated_at * 1000
+                    } else {
+                        updated_at
+                    };
 
-            let updated_ms = if updated_at > 0 && updated_at < 10_000_000_000 {
-                updated_at * 1000
-            } else {
-                updated_at
-            };
-
-            let entry = by_project
-                .entry(normalized_pid.clone())
-                .or_insert_with(|| (label.clone(), ws_path.clone(), Vec::new()));
-            if entry.1.is_empty() && !ws_path.is_empty() {
-                entry.1 = ws_path.clone();
-                if normalized_pid != "default-cli-project" && normalized_pid != "outside-of-project"
-                {
-                    entry.0 = basename_of_path(&ws_path);
+                    let entry = by_project
+                        .entry(normalized_pid.clone())
+                        .or_insert_with(|| (label.clone(), ws_path.clone(), Vec::new()));
+                    if entry.1.is_empty() && !ws_path.is_empty() {
+                        entry.1 = ws_path.clone();
+                        if normalized_pid != "default-cli-project"
+                            && normalized_pid != "outside-of-project"
+                        {
+                            entry.0 = basename_of_path(&ws_path);
+                        }
+                    }
+                    entry.2.push(ExternalConversation {
+                        id: conv_id,
+                        title: display_title,
+                        updated_at: updated_ms,
+                        source,
+                        cwd: ws_path,
+                        rollout_path: None,
+                    });
                 }
             }
-            entry.2.push(ExternalConversation {
-                id: conv_id,
-                title: display_title,
-                updated_at: updated_ms,
-                source,
-                cwd: ws_path,
-                rollout_path: None,
-            });
         }
     }
 
@@ -688,10 +701,11 @@ pub fn load_antigravity_catalog() -> ExternalHarnessCatalog {
         })
         .collect();
 
+    // Put real Desktop projects on top (newest first) and CLI Project at the bottom — matching Antigravity Desktop
     groups.sort_by(|a, b| {
         let a_cli = a.workspace_id == "default-cli-project";
         let b_cli = b.workspace_id == "default-cli-project";
-        b_cli.cmp(&a_cli).then_with(|| {
+        a_cli.cmp(&b_cli).then_with(|| {
             let a_ts = a.convs.first().map(|c| c.updated_at).unwrap_or(0);
             let b_ts = b.convs.first().map(|c| c.updated_at).unwrap_or(0);
             b_ts.cmp(&a_ts)

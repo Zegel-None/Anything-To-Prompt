@@ -1,6 +1,6 @@
 [package]
 name = "anything-to-prompt"
-version = "0.3.4"
+version = "0.3.5"
 description = "Anything-to-Prompt — Pick anything on your Windows desktop, straight into your AI prompt"
 authors = ["Anything-to-Prompt Contributors"]
 edition = "2021"

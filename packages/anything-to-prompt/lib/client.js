@@ -5410,9 +5410,11 @@ window.__ModuleLoader__.load({
         const activeHarness = dsbRuntime.activeHarness || 'dsh';
         const harnessTheme = HARNESS_META[activeHarness] || HARNESS_META.dsh;
 
-        const wsSnap = workspaces && workspaces.list ? workspaces.list.getSnapshot() : { items: [], archivedSessionIds: [] };
+        const wsSnap = workspaces && workspaces.list ? workspaces.list.getSnapshot() : { items: [], archivedSessionIds: [], pinnedSessionIds: [] };
         const sessSnap = sessions && sessions.list ? sessions.list.getSnapshot() : { ids: [], byId: {} };
         const archivedSet = new Set(Array.isArray(wsSnap.archivedSessionIds) ? wsSnap.archivedSessionIds : []);
+        const pinnedOrder = Array.isArray(wsSnap.pinnedSessionIds) ? wsSnap.pinnedSessionIds : [];
+        const pinnedRank = new Map(pinnedOrder.map((id, idx) => [String(id), idx]));
         const wsItems = Array.isArray(wsSnap.items) ? wsSnap.items : [];
         const byId = sessSnap.byId || {};
 
@@ -5446,6 +5448,37 @@ window.__ModuleLoader__.load({
             };
           }
 
+          const toEpochMs = (v) => {
+            if (typeof v === 'number' && Number.isFinite(v)) return v;
+            if (typeof v === 'string' && v.trim()) {
+              const n = Number(v);
+              if (Number.isFinite(n)) return n;
+              const p = Date.parse(v);
+              if (Number.isFinite(p)) return p;
+            }
+            return 0;
+          };
+          // Exact 1:1 parity with @deepseek-ai/dsh-client-ui-workspace `sessionVisible`:
+          // hide subagent sessions, hide non-active blank sessions, and hide archived sessions.
+          const isDshSessionVisible = (id, s) => {
+            if (!s) return false;
+            if (s.origin === 'subagent') return false;
+            if (s.blank && id !== dshActiveSessionId) return false;
+            if (archivedSet.has(id)) return false;
+            return true;
+          };
+          const sortDshConvs = (arr) => {
+            arr.sort((a, b) => {
+              const pa = pinnedRank.has(a.id) ? pinnedRank.get(a.id) : Infinity;
+              const pb = pinnedRank.has(b.id) ? pinnedRank.get(b.id) : Infinity;
+              if (pa !== pb) return pa - pb;
+              const ta = toEpochMs(a.updatedAt);
+              const tb = toEpochMs(b.updatedAt);
+              if (ta !== tb) return tb - ta;
+              return a.id < b.id ? -1 : 1;
+            });
+          };
+
           const accounted = new Set();
           let foundWsId = '';
           const result = [];
@@ -5456,9 +5489,8 @@ window.__ModuleLoader__.load({
             const ids = Array.isArray(ws.sessionIds) ? ws.sessionIds : [];
             for (const id of ids) {
               accounted.add(id);
-              if (archivedSet.has(id) && id !== dshActiveSessionId) continue;
               const s = byId[id];
-              if (!s) continue;
+              if (!isDshSessionVisible(id, s)) continue;
               if (id === dshActiveSessionId) foundWsId = ws.workspaceId;
               convs.push({
                 id,
@@ -5466,7 +5498,7 @@ window.__ModuleLoader__.load({
                 updatedAt: s.updatedAt || 0,
               });
             }
-            convs.sort((a, b) => Number(b.updatedAt || 0) - Number(a.updatedAt || 0));
+            sortDshConvs(convs);
             result.push({
               workspaceId: ws.workspaceId,
               label: ws.title || workspaceBasename(ws.path),
@@ -5478,9 +5510,8 @@ window.__ModuleLoader__.load({
           const stray = [];
           for (const id of (Array.isArray(sessSnap.ids) ? sessSnap.ids : [])) {
             if (accounted.has(id)) continue;
-            if (archivedSet.has(id) && id !== dshActiveSessionId) continue;
             const s = byId[id];
-            if (!s) continue;
+            if (!isDshSessionVisible(id, s)) continue;
             if (id === dshActiveSessionId) foundWsId = '__ungrouped__';
             stray.push({
               id,
@@ -5489,7 +5520,7 @@ window.__ModuleLoader__.load({
             });
           }
           if (stray.length > 0) {
-            stray.sort((a, b) => Number(b.updatedAt || 0) - Number(a.updatedAt || 0));
+            sortDshConvs(stray);
             result.push({
               workspaceId: '__ungrouped__',
               label: '其他对话',
@@ -5724,7 +5755,7 @@ window.__ModuleLoader__.load({
           const panelBorder = harnessTheme.border;
 
           const snap = dsbRuntime.appSettings || {
-            version: '0.3.4',
+            version: '0.3.5',
             isElevated: false,
             dshStatus: '已连接',
             config: {
