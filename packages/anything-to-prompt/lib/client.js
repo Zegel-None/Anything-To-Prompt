@@ -48,6 +48,91 @@ window.__ModuleLoader__.load({
     const STORAGE_KEY_LAST_SESSION = 'dsh_card_dock:bar_last_session';
     const STORAGE_KEY_ACTIVE_HARNESS = 'dsh_card_dock:active_harness';
     const STORAGE_KEY_CLAUDE_PERM = 'dsh_card_dock:claude_perm_mode';
+    const STORAGE_KEY_THEME_PREF = 'dsh_card_dock:theme_pref';
+
+    // v0.6.0 Unified DSH Dual-Theme Palettes — eyedropped directly from each official logo
+    // (DeepSeek #4D6BFE, Google Antigravity 4-color prism, OpenAI Codex Monochrome + Periwinkle Violet, Anthropic Claude #D97757)
+    const UNIFIED_PALETTES = {
+      dsh: {
+        dotStyle: '#4D6BFE',
+        dark: {
+          surface: '#212327', popover: '#1A1C20', drawer: '#181A1E',
+          border: 'rgba(77, 107, 254, 0.26)', subtleBorder: 'rgba(255, 255, 255, 0.08)',
+          topBar: 'linear-gradient(90deg, transparent 4%, #4D6BFE 50%, transparent 96%)',
+          fg: '#ECEEF2', muted: '#8A90A0', accent: '#637EFF', accentBg: 'rgba(77, 107, 254, 0.18)',
+          accentBorder: 'rgba(99, 126, 255, 0.42)', sendBg: '#4D6BFE', sendFg: '#FFFFFF', sendRing: 'none',
+          permDanger: '#7A93FF', plusBg: 'rgba(255, 255, 255, 0.08)', rowHover: 'rgba(255, 255, 255, 0.075)',
+        },
+        light: {
+          surface: '#FFFFFF', popover: '#FFFFFF', drawer: '#F8FAFF',
+          border: 'rgba(77, 107, 254, 0.26)', subtleBorder: 'rgba(15, 23, 42, 0.08)',
+          topBar: 'linear-gradient(90deg, transparent 4%, #4D6BFE 50%, transparent 96%)',
+          fg: '#111827', muted: '#6B7280', accent: '#4D6BFE', accentBg: 'rgba(77, 107, 254, 0.10)',
+          accentBorder: 'rgba(77, 107, 254, 0.36)', sendBg: '#4D6BFE', sendFg: '#FFFFFF', sendRing: 'none',
+          permDanger: '#4D6BFE', plusBg: 'rgba(77, 107, 254, 0.08)', rowHover: 'rgba(15, 23, 42, 0.055)',
+        },
+      },
+      antigravity: {
+        dotStyle: 'conic-gradient(#4285F4 0 90deg, #34A853 90deg 180deg, #FBBC04 180deg 270deg, #EA4335 270deg 360deg)',
+        dark: {
+          surface: '#16171A', popover: '#121316', drawer: '#131418',
+          border: 'rgba(255, 255, 255, 0.11)', subtleBorder: 'rgba(255, 255, 255, 0.08)',
+          topBar: 'linear-gradient(90deg, #4285F4 0%, #34A853 34%, #FBBC04 68%, #EA4335 100%)',
+          fg: '#F1F3F4', muted: '#8E929B', accent: '#4285F4', accentBg: 'rgba(66, 133, 244, 0.15)',
+          accentBorder: 'rgba(66, 133, 244, 0.42)', sendBg: '#FFFFFF', sendFg: '#111215',
+          sendRing: '0 0 0 1.5px rgba(66, 133, 244, 0.55), 0 0 10px rgba(52, 168, 83, 0.25)',
+          permDanger: '#FBBC04', plusBg: 'rgba(255, 255, 255, 0.08)', rowHover: 'rgba(255, 255, 255, 0.075)',
+        },
+        light: {
+          surface: '#FFFFFF', popover: '#FFFFFF', drawer: '#FAFBFD',
+          border: 'rgba(15, 23, 42, 0.12)', subtleBorder: 'rgba(15, 23, 42, 0.08)',
+          topBar: 'linear-gradient(90deg, #4285F4 0%, #34A853 34%, #FBBC04 68%, #EA4335 100%)',
+          fg: '#111827', muted: '#5F6368', accent: '#1A73E8', accentBg: 'rgba(26, 115, 232, 0.10)',
+          accentBorder: 'rgba(26, 115, 232, 0.36)', sendBg: '#1A73E8', sendFg: '#FFFFFF',
+          sendRing: '0 0 0 2px rgba(52, 168, 83, 0.22)',
+          permDanger: '#D97706', plusBg: 'rgba(15, 23, 42, 0.06)', rowHover: 'rgba(15, 23, 42, 0.055)',
+        },
+      },
+      codex: {
+        dotStyle: 'linear-gradient(135deg, #7A9DFF, #B1A7FF)',
+        dark: {
+          surface: '#1D1D20', popover: '#161619', drawer: '#151518',
+          border: 'rgba(177, 167, 255, 0.22)', subtleBorder: 'rgba(255, 255, 255, 0.08)',
+          topBar: 'linear-gradient(90deg, transparent 4%, #7A9DFF 38%, #B1A7FF 65%, transparent 96%)',
+          fg: '#F4F4F5', muted: '#8F8F99', accent: '#A39BFF', accentBg: 'rgba(163, 155, 255, 0.16)',
+          accentBorder: 'rgba(177, 167, 255, 0.42)', sendBg: '#FFFFFF', sendFg: '#0D0D0D',
+          sendRing: '0 0 0 1px rgba(177, 167, 255, 0.38)',
+          permDanger: '#B1A7FF', plusBg: 'rgba(255, 255, 255, 0.08)', rowHover: 'rgba(255, 255, 255, 0.075)',
+        },
+        light: {
+          surface: '#FFFFFF', popover: '#FFFFFF', drawer: '#FAFAFE',
+          border: 'rgba(17, 24, 39, 0.14)', subtleBorder: 'rgba(15, 23, 42, 0.08)',
+          topBar: 'linear-gradient(90deg, transparent 4%, #5B63F6 38%, #9B8CFF 65%, transparent 96%)',
+          fg: '#0D0D0D', muted: '#6B7280', accent: '#5850EC', accentBg: 'rgba(88, 80, 236, 0.10)',
+          accentBorder: 'rgba(88, 80, 236, 0.36)', sendBg: '#0D0D0D', sendFg: '#FFFFFF', sendRing: 'none',
+          permDanger: '#5850EC', plusBg: 'rgba(15, 23, 42, 0.06)', rowHover: 'rgba(15, 23, 42, 0.055)',
+        },
+      },
+      claude_code: {
+        dotStyle: '#D97757',
+        dark: {
+          surface: '#23211E', popover: '#1C1B19', drawer: '#1A1917',
+          border: 'rgba(217, 119, 87, 0.26)', subtleBorder: 'rgba(255, 248, 240, 0.08)',
+          topBar: 'linear-gradient(90deg, transparent 4%, #D97757 50%, transparent 96%)',
+          fg: '#F2EEE8', muted: '#9C948A', accent: '#D97757', accentBg: 'rgba(217, 119, 87, 0.16)',
+          accentBorder: 'rgba(217, 119, 87, 0.44)', sendBg: '#D97757', sendFg: '#FFFFFF', sendRing: 'none',
+          permDanger: '#E8926E', plusBg: 'rgba(255, 248, 240, 0.08)', rowHover: 'rgba(255, 248, 240, 0.075)',
+        },
+        light: {
+          surface: '#FAF9F5', popover: '#FFFDF9', drawer: '#F5F2EA',
+          border: 'rgba(217, 119, 87, 0.28)', subtleBorder: 'rgba(120, 90, 70, 0.10)',
+          topBar: 'linear-gradient(90deg, transparent 4%, #D97757 50%, transparent 96%)',
+          fg: '#1F1E1D', muted: '#78716C', accent: '#C45D3B', accentBg: 'rgba(217, 119, 87, 0.12)',
+          accentBorder: 'rgba(196, 93, 59, 0.38)', sendBg: '#D97757', sendFg: '#FFFFFF', sendRing: 'none',
+          permDanger: '#C45D3B', plusBg: 'rgba(120, 90, 70, 0.08)', rowHover: 'rgba(120, 90, 70, 0.065)',
+        },
+      },
+    };
 
     // Shared crisp SVG icons exposed to every drop-in harness module (`harnesses/<id>/ui.js`)
     const HARNESS_SDK_ICONS = {
@@ -386,6 +471,8 @@ window.__ModuleLoader__.load({
       ),
       appSettings: null,
       claudePermissionMode: readStoredString(STORAGE_KEY_CLAUDE_PERM, 'auto'),
+      themePref: readStoredString(STORAGE_KEY_THEME_PREF, 'auto'),
+      resolvedTheme: 'dark',
       extDraftText: '',
       extCapsules: [],
       extAttachments: [],
@@ -454,11 +541,97 @@ window.__ModuleLoader__.load({
       }
     }
 
-    function applyHarnessThemeAttribute(harnessId) {
-      const norm = normalizeHarnessId(harnessId);
+    function detectResolvedColorMode(pref) {
+      const p = String(pref || dsbRuntime.themePref || 'auto').toLowerCase();
+      if (p === 'light' || p === 'dark') return p;
       if (typeof document !== 'undefined' && document.documentElement) {
-        document.documentElement.setAttribute('data-dsb-harness', norm);
+        const root = document.documentElement;
+        const dt = String(root.getAttribute('data-theme') || root.getAttribute('data-color-mode') || '').toLowerCase();
+        if (dt === 'light' || dt === 'dark') return dt;
+        if (root.classList.contains('light')) return 'light';
+        if (root.classList.contains('dark')) return 'dark';
+        try {
+          const card = document.querySelector('[data-composer-card]') || document.body;
+          if (card) {
+            const bg = getComputedStyle(card).backgroundColor || '';
+            const m = bg.match(/rgba?\((\d+),\s*(\d+),\s*(\d+)/);
+            if (m) {
+              const lum = 0.299 * Number(m[1]) + 0.587 * Number(m[2]) + 0.114 * Number(m[3]);
+              if (Number(m[1]) + Number(m[2]) + Number(m[3]) > 0) {
+                return lum > 140 ? 'light' : 'dark';
+              }
+            }
+          }
+        } catch {}
       }
+      try {
+        if (typeof window !== 'undefined' && window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches) {
+          return 'light';
+        }
+      } catch {}
+      return 'dark';
+    }
+
+    function getUnifiedTheme(harnessId) {
+      const norm = normalizeHarnessId(harnessId || dsbRuntime.activeHarness);
+      const mode = dsbRuntime.resolvedTheme === 'light' ? 'light' : 'dark';
+      const entry = UNIFIED_PALETTES[norm] || UNIFIED_PALETTES.dsh;
+      const pal = entry[mode] || entry.dark;
+      return Object.assign({ mode, isDark: mode === 'dark', dotStyle: entry.dotStyle || pal.accent }, pal);
+    }
+
+    function applyHarnessThemeAttribute(harnessId) {
+      const norm = normalizeHarnessId(harnessId || dsbRuntime.activeHarness);
+      const resolved = detectResolvedColorMode(dsbRuntime.themePref);
+      dsbRuntime.resolvedTheme = resolved;
+      if (typeof document !== 'undefined' && document.documentElement) {
+        const root = document.documentElement;
+        root.setAttribute('data-dsb-harness', norm);
+        root.setAttribute('data-dsb-theme', resolved);
+        const t = getUnifiedTheme(norm);
+        root.style.setProperty('--atp-surface', t.surface);
+        root.style.setProperty('--atp-popover', t.popover);
+        root.style.setProperty('--atp-drawer', t.drawer);
+        root.style.setProperty('--atp-border', t.border);
+        root.style.setProperty('--atp-fg', t.fg);
+        root.style.setProperty('--atp-muted', t.muted);
+        root.style.setProperty('--atp-accent', t.accent);
+        root.style.setProperty('--atp-accent-bg', t.accentBg);
+      }
+    }
+
+    function setThemePreference(pref) {
+      const clean = pref === 'light' || pref === 'dark' ? pref : 'auto';
+      dsbRuntime.themePref = clean;
+      writeStoredString(STORAGE_KEY_THEME_PREF, clean);
+      applyHarnessThemeAttribute(dsbRuntime.activeHarness);
+      notifyBarRuntime();
+    }
+
+    if (typeof window !== 'undefined' && typeof document !== 'undefined' && document.documentElement) {
+      try {
+        const themeObs = new MutationObserver(() => {
+          if (dsbRuntime.themePref === 'auto') {
+            const next = detectResolvedColorMode('auto');
+            if (next !== dsbRuntime.resolvedTheme) {
+              applyHarnessThemeAttribute(dsbRuntime.activeHarness);
+              notifyBarRuntime();
+            }
+          }
+        });
+        themeObs.observe(document.documentElement, { attributes: true, attributeFilter: ['class', 'data-theme', 'data-color-mode'] });
+        if (window.matchMedia) {
+          const mq = window.matchMedia('(prefers-color-scheme: light)');
+          if (mq && typeof mq.addEventListener === 'function') {
+            mq.addEventListener('change', () => {
+              if (dsbRuntime.themePref === 'auto') {
+                applyHarnessThemeAttribute(dsbRuntime.activeHarness);
+                notifyBarRuntime();
+              }
+            });
+          }
+        }
+      } catch {}
     }
 
     function refreshHarnessAvailability() {
@@ -1412,9 +1585,12 @@ window.__ModuleLoader__.load({
         'html[data-dsh-bar-clone="1"] [data-dsb-menu-scroll]::-webkit-scrollbar-thumb { background: rgba(128,128,128,0.28); border-radius: 999px; }',
         '[data-dsb-composer-popover="1"]::-webkit-scrollbar { width: 5px; }',
         '[data-dsb-composer-popover="1"]::-webkit-scrollbar-track { background: transparent; }',
-        '[data-dsb-composer-popover="1"]::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.22); border-radius: 999px; }',
-        '[data-dsb-pop-row="1"]:hover { background: rgba(255, 255, 255, 0.085) !important; }',
-        '[data-dsb-pop-row="codex"]:hover { background: rgba(255, 255, 255, 0.085) !important; }',
+        '[data-dsb-composer-popover="1"]::-webkit-scrollbar-thumb { background: rgba(128,128,140,0.32); border-radius: 999px; }',
+        '[data-dsb-pop-row="1"]:hover { background: rgba(255, 255, 255, 0.08) !important; }',
+        'html[data-dsb-theme="light"] [data-dsb-pop-row="1"]:hover { background: rgba(15, 23, 42, 0.055) !important; }',
+        'html[data-dsh-bar-clone="1"][data-dsb-harness]:not([data-dsb-harness="dsh"]) [data-dsb-card] { background: var(--atp-drawer, #181a1e) !important; color: var(--atp-fg, #eceef2) !important; box-shadow: 0 0 0 1px var(--atp-border, rgba(255,255,255,0.1)) inset !important; border-radius: 18px !important; }',
+        'html[data-dsb-theme="light"] [data-dsb-ext-input="1"]::placeholder { color: rgba(15, 23, 42, 0.44) !important; }',
+        'html[data-dsb-theme="dark"] [data-dsb-ext-input="1"]::placeholder { color: rgba(236, 238, 242, 0.44) !important; }',
         // =====================================================================
         // Multi-Harness Auto-Discovered Styles (`harnesses/<id>/{harness.json,ui.js}`)
         // Hide DSH's native [data-composer-card] whenever an external harness renders
@@ -4975,7 +5151,116 @@ window.__ModuleLoader__.load({
           );
         };
 
+        const UNIFIED_DEFAULTS = {
+          antigravity: {
+            models: [
+              { id: 'gemini-4-neon-high', label: 'Gemini 4 Neon', tag: 'New' },
+              { id: 'gemini-4-carbon-medium', label: 'Gemini 4 Carbon', tag: 'New' },
+              { id: 'gemini-4-argon-medium', label: 'Gemini 4 Argon', tag: 'Leaving Soon' },
+              { id: 'gemini-4-hydrogen-medium', label: 'Gemini 4 Hydrogen', tag: 'New' },
+              { id: 'gemini-pro-orchestrator-neon', label: 'Orchestrator', tag: 'Opus 5.5' },
+              { id: 'gemini-3.8-flash-medium', label: 'Gemini 3.8 Flash', tag: 'Leaving Soon' },
+              { id: 'claude-opus-5-5-medium', label: 'Claude Opus 5.5', tag: 'New' },
+              { id: 'claude-sonnet-5-5-medium', label: 'Claude Sonnet 5.5', tag: 'New' },
+              { id: 'gpt-oss-120b-medium', label: 'GPT-OSS 120B (Medium)', tag: 'Notice' },
+            ],
+            efforts: [
+              { id: 'low', label: 'Low' },
+              { id: 'medium', label: 'Medium' },
+              { id: 'high', label: 'High' },
+              { id: 'max', label: 'Max' },
+            ],
+            modes: [
+              { id: 'turbo', label: 'Turbo', desc: '--dangerously-skip-permissions · 无限制执行', danger: true },
+              { id: 'auto', label: 'Auto', desc: '--mode auto · 自动评估风险执行', danger: false },
+              { id: 'default', label: 'Default', desc: '--mode accept-edits · 敏感操作前询问', danger: false },
+              { id: 'request-review', label: 'Request Review', desc: '--sandbox --mode plan · 每步审批', danger: false },
+            ],
+            defaultModel: 'gemini-4-neon-high',
+            defaultEffort: 'high',
+            defaultMode: 'turbo',
+          },
+          codex: {
+            models: [
+              { id: 'default', label: '默认', tag: '推荐' },
+              { id: 'gpt-6.2-sol', label: 'GPT-6.2 Sol', tag: '旗舰' },
+              { id: 'gpt-6.2-astra', label: 'GPT-6.2 Astra', tag: '' },
+              { id: 'gpt-6.1-terra', label: 'GPT-6.1 Terra', tag: '' },
+              { id: 'gpt-6.1-sol', label: 'GPT-6.1 Sol', tag: '' },
+              { id: 'gpt-6-astra', label: 'GPT-6 Astra', tag: '' },
+              { id: 'gpt-6-sol', label: 'GPT-6 Sol', tag: '' },
+              { id: 'gpt-6-luna', label: 'GPT-6 Luna', tag: '' },
+              { id: 'gpt-5.6-sol', label: 'GPT-5.6 Sol', tag: '' },
+              { id: 'gpt-5.6-terra', label: 'GPT-5.6 Terra', tag: '' },
+            ],
+            efforts: [
+              { id: 'minimal', label: '极低' },
+              { id: 'low', label: '低' },
+              { id: 'high', label: '高' },
+              { id: 'xhigh', label: '极高' },
+              { id: 'max', label: '最高' },
+            ],
+            modes: [
+              { id: 'danger-full-access', label: '完全访问', desc: 'approvalPolicy=never · dangerFullAccess', danger: true },
+              { id: 'help-approve', label: '帮我批准', desc: 'approvalPolicy=on-failure · workspaceWrite', danger: false },
+              { id: 'request-approval', label: '请求批准', desc: 'approvalPolicy=on-request · workspaceWrite', danger: false },
+            ],
+            defaultModel: 'gpt-6-luna',
+            defaultEffort: 'high',
+            defaultMode: 'danger-full-access',
+          },
+          claude_code: {
+            models: [
+              { id: 'claude-opus-5-5', label: 'Opus 5.5', tag: 'Default' },
+              { id: 'claude-fable-5-2', label: 'Fable 5.2', tag: '最强' },
+              { id: 'claude-sonnet-5-5', label: 'Sonnet 5.5', tag: '均衡' },
+              { id: 'claude-haiku-5-5', label: 'Haiku 5.5', tag: '极速' },
+            ],
+            efforts: [
+              { id: 'low', label: 'Low' },
+              { id: 'medium', label: 'Medium' },
+              { id: 'high', label: 'High' },
+              { id: 'max', label: 'Max' },
+            ],
+            modes: [
+              { id: 'auto', label: 'Auto', desc: '--permission-mode auto · 智能自动执行并拦截高危', danger: true },
+              { id: 'acceptEdits', label: 'Accept Edits', desc: '--permission-mode acceptEdits · 自动写入代码', danger: false },
+              { id: 'plan', label: 'Plan', desc: '--permission-mode plan · 只读分析与规划', danger: false },
+              { id: 'dontAsk', label: 'Manual', desc: '手动确认 / 免询问模式', danger: false },
+            ],
+            defaultModel: 'claude-opus-5-5',
+            defaultEffort: 'medium',
+            defaultMode: 'auto',
+          },
+        };
+
+        const getUnifiedOptions = (hId, opts) => {
+          const def = UNIFIED_DEFAULTS[hId] || UNIFIED_DEFAULTS.antigravity;
+          const o = opts || {};
+          const models = Array.isArray(o.models) && o.models.length > 0 ? o.models : def.models;
+          const efforts = Array.isArray(o.efforts) && o.efforts.length > 0 ? o.efforts : def.efforts;
+          const modes = Array.isArray(o.modes) && o.modes.length > 0 ? o.modes : def.modes;
+          return {
+            models,
+            efforts,
+            modes,
+            defaultModel: o.defaultModel || def.defaultModel,
+            defaultEffort: o.defaultEffort || def.defaultEffort,
+            defaultMode: o.defaultMode || def.defaultMode,
+          };
+        };
+
         const handleExtInputKeyDown = (ev) => {
+          if (ev.key === 'Tab' && ev.shiftKey && !ev.isComposing) {
+            ev.preventDefault();
+            ev.stopPropagation();
+            const uo = getUnifiedOptions(activeHarness, activeHarnessOpts);
+            const curModeId = (activeHarnessPrefs && activeHarnessPrefs.mode) || uo.defaultMode;
+            const idx = Math.max(0, uo.modes.findIndex((m) => m.id === curModeId));
+            const next = uo.modes[(idx + 1) % uo.modes.length];
+            if (next) updateHarnessPrefs(activeHarness, { mode: next.id });
+            return;
+          }
           if (ev.key === 'Enter' && !ev.shiftKey && !ev.isComposing) {
             if (dsbRuntime.quickSearchOpen && dsbRuntime.quickSearchSelectedIdx >= 0) {
               return;
@@ -4998,121 +5283,253 @@ window.__ModuleLoader__.load({
           }
         };
 
-        const renderDefaultAdaptiveComposer = (ctx) => {
+        // v0.6.0 Unified DSH-Native Dual-Theme Composer (One Skeleton, Four Official-Logo Palettes, Dark + Light)
+        const renderUnifiedDshComposer = (ctx) => {
           const m = ctx.manifest;
-          const label =
+          const t = getUnifiedTheme(m.id);
+          const uo = getUnifiedOptions(m.id, ctx.options);
+          const prefs = ctx.prefs || {};
+          const curModelId = prefs.model || uo.defaultModel;
+          const curEffortId = prefs.effort || uo.defaultEffort;
+          const curModeId = prefs.mode || uo.defaultMode;
+          const curModel = uo.models.find((x) => x.id === curModelId) || uo.models[0];
+          const curEffort = uo.efforts.find((x) => x.id === curEffortId) || uo.efforts[Math.min(2, uo.efforts.length - 1)] || uo.efforts[0];
+          const curMode = uo.modes.find((x) => x.id === curModeId) || uo.modes[0];
+          const isDangerMode = Boolean(
+            curMode && (curMode.danger || curMode.id === 'turbo' || curMode.id === 'danger-full-access' || curMode.id === 'auto'),
+          );
+          const modeLabel =
+            curMode && curMode.id === 'danger-full-access' ? '完全访问' : (curMode && curMode.label) || '默认';
+          const wsLabel =
             (ctx.selection && ctx.selection.workspacePath
               ? ctx.workspaceBasename(ctx.selection.workspacePath)
               : '') ||
             (ctx.selection && ctx.selection.title) ||
             m.label;
+          const cardShadow = t.isDark
+            ? '0 14px 36px rgba(0, 0, 0, 0.46)'
+            : '0 8px 24px rgba(15, 23, 42, 0.09)';
+
           return h(
             'div',
             {
               'data-dsb-external-composer': m.id,
+              'data-dsb-unified-composer': '1',
+              onDragOver: ctx.onDragOver,
+              onDrop: ctx.onDrop,
+              onContextMenu: (ev) => {
+                if (ctx.onOpenSwitcher) {
+                  ev.preventDefault();
+                  ctx.onOpenSwitcher(ev);
+                }
+              },
               style: {
                 width: '100vw',
-                padding: '5px 6px 6px',
-                background: m.surface,
-                borderRadius: '0 0 ' + m.cornerRadius + 'px ' + m.cornerRadius + 'px',
-                borderLeft: '1px solid ' + m.border,
-                borderRight: '1px solid ' + m.border,
-                borderBottom: '1px solid ' + m.border,
+                position: 'relative',
+                overflow: 'hidden',
+                background: t.surface,
+                borderRadius: '18px',
+                border: '1px solid ' + t.border,
+                boxShadow: cardShadow,
+                padding: '13px 15px 10px 15px',
+                display: 'flex',
+                flexDirection: 'column',
                 boxSizing: 'border-box',
                 pointerEvents: 'auto',
-                fontFamily: '"Segoe UI", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif',
+                color: t.fg,
+                transition: 'background 180ms ease, border-color 180ms ease, color 180ms ease',
+                fontFamily: '"Segoe UI", "Inter", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif',
               },
             },
+            // Official Brand Logo 2px Top Hairline
+            h('div', {
+              style: {
+                position: 'absolute',
+                left: 0,
+                right: 0,
+                top: 0,
+                height: '2px',
+                background: t.topBar,
+                opacity: 0.95,
+                pointerEvents: 'none',
+              },
+            }),
+            ctx.renderDragHandle && ctx.renderDragHandle(),
+            ctx.renderAttachmentsRow && ctx.renderAttachmentsRow(),
+            ctx.renderCapsulesRow(),
+            h('textarea', {
+              'data-dsb-ext-input': '1',
+              rows: 1,
+              value: ctx.draft,
+              onChange: ctx.onInputChange,
+              onKeyDown: ctx.onInputKeyDown,
+              onPaste: ctx.onPaste,
+              placeholder: m.placeholder || '发消息或创建任务, / 调用指令, @ 文件或对话',
+              style: {
+                width: '100%',
+                minHeight: '24px',
+                maxHeight: '140px',
+                border: 'none',
+                outline: 'none',
+                resize: 'none',
+                background: 'transparent',
+                color: t.fg,
+                fontSize: '13.5px',
+                lineHeight: '21px',
+                fontFamily: 'inherit',
+                padding: 0,
+                margin: 0,
+                boxSizing: 'border-box',
+              },
+            }),
             h(
               'div',
               {
                 style: {
-                  position: 'relative',
-                  background: 'rgba(255,255,255,0.04)',
-                  borderRadius: '14px',
-                  border: '1px solid ' + m.border,
-                  padding: '15px 14px 10px',
                   display: 'flex',
-                  flexDirection: 'column',
-                  boxSizing: 'border-box',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  marginTop: '11px',
+                  height: '30px',
+                  gap: '8px',
                 },
               },
-              ctx.renderDragHandle && ctx.renderDragHandle(),
-              ctx.renderCapsulesRow(),
-              h('textarea', {
-                'data-dsb-ext-input': '1',
-                rows: 1,
-                value: ctx.draft,
-                onChange: ctx.onInputChange,
-                onKeyDown: ctx.onInputKeyDown,
-                placeholder: m.placeholder,
-                style: {
-                  width: '100%',
-                  minHeight: '24px',
-                  maxHeight: '140px',
-                  border: 'none',
-                  outline: 'none',
-                  resize: 'none',
-                  background: 'transparent',
-                  color: '#f3f4f6',
-                  fontSize: '13.5px',
-                  lineHeight: '21px',
-                  fontFamily: 'inherit',
-                  padding: 0,
-                  margin: 0,
-                  boxSizing: 'border-box',
-                },
-              }),
+              // Unified Left Toolbar: (+) + Permission + Brand Harness·Workspace Pill
               h(
                 'div',
-                {
-                  style: {
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'space-between',
-                    marginTop: '10px',
-                    height: '30px',
-                    gap: '8px',
+                { style: { display: 'flex', alignItems: 'center', gap: '7px', minWidth: 0 } },
+                h(
+                  'button',
+                  {
+                    type: 'button',
+                    'data-dsb-plus-btn': '1',
+                    title: '添加文件 / 文件夹 / 指令 / 插件',
+                    onClick: (ev) => {
+                      ev.stopPropagation();
+                      ctx.openComposerPopover && ctx.openComposerPopover('plus', ev.currentTarget);
+                    },
+                    style: {
+                      width: '28px',
+                      height: '28px',
+                      borderRadius: '999px',
+                      border: 'none',
+                      background: ctx.activePopover === 'plus' ? t.accentBg : t.plusBg,
+                      padding: 0,
+                      cursor: 'pointer',
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      flexShrink: 0,
+                    },
                   },
-                },
+                  HARNESS_SDK_ICONS.plus(15, ctx.activePopover === 'plus' ? t.accent : t.fg),
+                ),
+                h(
+                  'button',
+                  {
+                    type: 'button',
+                    'data-dsb-mode-btn': '1',
+                    title: '切换权限模式（支持 Shift+Tab 循环）',
+                    onClick: (ev) => {
+                      ev.stopPropagation();
+                      ctx.openComposerPopover && ctx.openComposerPopover('mode', ev.currentTarget);
+                    },
+                    style: {
+                      height: '26px',
+                      border: 'none',
+                      borderRadius: '8px',
+                      padding: '0 7px',
+                      background: ctx.activePopover === 'mode' ? t.accentBg : 'transparent',
+                      color: isDangerMode ? t.permDanger : t.fg,
+                      fontSize: '12.5px',
+                      fontWeight: 500,
+                      cursor: 'pointer',
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      gap: '4px',
+                      whiteSpace: 'nowrap',
+                      flexShrink: 0,
+                    },
+                  },
+                  HARNESS_SDK_ICONS.shield(isDangerMode ? t.permDanger : t.muted),
+                  h('span', null, modeLabel),
+                  HARNESS_SDK_ICONS.chevronDown(t.muted),
+                ),
                 h(
                   'button',
                   {
                     type: 'button',
                     'data-dsb-session-chip': '1',
-                    title: '点击切换 Harness / 工作区 / 对话',
+                    title: '点击展开 3 级 Harness / 工作区 / 对话切换器',
                     onClick: ctx.onOpenSwitcher,
                     style: {
-                      height: '28px',
-                      border: '1px solid ' + m.accentBorder,
-                      background: m.accentBg,
-                      padding: '0 9px',
-                      borderRadius: '8px',
+                      height: '24px',
+                      border: 'none',
+                      borderRadius: '7px',
+                      padding: '0 8px',
+                      background: t.accentBg,
+                      color: t.accent,
+                      fontSize: '11.5px',
+                      fontWeight: 500,
                       cursor: 'pointer',
                       display: 'inline-flex',
                       alignItems: 'center',
-                      gap: '6px',
-                      fontSize: '12px',
-                      color: '#f3f4f6',
-                      fontWeight: 500,
-                      maxWidth: '280px',
+                      gap: '5px',
+                      maxWidth: '210px',
+                      minWidth: 0,
                     },
                   },
                   h('span', {
                     style: {
-                      width: '6px',
-                      height: '6px',
+                      width: '7px',
+                      height: '7px',
                       borderRadius: '999px',
-                      background: m.accent,
+                      background: t.dotStyle,
                       flexShrink: 0,
                     },
                   }),
                   h(
                     'span',
                     { style: { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } },
-                    label,
+                    m.label + ' · ' + wsLabel,
                   ),
-                  HARNESS_SDK_ICONS.chevronDown('rgba(243,244,246,0.55)'),
+                ),
+              ),
+              // Unified Right Toolbar: Model·Effort + Brand Send/Stop Circle
+              h(
+                'div',
+                { style: { display: 'flex', alignItems: 'center', gap: '8px', flexShrink: 0 } },
+                h(
+                  'button',
+                  {
+                    type: 'button',
+                    'data-dsb-model-btn': '1',
+                    title: '切换模型与推理强度',
+                    onClick: (ev) => {
+                      ev.stopPropagation();
+                      ctx.openComposerPopover && ctx.openComposerPopover('model', ev.currentTarget);
+                    },
+                    style: {
+                      height: '26px',
+                      border: 'none',
+                      borderRadius: '8px',
+                      padding: '0 7px',
+                      background: ctx.activePopover === 'model' ? t.accentBg : 'transparent',
+                      color: t.fg,
+                      fontSize: '12.5px',
+                      fontWeight: 500,
+                      cursor: 'pointer',
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      gap: '5px',
+                      whiteSpace: 'nowrap',
+                    },
+                  },
+                  h('span', null, (curModel && curModel.label) || ''),
+                  curEffort && curEffort.label
+                    ? h('span', { style: { color: t.muted, fontWeight: 400 } }, curEffort.label)
+                    : null,
+                  HARNESS_SDK_ICONS.chevronDown(t.muted),
                 ),
                 h(
                   'button',
@@ -5121,60 +5538,53 @@ window.__ModuleLoader__.load({
                     title: ctx.isStreaming ? '停止生成' : '发送到 ' + m.fullLabel,
                     onClick: ctx.onSubmit,
                     style: {
-                      width: '28px',
-                      height: '28px',
+                      width: '30px',
+                      height: '30px',
                       borderRadius: '999px',
                       border: 'none',
-                      background: ctx.hasPayload ? m.accent : m.accentBg,
-                      color: '#ffffff',
+                      background: ctx.isStreaming ? (t.isDark ? '#32343a' : '#e2e8f0') : t.sendBg,
+                      boxShadow: ctx.isStreaming ? 'none' : t.sendRing,
+                      opacity: ctx.isStreaming || ctx.hasPayload ? 1 : 0.88,
                       cursor: 'pointer',
                       display: 'inline-flex',
                       alignItems: 'center',
                       justifyContent: 'center',
                       padding: 0,
+                      flexShrink: 0,
                     },
                   },
                   ctx.isStreaming
                     ? h('span', {
-                        style: { width: '10px', height: '10px', borderRadius: '2px', background: '#ffffff' },
+                        style: { width: '10px', height: '10px', borderRadius: '2px', background: '#ef4444' },
                       })
-                    : HARNESS_SDK_ICONS.arrowUp('#ffffff'),
+                    : HARNESS_SDK_ICONS.arrowUp(t.sendFg),
                 ),
               ),
             ),
           );
         };
 
+        // v0.6.0 Unified DSH-Native Dual-Theme Popover (Dark + Light, Official-Logo Palettes)
         const renderComposerPopover = () => {
           if (!IS_BAR || !composerPopover || activeHarness === 'dsh') return null;
           const opts = activeHarnessOpts || {};
           const prefs = activeHarnessPrefs || {};
           const meta = getHarnessMeta(activeHarness);
-          const isCodexPlus = composerPopover.kind === 'plus' && activeHarness === 'codex';
-          const isAgPlus = composerPopover.kind === 'plus' && activeHarness === 'antigravity';
+          const t = getUnifiedTheme(activeHarness);
+          const uo = getUnifiedOptions(activeHarness, opts);
+          const panelShadow = t.isDark
+            ? '0 16px 42px rgba(0, 0, 0, 0.56)'
+            : '0 12px 32px rgba(15, 23, 42, 0.14)';
 
-          const panelBg =
-            activeHarness === 'codex'
-              ? '#2d2d2d'
-              : activeHarness === 'claude_code'
-                ? '#2B2B29'
-                : '#131317';
-          const panelBorder =
-            activeHarness === 'claude_code'
-              ? 'rgba(255, 248, 240, 0.11)'
-              : activeHarness === 'codex'
-                ? 'rgba(255, 255, 255, 0.08)'
-                : '#27272b';
-
-          const svgIcon = (sz, strokeColor, children, vb = '0 0 24 24', fill = 'none') =>
+          const svgIcon = (sz, strokeColor, children) =>
             h(
               'svg',
               {
                 width: sz,
                 height: sz,
-                viewBox: vb,
-                fill,
-                stroke: strokeColor || 'none',
+                viewBox: '0 0 24 24',
+                fill: 'none',
+                stroke: strokeColor || t.muted,
                 strokeWidth: 1.75,
                 strokeLinecap: 'round',
                 strokeLinejoin: 'round',
@@ -5183,273 +5593,41 @@ window.__ModuleLoader__.load({
               children,
             );
 
-          const POP_ICONS = {
-            paperclip: (c = '#d4d4d8', sz = 16) =>
-              svgIcon(sz, c, [
-                h('path', {
-                  key: 'p',
-                  d: 'M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48',
-                }),
-              ]),
-            folder: (c = '#d4d4d8', sz = 16) =>
-              svgIcon(sz, c, [
-                h('path', {
-                  key: 'p',
-                  d: 'M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7z',
-                }),
-              ]),
-            image: (c = '#d4d4d8', sz = 16) =>
-              svgIcon(sz, c, [
-                h('rect', { key: 'r', x: 3, y: 4, width: 18, height: 16, rx: 2 }),
-                h('circle', { key: 'c', cx: 8.5, cy: 9.5, r: 1.5 }),
-                h('path', { key: 'p', d: 'M21 15l-5-5L5 20' }),
-              ]),
-            atSign: (c = '#d4d4d8', sz = 16) =>
-              svgIcon(sz, c, [
-                h('circle', { key: 'c', cx: 12, cy: 12, r: 4 }),
-                h('path', { key: 'p', d: 'M16 8v5a3 3 0 0 0 6 0v-1a10 10 0 1 0-3.92 7.94' }),
-              ]),
-            actionsBox: (c = '#d4d4d8', sz = 16) =>
-              svgIcon(sz, c, [
-                h('rect', { key: 'r', x: 3.5, y: 3.5, width: 17, height: 17, rx: 3.5 }),
-                h('path', { key: 'p', d: 'M9 15l6-6' }),
-              ]),
-            chrome: (c = '#d4d4d8', sz = 16) =>
-              svgIcon(sz, c, [
-                h('circle', { key: 'o', cx: 12, cy: 12, r: 9 }),
-                h('circle', { key: 'i', cx: 12, cy: 12, r: 3.5 }),
-                h('path', { key: 'l1', d: 'M12 8.5h8.4' }),
-                h('path', { key: 'l2', d: 'M8.97 13.75L4.77 6.48' }),
-                h('path', { key: 'l3', d: 'M15.03 13.75l-4.2 7.27' }),
-              ]),
-            drive: (c = '#d4d4d8', sz = 16) =>
-              svgIcon(sz, c, [
-                h('path', { key: 'p1', d: 'M8.5 4h7l6 10.5-3.5 5.5h-12L2.5 14.5 8.5 4z' }),
-                h('path', { key: 'p2', d: 'M8.5 4l6 10.5H2.5' }),
-                h('path', { key: 'p3', d: 'M15.5 4L9.5 14.5l3 5.5' }),
-              ]),
-            antigravityMark: (sz = 18) =>
-              h(
-                'span',
-                {
-                  style: {
-                    width: sz + 'px',
-                    height: sz + 'px',
-                    borderRadius: '5px',
-                    background: '#ffffff',
-                    display: 'inline-flex',
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                    flexShrink: 0,
-                  },
-                },
-                svgIcon(12, '#1d4ed8', [
-                  h('path', { key: 'a', d: 'M6 19L12 5l6 14M8.5 14h7', strokeWidth: 2.3 }),
-                ]),
-              ),
-            target: (c = '#a3a3a3', sz = 17) =>
-              svgIcon(sz, c, [
-                h('circle', { key: 'c1', cx: 12, cy: 12, r: 8.5 }),
-                h('circle', { key: 'c2', cx: 12, cy: 12, r: 4.5 }),
-                h('circle', { key: 'c3', cx: 12, cy: 12, r: 1.2, fill: c }),
-                h('path', { key: 'ar', d: 'M16.5 7.5L21 3' }),
-              ]),
-            bulb: (c = '#a3a3a3', sz = 17) =>
-              svgIcon(sz, c, [
-                h('path', { key: 'b', d: 'M9 18h6M10 21h4M12 3a6 6 0 0 0-3.5 10.85c.56.42.9 1.08.9 1.78V16h5.2v-.37c0-.7.34-1.36.9-1.78A6 6 0 0 0 12 3z' }),
-              ]),
-            squiggle: (sz = 18) =>
-              h(
-                'svg',
-                {
-                  width: sz,
-                  height: sz,
-                  viewBox: '0 0 24 24',
-                  fill: 'none',
-                  strokeWidth: 2.2,
-                  strokeLinecap: 'round',
-                  strokeLinejoin: 'round',
-                  style: { display: 'block', flexShrink: 0 },
-                },
-                h(
-                  'defs',
-                  null,
-                  h(
-                    'linearGradient',
-                    { id: 'dsb-sq-grad', x1: '0%', y1: '100%', x2: '100%', y2: '0%' },
-                    h('stop', { offset: '0%', stopColor: '#10b981' }),
-                    h('stop', { offset: '55%', stopColor: '#06b6d4' }),
-                    h('stop', { offset: '100%', stopColor: '#3b82f6' }),
-                  ),
-                ),
-                h('path', {
-                  d: 'M4 18c2-8 5-12 6-6s3 6 5-3 3-3 5 4',
-                  stroke: 'url(#dsb-sq-grad)',
-                }),
-              ),
-            pluginBadge: (id, sz = 18) => {
+          const ICONS = {
+            clip: (c) => svgIcon(15, c, [h('path', { key: 'p', d: 'M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48' })]),
+            folder: (c) => svgIcon(15, c, [h('path', { key: 'p', d: 'M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7z' })]),
+            image: (c) => svgIcon(15, c, [h('rect', { key: 'r', x: 3, y: 4, width: 18, height: 16, rx: 2 }), h('circle', { key: 'c', cx: 8.5, cy: 9.5, r: 1.5 }), h('path', { key: 'p', d: 'M21 15l-5-5L5 20' })]),
+            at: (c) => svgIcon(15, c, [h('circle', { key: 'c', cx: 12, cy: 12, r: 4 }), h('path', { key: 'p', d: 'M16 8v5a3 3 0 0 0 6 0v-1a10 10 0 1 0-3.92 7.94' })]),
+            actions: (c) => svgIcon(15, c, [h('rect', { key: 'r', x: 3.5, y: 3.5, width: 17, height: 17, rx: 3.5 }), h('path', { key: 'p', d: 'M9 15l6-6' })]),
+            chrome: (c) => svgIcon(15, c, [h('circle', { key: 'o', cx: 12, cy: 12, r: 9 }), h('circle', { key: 'i', cx: 12, cy: 12, r: 3.5 }), h('path', { key: 'l', d: 'M12 8.5h8.4M8.97 13.75L4.77 6.48M15.03 13.75l-4.2 7.27' })]),
+            slash: (c) => svgIcon(14, c, [h('path', { key: 's', d: 'M15 5L9 19', strokeWidth: 2 })]),
+            check: (c) => svgIcon(14, c, [h('path', { key: 'p', d: 'M5 12.5l4.5 4.5L19 7.5', strokeWidth: 2.2 })]),
+            pluginBadge: (id) => {
               const lower = String(id || '').toLowerCase();
-              if (lower.includes('doc')) {
-                return h(
-                  'span',
-                  {
-                    style: {
-                      width: sz + 'px',
-                      height: sz + 'px',
-                      borderRadius: '4px',
-                      background: '#2563eb',
-                      display: 'inline-flex',
-                      alignItems: 'center',
-                      justifyContent: 'center',
-                      flexShrink: 0,
-                    },
-                  },
-                  svgIcon(12, '#ffffff', [
-                    h('path', { key: 'l1', d: 'M6 8h12M6 12h12M6 16h8', strokeWidth: 2.2 }),
-                  ]),
-                );
-              }
-              if (lower.includes('pdf')) {
-                return h(
-                  'span',
-                  {
-                    style: {
-                      width: sz + 'px',
-                      height: sz + 'px',
-                      borderRadius: '4px',
-                      background: '#dc2626',
-                      color: '#ffffff',
-                      fontSize: '7.5px',
-                      fontWeight: 800,
-                      letterSpacing: '-0.03em',
-                      display: 'inline-flex',
-                      alignItems: 'center',
-                      justifyContent: 'center',
-                      flexShrink: 0,
-                    },
-                  },
-                  'PDF',
-                );
-              }
-              if (lower.includes('sheet') || lower.includes('excel')) {
-                return h(
-                  'span',
-                  {
-                    style: {
-                      width: sz + 'px',
-                      height: sz + 'px',
-                      borderRadius: '4px',
-                      background: '#16a34a',
-                      display: 'inline-flex',
-                      alignItems: 'center',
-                      justifyContent: 'center',
-                      flexShrink: 0,
-                    },
-                  },
-                  svgIcon(12, '#ffffff', [
-                    h('rect', { key: 'r', x: 4, y: 5, width: 16, height: 14, rx: 1.5, strokeWidth: 2 }),
-                    h('path', { key: 'g', d: 'M4 10h16M10 5v14', strokeWidth: 1.8 }),
-                  ]),
-                );
-              }
-              if (lower.includes('present') || lower.includes('slide') || lower.includes('ppt')) {
-                return h(
-                  'span',
-                  {
-                    style: {
-                      width: sz + 'px',
-                      height: sz + 'px',
-                      borderRadius: '4px',
-                      background: '#ea580c',
-                      display: 'inline-flex',
-                      alignItems: 'center',
-                      justifyContent: 'center',
-                      flexShrink: 0,
-                    },
-                  },
-                  svgIcon(12, '#ffffff', [
-                    h('rect', { key: 'r', x: 4, y: 5, width: 16, height: 11, rx: 1.5, strokeWidth: 2 }),
-                    h('path', { key: 's', d: 'M9 19h6M12 16v3', strokeWidth: 2 }),
-                  ]),
-                );
-              }
-              return h(
-                'span',
-                {
-                  style: {
-                    width: sz + 'px',
-                    height: sz + 'px',
-                    borderRadius: '4px',
-                    background: 'rgba(255,255,255,0.12)',
-                    display: 'inline-flex',
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                    flexShrink: 0,
-                  },
-                },
-                svgIcon(12, '#e5e7eb', [
-                  h('circle', { key: 'c', cx: 12, cy: 12, r: 5, strokeWidth: 2 }),
-                ]),
-              );
+              const bg = lower.includes('doc') ? '#2563eb' : lower.includes('pdf') ? '#dc2626' : lower.includes('sheet') ? '#16a34a' : lower.includes('present') ? '#ea580c' : t.accent;
+              const txt = lower.includes('doc') ? 'D' : lower.includes('pdf') ? 'PDF' : lower.includes('sheet') ? 'X' : lower.includes('present') ? 'P' : '•';
+              return h('span', { style: { width: '17px', height: '17px', borderRadius: '4px', background: bg, color: '#fff', fontSize: txt.length > 1 ? '7px' : '10px', fontWeight: 700, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 } }, txt);
             },
-            slash: (c = '#c7c3b8', sz = 15) =>
-              svgIcon(sz, c, [h('path', { key: 's', d: 'M15 5L9 19', strokeWidth: 2 })]),
-            eye: (c = '#a1a1aa', sz = 15) =>
-              svgIcon(sz, c, [
-                h('path', { key: 'e', d: 'M2 12s3.8-6.5 10-6.5S22 12 22 12s-3.8 6.5-10 6.5S2 12 2 12z' }),
-                h('circle', { key: 'c', cx: 12, cy: 12, r: 2.8 }),
-              ]),
-            lock: (c = '#a1a1aa', sz = 15) =>
-              svgIcon(sz, c, [
-                h('rect', { key: 'r', x: 5, y: 11, width: 14, height: 10, rx: 2 }),
-                h('path', { key: 'a', d: 'M8 11V7a4 4 0 0 1 8 0v4' }),
-              ]),
-            shieldOutline: (c = '#a1a1aa', sz = 15) =>
-              svgIcon(sz, c, [
-                h('path', { key: 's', d: 'M12 3l7 3v5c0 4.5-2.9 8.4-7 10-4.1-1.6-7-5.5-7-10V6l7-3z' }),
-              ]),
-            shieldAlert: (c = '#a1a1aa', sz = 15) =>
-              svgIcon(sz, c, [
-                h('path', { key: 's', d: 'M12 3l7 3v5c0 4.5-2.9 8.4-7 10-4.1-1.6-7-5.5-7-10V6l7-3z' }),
-                h('path', { key: 'l', d: 'M12 8.5v4' }),
-                h('circle', { key: 'd', cx: 12, cy: 15.5, r: 0.8, fill: c }),
-              ]),
-            shieldTerm: (c = '#d4d4d4', sz = 16) =>
-              svgIcon(sz, c, [
-                h('path', { key: 's', d: 'M12 3l7 3v5c0 4.5-2.9 8.4-7 10-4.1-1.6-7-5.5-7-10V6l7-3z' }),
-                h('path', { key: 't', d: 'M9 10l2.2 2-2.2 2M13 14h2.5' }),
-              ]),
-            handStop: (c = '#d4d4d4', sz = 16) =>
-              svgIcon(sz, c, [
-                h('path', { key: 'h', d: 'M18 11V6a1.5 1.5 0 0 0-3 0v4M15 10V4.5a1.5 1.5 0 0 0-3 0V10M12 10V5.5a1.5 1.5 0 0 0-3 0V12M9 12V8.5a1.5 1.5 0 0 0-3 0V14a6 6 0 0 0 12 0v-3a1.5 1.5 0 0 0-3 0' }),
-              ]),
-            infoCircle: (c = '#71717a', sz = 11) =>
-              svgIcon(sz, c, [
-                h('circle', { key: 'o', cx: 12, cy: 12, r: 9 }),
-                h('path', { key: 'i', d: 'M12 11v5' }),
-                h('circle', { key: 'd', cx: 12, cy: 8, r: 0.7, fill: c }),
-              ]),
-            gauge: (c = '#a1a1aa', sz = 14) =>
-              svgIcon(sz, c, [
-                h('path', { key: 'a', d: 'M4.5 16.5a8.5 8.5 0 1 1 15 0' }),
-                h('path', { key: 'n', d: 'M12 14l4-4' }),
-                h('circle', { key: 'c', cx: 12, cy: 14, r: 1.2, fill: c }),
-              ]),
-            chevronRight: (c = '#63636c', sz = 12) =>
-              svgIcon(sz, c, [h('path', { key: 'p', d: 'M9 6l6 6-6 6' })]),
-            check: (c = '#e4e4e7', sz = 13) =>
-              svgIcon(sz, c, [h('path', { key: 'p', d: 'M5 12.5l4.5 4.5L19 7.5', strokeWidth: 2 })]),
-            bolt: (c = '#a3a3a3', sz = 16) =>
-              svgIcon(sz, c, [h('path', { key: 'p', d: 'M13 2L4.5 13H12l-1 9 8.5-11H12l1-9z' })]),
-            refresh: (c = '#a3a3a3', sz = 16) =>
-              svgIcon(sz, c, [
-                h('path', { key: 'a', d: 'M20 11a8 8 0 1 0 2 5.3' }),
-                h('path', { key: 'b', d: 'M20 4v7h-7' }),
-              ]),
           };
 
-          // Standard compact row (Antigravity / Claude / Model / Mode)
-          const rowBtn = (key, iconNode, title, sub, active, onClick, rightNode) =>
+          const sectionHdr = (key, title, withTopBorder) =>
+            h(
+              'div',
+              {
+                key,
+                style: {
+                  fontSize: '11px',
+                  fontWeight: 500,
+                  color: t.muted,
+                  padding: withTopBorder ? '8px 10px 4px' : '3px 10px 5px',
+                  borderTop: withTopBorder ? '1px solid ' + t.subtleBorder : 'none',
+                  marginTop: withTopBorder ? '4px' : 0,
+                },
+              },
+              title,
+            );
+
+          const popRow = (key, iconNode, title, sub, active, onClick, rightNode, titleColor) =>
             h(
               'button',
               {
@@ -5467,22 +5645,18 @@ window.__ModuleLoader__.load({
                   justifyContent: 'space-between',
                   gap: '10px',
                   padding: sub ? '7px 10px' : '6px 10px',
-                  minHeight: sub ? '38px' : '33px',
-                  borderRadius: '8px',
+                  borderRadius: '9px',
                   border: 'none',
-                  background: active ? 'rgba(255,255,255,0.10)' : 'transparent',
-                  color: '#eceef2',
+                  background: active ? t.accentBg : 'transparent',
+                  color: titleColor || (active ? t.accent : t.fg),
                   cursor: 'pointer',
                   textAlign: 'left',
-                  fontSize: '13.5px',
-                  lineHeight: '19px',
-                  transition: 'background 0.1s ease',
                   boxSizing: 'border-box',
                 },
               },
               h(
                 'div',
-                { style: { display: 'flex', alignItems: 'center', gap: '10px', minWidth: 0, flex: 1 } },
+                { style: { display: 'flex', alignItems: 'center', gap: '9px', minWidth: 0, flex: 1 } },
                 iconNode || null,
                 h(
                   'div',
@@ -5491,8 +5665,9 @@ window.__ModuleLoader__.load({
                     'div',
                     {
                       style: {
-                        fontWeight: 450,
-                        color: '#eceef2',
+                        fontSize: '12.5px',
+                        fontWeight: active ? 600 : 500,
+                        lineHeight: '18px',
                         whiteSpace: 'nowrap',
                         overflow: 'hidden',
                         textOverflow: 'ellipsis',
@@ -5505,8 +5680,9 @@ window.__ModuleLoader__.load({
                         'div',
                         {
                           style: {
-                            fontSize: '11.5px',
-                            color: 'rgba(209,213,219,0.52)',
+                            fontSize: '11px',
+                            color: t.muted,
+                            lineHeight: '15px',
                             marginTop: '1px',
                             whiteSpace: 'nowrap',
                             overflow: 'hidden',
@@ -5518,297 +5694,15 @@ window.__ModuleLoader__.load({
                     : null,
                 ),
               ),
-              rightNode || (active ? h('span', { style: { color: meta.accent, fontSize: '12px', fontWeight: 700 } }, '✓') : null),
+              rightNode || (active ? ICONS.check(t.accent) : null),
             );
 
-          // Codex 1:1 full-width pill row: [icon] [title] [inline muted description]
-          const codexRowBtn = (key, iconNode, title, inlineDesc, highlighted, onClick, rightNode) =>
-            h(
-              'button',
-              {
-                key,
-                type: 'button',
-                'data-dsb-pop-row': 'codex',
-                onClick: (ev) => {
-                  ev.stopPropagation();
-                  onClick();
-                },
-                style: {
-                  width: '100%',
-                  height: '36px',
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'space-between',
-                  gap: '10px',
-                  padding: '0 14px',
-                  borderRadius: '999px',
-                  border: 'none',
-                  background: highlighted ? '#3d3d3d' : 'transparent',
-                  color: '#ededed',
-                  cursor: 'pointer',
-                  textAlign: 'left',
-                  fontSize: '13.5px',
-                  transition: 'background 0.1s ease',
-                  boxSizing: 'border-box',
-                },
-              },
-              h(
-                'div',
-                { style: { display: 'flex', alignItems: 'center', gap: '10px', minWidth: 0, flex: 1 } },
-                iconNode || null,
-                h(
-                  'span',
-                  {
-                    style: {
-                      fontWeight: highlighted ? 550 : 450,
-                      color: '#ededed',
-                      flexShrink: 0,
-                      whiteSpace: 'nowrap',
-                    },
-                  },
-                  title,
-                ),
-                inlineDesc
-                  ? h(
-                      'span',
-                      {
-                        style: {
-                          color: '#8f8f8f',
-                          fontSize: '13px',
-                          fontWeight: 400,
-                          overflow: 'hidden',
-                          textOverflow: 'ellipsis',
-                          whiteSpace: 'nowrap',
-                        },
-                      },
-                      inlineDesc,
-                    )
-                  : null,
-              ),
-              rightNode || null,
-            );
-
-          const renderCodexSketchPad = () => {
-            const getCanvasPos = (ev) => {
-              const cvs = sketchCanvasRef.current;
-              if (!cvs) return null;
-              const r = cvs.getBoundingClientRect();
-              return {
-                x: ((ev.clientX - r.left) * cvs.width) / Math.max(1, r.width),
-                y: ((ev.clientY - r.top) * cvs.height) / Math.max(1, r.height),
-              };
-            };
-            const onDown = (ev) => {
-              ev.stopPropagation();
-              const cvs = sketchCanvasRef.current;
-              const p = getCanvasPos(ev);
-              if (!cvs || !p) return;
-              const ctx2d = cvs.getContext('2d');
-              if (!ctx2d) return;
-              sketchDrawingRef.current = true;
-              ctx2d.strokeStyle = sketchColorRef.current;
-              ctx2d.lineWidth = 3;
-              ctx2d.lineCap = 'round';
-              ctx2d.lineJoin = 'round';
-              ctx2d.beginPath();
-              ctx2d.moveTo(p.x, p.y);
-            };
-            const onMove = (ev) => {
-              if (!sketchDrawingRef.current) return;
-              const cvs = sketchCanvasRef.current;
-              const p = getCanvasPos(ev);
-              if (!cvs || !p) return;
-              const ctx2d = cvs.getContext('2d');
-              if (!ctx2d) return;
-              ctx2d.lineTo(p.x, p.y);
-              ctx2d.stroke();
-            };
-            const onUp = () => {
-              sketchDrawingRef.current = false;
-            };
-            const clearPad = () => {
-              const cvs = sketchCanvasRef.current;
-              if (!cvs) return;
-              const ctx2d = cvs.getContext('2d');
-              if (ctx2d) ctx2d.clearRect(0, 0, cvs.width, cvs.height);
-            };
-            const attachSketch = () => {
-              const cvs = sketchCanvasRef.current;
-              if (!cvs) return;
-              const exportCvs = document.createElement('canvas');
-              exportCvs.width = cvs.width;
-              exportCvs.height = cvs.height;
-              const ectx = exportCvs.getContext('2d');
-              if (!ectx) return;
-              ectx.fillStyle = '#181818';
-              ectx.fillRect(0, 0, exportCvs.width, exportCvs.height);
-              ectx.drawImage(cvs, 0, 0);
-              const dataUrl = exportCvs.toDataURL('image/png');
-              tauriInvoke('app_save_clipboard_image', {
-                base64Data: dataUrl,
-                mime: 'image/png',
-              })
-                .then((att) => {
-                  if (att) addExtAttachments([att]);
-                  setComposerSubView(null);
-                  setComposerPopover(null);
-                  focusComposerElement();
-                })
-                .catch(() => {});
-            };
-            return [
-              h(
-                'div',
-                {
-                  key: 'sk-hdr',
-                  style: {
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'space-between',
-                    padding: '4px 10px 8px',
-                  },
-                },
-                h(
-                  'div',
-                  { style: { display: 'flex', alignItems: 'center', gap: '8px' } },
-                  h(
-                    'button',
-                    {
-                      type: 'button',
-                      onClick: (ev) => {
-                        ev.stopPropagation();
-                        setComposerSubView(null);
-                      },
-                      style: {
-                        border: 'none',
-                        background: 'rgba(255,255,255,0.07)',
-                        color: '#e5e7eb',
-                        borderRadius: '7px',
-                        padding: '3px 8px',
-                        fontSize: '12px',
-                        cursor: 'pointer',
-                      },
-                    },
-                    '← 返回',
-                  ),
-                  h('span', { style: { fontSize: '12.5px', fontWeight: 500, color: '#ededed' } }, '绘制草图（将作为图片附件发送给 Codex）'),
-                ),
-                h(
-                  'div',
-                  { style: { display: 'flex', alignItems: 'center', gap: '6px' } },
-                  ['#38bdf8', '#f43f5e', '#34d399', '#facc15', '#ffffff'].map((col) =>
-                    h('button', {
-                      key: col,
-                      type: 'button',
-                      onClick: (ev) => {
-                        ev.stopPropagation();
-                        sketchColorRef.current = col;
-                        setSketchColor(col);
-                      },
-                      style: {
-                        width: '16px',
-                        height: '16px',
-                        borderRadius: '999px',
-                        border: sketchColor === col ? '2px solid #ffffff' : '1px solid rgba(255,255,255,0.25)',
-                        background: col,
-                        cursor: 'pointer',
-                        padding: 0,
-                      },
-                    }),
-                  ),
-                  h(
-                    'button',
-                    {
-                      type: 'button',
-                      onClick: (ev) => {
-                        ev.stopPropagation();
-                        clearPad();
-                      },
-                      style: {
-                        border: 'none',
-                        background: 'rgba(255,255,255,0.08)',
-                        color: '#d4d4d8',
-                        borderRadius: '7px',
-                        padding: '3px 9px',
-                        fontSize: '12px',
-                        cursor: 'pointer',
-                      },
-                    },
-                    '清空',
-                  ),
-                  h(
-                    'button',
-                    {
-                      type: 'button',
-                      onClick: (ev) => {
-                        ev.stopPropagation();
-                        attachSketch();
-                      },
-                      style: {
-                        border: 'none',
-                        background: '#0169cc',
-                        color: '#ffffff',
-                        borderRadius: '7px',
-                        padding: '3px 11px',
-                        fontSize: '12px',
-                        fontWeight: 550,
-                        cursor: 'pointer',
-                      },
-                    },
-                    '附加草图',
-                  ),
-                ),
-              ),
-              h('canvas', {
-                key: 'sk-cvs',
-                ref: sketchCanvasRef,
-                width: 760,
-                height: 210,
-                onMouseDown: onDown,
-                onMouseMove: onMove,
-                onMouseUp: onUp,
-                onMouseLeave: onUp,
-                style: {
-                  width: '100%',
-                  height: '210px',
-                  borderRadius: '12px',
-                  background: '#181818',
-                  border: '1px solid rgba(255,255,255,0.08)',
-                  cursor: 'crosshair',
-                  display: 'block',
-                },
-              }),
-            ];
-          };
-
-          let content = null;
-          let panelWidth = 256;
-
-          const pillBadge = (text, hasInfo) =>
-            h(
-              'span',
-              {
-                style: {
-                  display: 'inline-flex',
-                  alignItems: 'center',
-                  gap: '3px',
-                  fontSize: '10px',
-                  lineHeight: '14px',
-                  color: '#8b8b96',
-                  background: '#222228',
-                  border: '1px solid rgba(255,255,255,0.06)',
-                  borderRadius: '999px',
-                  padding: '1px 6px',
-                  flexShrink: 0,
-                },
-              },
-              text,
-              hasInfo ? POP_ICONS.infoCircle('#7c7c88', 10) : null,
-            );
+          let panelWidth = 304;
+          let content = [];
 
           if (composerPopover.kind === 'plus') {
+            panelWidth = 312;
             if (activeHarness === 'antigravity') {
-              panelWidth = 162;
               const actions =
                 Array.isArray(opts.actions) && opts.actions.length > 0
                   ? opts.actions
@@ -5820,81 +5714,16 @@ window.__ModuleLoader__.load({
                       { id: '/compact', label: '/compact', desc: '压缩上下文释放窗口' },
                       { id: '/learn', label: '/learn', desc: '沉淀规则到长期记忆' },
                     ];
-              const agCompactRow = (key, iconNode, label, onClick, rightNode) =>
-                h(
-                  'button',
-                  {
-                    key,
-                    type: 'button',
-                    'data-dsb-pop-row': '1',
-                    onClick: (ev) => {
-                      ev.stopPropagation();
-                      onClick();
-                    },
-                    style: {
-                      width: '100%',
-                      display: 'flex',
-                      alignItems: 'center',
-                      justifyContent: 'space-between',
-                      gap: '8px',
-                      padding: '4px 8px',
-                      minHeight: '28px',
-                      borderRadius: '6px',
-                      border: 'none',
-                      background: 'transparent',
-                      color: '#d4d4d8',
-                      cursor: 'pointer',
-                      textAlign: 'left',
-                      fontSize: '12.5px',
-                      lineHeight: '18px',
-                      boxSizing: 'border-box',
-                    },
-                  },
-                  h(
-                    'span',
-                    { style: { display: 'inline-flex', alignItems: 'center', gap: '8px', minWidth: 0 } },
-                    iconNode,
-                    h('span', { style: { color: '#d4d4d8', fontWeight: 400 } }, label),
-                  ),
-                  rightNode || null,
-                );
               if (composerSubView === 'ag-actions') {
-                panelWidth = 248;
                 content = [
                   h(
                     'div',
-                    {
-                      key: 'act-back',
-                      style: {
-                        display: 'flex',
-                        alignItems: 'center',
-                        justifyContent: 'space-between',
-                        padding: '3px 8px 6px',
-                      },
-                    },
-                    h(
-                      'button',
-                      {
-                        type: 'button',
-                        onClick: (ev) => {
-                          ev.stopPropagation();
-                          setComposerSubView(null);
-                        },
-                        style: {
-                          border: 'none',
-                          background: 'transparent',
-                          color: '#8b8d94',
-                          fontSize: '12px',
-                          cursor: 'pointer',
-                          padding: 0,
-                        },
-                      },
-                      '← Add Context',
-                    ),
-                    h('span', { style: { fontSize: '11.5px', color: '#8b8d94', fontWeight: 500 } }, 'Actions'),
+                    { key: 'ag-act-hdr', style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '3px 10px 6px' } },
+                    h('button', { type: 'button', onClick: (ev) => { ev.stopPropagation(); setComposerSubView(null); }, style: { border: 'none', background: 'transparent', color: t.muted, fontSize: '11.5px', cursor: 'pointer', padding: 0 } }, '← Add Context'),
+                    h('span', { style: { fontSize: '11px', color: t.muted } }, 'Actions'),
                   ),
                   ...actions.map((a) =>
-                    rowBtn('act-' + a.id, POP_ICONS.actionsBox('#a1a1aa', 14), a.label, a.desc, false, () => {
+                    popRow('act-' + a.id, ICONS.slash(t.accent), a.label, a.desc, false, () => {
                       setComposerSubView(null);
                       setComposerPopover(null);
                       insertTextIntoExtComposer(a.id + ' ');
@@ -5903,822 +5732,199 @@ window.__ModuleLoader__.load({
                 ];
               } else {
                 content = [
-                  h(
-                    'div',
-                    {
-                      key: 'hdr',
-                      style: {
-                        fontSize: '11.5px',
-                        color: '#8a8a93',
-                        padding: '2px 8px 4px',
-                        fontWeight: 400,
-                      },
-                    },
-                    'Add Context',
-                  ),
-                  agCompactRow('files', POP_ICONS.paperclip('#a1a1aa', 14), 'Files', () => {
-                    setComposerPopover(null);
-                    pickFilesForExtComposer(false);
-                  }),
-                  agCompactRow('folder', POP_ICONS.folder('#a1a1aa', 14), 'Folder', () => {
-                    setComposerPopover(null);
-                    pickFolderForExtComposer();
-                  }),
-                  agCompactRow('mentions', POP_ICONS.atSign('#a1a1aa', 14), 'Mentions', () => {
-                    setComposerPopover(null);
-                    insertTextIntoExtComposer('@');
-                  }),
-                  agCompactRow('actions', POP_ICONS.actionsBox('#a1a1aa', 14), 'Actions', () => {
-                    setComposerSubView('ag-actions');
-                    scheduleLayoutReport(220);
-                  }),
-                  agCompactRow('browser', POP_ICONS.chrome('#a1a1aa', 14), 'Browser', () => {
-                    setComposerPopover(null);
-                    insertTextIntoExtComposer('/browser ');
-                  }),
-                  agCompactRow(
-                    'drive',
-                    POP_ICONS.drive('#a1a1aa', 14),
-                    'Drive',
-                    () => {
-                      setComposerPopover(null);
-                      const agSel = dsbRuntime.externalSelection.antigravity || {};
-                      tauriInvoke('harness_focus_desktop', {
-                        harness: 'antigravity',
-                        sessionId: agSel.sessionId || '',
-                        title: agSel.title || '',
-                        workspacePath: agSel.workspacePath || '',
-                      }).catch(() => {});
-                    },
-                    h('span', { style: { color: '#4b8cf5', fontSize: '12px', fontWeight: 450, flexShrink: 0 } }, 'Set up'),
-                  ),
+                  sectionHdr('ag-hdr', 'Antigravity · Add Context', false),
+                  popRow('ag-files', ICONS.clip(t.muted), 'Files', '选择本地文件附加给 agy.exe', false, () => { setComposerPopover(null); pickFilesForExtComposer(false); }),
+                  popRow('ag-folder', ICONS.folder(t.muted), 'Folder', '以 --add-dir 授权工作目录', false, () => { setComposerPopover(null); pickFolderForExtComposer(); }),
+                  popRow('ag-at', ICONS.at(t.muted), 'Mentions (@)', '在输入框插入 @ 引用文件或符号', false, () => { setComposerPopover(null); insertTextIntoExtComposer('@'); }),
+                  popRow('ag-act', ICONS.actions(t.muted), 'Actions (/)', '展开 /plan /goal /grill-me /boost', false, () => { setComposerSubView('ag-actions'); scheduleLayoutReport(220); }),
+                  popRow('ag-browser', ICONS.chrome(t.muted), 'Browser', '插入 /browser 调用内置浏览器', false, () => { setComposerPopover(null); insertTextIntoExtComposer('/browser '); }),
                 ];
               }
             } else if (activeHarness === 'codex') {
-              const builtinCodexPlugins = [
+              const builtinPlugins = [
                 { id: 'documents', label: 'Documents', desc: 'Create and edit documents' },
                 { id: 'pdf', label: 'PDF', desc: 'Read, create, and verify PDFs' },
                 { id: 'spreadsheets', label: 'Spreadsheets', desc: 'Create and edit spreadsheets' },
                 { id: 'presentations', label: 'Presentations', desc: 'Create and edit presentations' },
               ];
-              const seenPlg = new Set(builtinCodexPlugins.map((p) => p.label.toLowerCase()));
-              const discovered = Array.isArray(opts.plugins) ? opts.plugins : [];
-              const mergedPlugins = builtinCodexPlugins.concat(
-                discovered.filter((p) => p && p.label && !seenPlg.has(String(p.label).toLowerCase())),
+              const seen = new Set(builtinPlugins.map((x) => x.label.toLowerCase()));
+              const mergedPlugins = builtinPlugins.concat(
+                (Array.isArray(opts.plugins) ? opts.plugins : []).filter((x) => x && x.label && !seen.has(String(x.label).toLowerCase())),
               );
-
               content = [
-                h(
-                  'div',
-                  { key: 'hdr-add', style: { fontSize: '12px', color: '#8f8f8f', padding: '4px 14px 6px', fontWeight: 500 } },
-                  '添加',
-                ),
-                codexRowBtn('cx-files', POP_ICONS.paperclip('#a3a3a3', 16), '文件和文件夹', '', true, () => {
-                  setComposerPopover(null);
-                  pickFilesForExtComposer(false);
-                }),
-                codexRowBtn('cx-ag', POP_ICONS.antigravityMark(18), '附加 Antigravity', '', false, () => {
-                  setComposerPopover(null);
-                  const agWs =
-                    dsbRuntime.externalSelection.antigravity &&
-                    dsbRuntime.externalSelection.antigravity.workspacePath;
-                  if (agWs) {
-                    tauriInvoke('app_describe_paths', { paths: [agWs] })
-                      .then((list) => {
-                        if (Array.isArray(list) && list.length > 0) addExtAttachments(list);
-                        focusComposerElement();
-                      })
-                      .catch(() => {});
-                  } else {
-                    pickFolderForExtComposer();
-                  }
-                }),
-                codexRowBtn('cx-goal', POP_ICONS.target('#a3a3a3', 17), '目标', '设置要持续追求的目标', false, () => {
-                  setComposerPopover(null);
-                  insertTextIntoExtComposer('/goal ');
-                }),
-                codexRowBtn('cx-plan', POP_ICONS.bulb('#a3a3a3', 17), '计划模式', '开启计划模式', false, () => {
-                  setComposerPopover(null);
-                  insertTextIntoExtComposer('/plan ');
-                }),
-                codexRowBtn('cx-draw', POP_ICONS.squiggle(18), '绘图', '绘制草图', false, () => {
-                  setComposerPopover(null);
-                  const cxSel = dsbRuntime.externalSelection.codex || {};
-                  tauriInvoke('harness_focus_desktop', {
-                    harness: 'codex',
-                    sessionId: cxSel.sessionId || '',
-                    title: cxSel.title || '',
-                    workspacePath: cxSel.workspacePath || '',
-                  }).catch(() => {});
-                }),
-                h(
-                  'div',
-                  {
-                    key: 'hdr-plg',
-                    style: {
-                      fontSize: '12px',
-                      color: '#8f8f8f',
-                      padding: '12px 14px 6px',
-                      fontWeight: 500,
-                    },
-                  },
-                  '插件',
-                ),
-                ...mergedPlugins.slice(0, 8).map((p) =>
-                  codexRowBtn(
-                    'plg-' + p.id,
-                    POP_ICONS.pluginBadge(p.id || p.label, 18),
-                    p.label,
-                    p.desc || '',
-                    false,
-                    () => {
-                      setComposerPopover(null);
-                      insertTextIntoExtComposer('使用 ' + p.label + ' 插件：');
-                    },
-                  ),
+                sectionHdr('cx-add', 'Codex · 添加上下文', false),
+                popRow('cx-files', ICONS.clip(t.muted), '文件和文件夹', '作为 localImage / 路径传入 turn/start', false, () => { setComposerPopover(null); pickFilesForExtComposer(false); }),
+                popRow('cx-folder', ICONS.folder(t.muted), '选择整个文件夹', '附加目录路径作为工作上下文', false, () => { setComposerPopover(null); pickFolderForExtComposer(); }),
+                popRow('cx-goal', ICONS.slash(t.accent), '目标 (/goal)', '设置要持续追求的目标', false, () => { setComposerPopover(null); insertTextIntoExtComposer('/goal '); }),
+                popRow('cx-plan', ICONS.slash(t.accent), '计划模式 (/plan)', '开启 Codex 计划模式', false, () => { setComposerPopover(null); insertTextIntoExtComposer('/plan '); }),
+                sectionHdr('cx-plg', '插件', true),
+                ...mergedPlugins.slice(0, 6).map((plg) =>
+                  popRow('plg-' + plg.id, ICONS.pluginBadge(plg.id || plg.label), plg.label, plg.desc || '', false, () => {
+                    setComposerPopover(null);
+                    insertTextIntoExtComposer('使用 ' + plg.label + ' 插件：');
+                  }),
                 ),
               ];
             } else {
-              panelWidth = 248;
               const actions =
                 Array.isArray(opts.actions) && opts.actions.length > 0
                   ? opts.actions
                   : [
-                      { id: '/compact', label: '/compact', desc: '压缩当前上下文' },
                       { id: '/plan', label: '/plan', desc: '进入只读规划模式' },
                       { id: '/review', label: '/review', desc: '代码审查当前改动' },
+                      { id: '/compact', label: '/compact', desc: '压缩当前上下文' },
                       { id: '/cost', label: '/cost', desc: '查看本次会话 Token 用量' },
                       { id: '/clear', label: '/clear', desc: '清空会话重新开始' },
                     ];
               content = [
-                h(
-                  'div',
-                  { key: 'hdr-cc', style: { fontSize: '11.5px', color: 'rgba(234,230,223,0.52)', padding: '3px 10px 5px', fontWeight: 500 } },
-                  '添加上下文',
-                ),
-                rowBtn('cc-files', POP_ICONS.paperclip('#D8D4CA', 15), '添加文件', '', false, () => {
-                  setComposerPopover(null);
-                  pickFilesForExtComposer(false);
-                }),
-                rowBtn('cc-imgs', POP_ICONS.image('#D8D4CA', 15), '添加图片', '', false, () => {
-                  setComposerPopover(null);
-                  pickFilesForExtComposer(true);
-                }),
-                rowBtn('cc-dir', POP_ICONS.folder('#D8D4CA', 15), '添加工作目录', '以 --add-dir 授权给 Claude', false, () => {
-                  setComposerPopover(null);
-                  pickFolderForExtComposer();
-                }),
-                h(
-                  'div',
-                  {
-                    key: 'cc-act-hdr',
-                    style: {
-                      fontSize: '11.5px',
-                      color: 'rgba(234,230,223,0.48)',
-                      padding: '8px 10px 4px',
-                      borderTop: '1px solid rgba(255,248,240,0.08)',
-                      marginTop: '4px',
-                      fontWeight: 500,
-                    },
-                  },
-                  '斜杠指令',
-                ),
+                sectionHdr('cc-add', 'Claude Code · 添加上下文', false),
+                popRow('cc-files', ICONS.clip(t.muted), '添加文件', '随 prompt 传入 claude.exe', false, () => { setComposerPopover(null); pickFilesForExtComposer(false); }),
+                popRow('cc-img', ICONS.image(t.muted), '添加图片', '选择本地截图或设计稿', false, () => { setComposerPopover(null); pickFilesForExtComposer(true); }),
+                popRow('cc-dir', ICONS.folder(t.muted), '添加工作目录', '以 --add-dir 授权给 Claude', false, () => { setComposerPopover(null); pickFolderForExtComposer(); }),
+                sectionHdr('cc-act', '斜杠指令', true),
                 ...actions.map((a) =>
-                  rowBtn('cc-act-' + a.id, POP_ICONS.slash('#D97757', 14), a.label, a.desc, false, () => {
+                  popRow('cc-act-' + a.id, ICONS.slash(t.accent), a.label, a.desc, false, () => {
                     setComposerPopover(null);
                     insertTextIntoExtComposer(a.id + ' ');
                   }),
                 ),
               ];
             }
+          } else if (composerPopover.kind === 'mode') {
+            panelWidth = 316;
+            const curMode = prefs.mode || uo.defaultMode;
+            content = [
+              sectionHdr('m-hdr', meta.label + ' · 权限模式（Shift+Tab 循环）', false),
+              ...uo.modes.map((md) => {
+                const isSel = md.id === curMode;
+                const isDanger = Boolean(md.danger || md.id === 'turbo' || md.id === 'danger-full-access' || md.id === 'auto');
+                return popRow(
+                  'md-' + md.id,
+                  HARNESS_SDK_ICONS.shield(isDanger ? t.permDanger : t.muted),
+                  md.label,
+                  md.desc || '',
+                  isSel,
+                  () => {
+                    updateHarnessPrefs(activeHarness, { mode: md.id });
+                    setComposerPopover(null);
+                  },
+                  null,
+                  isDanger ? t.permDanger : undefined,
+                );
+              }),
+            ];
           } else if (composerPopover.kind === 'model') {
-            if (activeHarness === 'antigravity') {
-              // 1:1 Antigravity 2.35.1 Select Model popover mapped directly to `agy --model` / `--effort`
-              panelWidth = 310;
-              const agModels = [
-                { id: 'gemini-4-neon-high', label: 'Gemini 4 Neon', effort: 'High', badge: 'New', info: true, hasSub: true },
-                { id: 'gemini-4-carbon-medium', label: 'Gemini 4 Carbon', effort: 'Medium', badge: 'New', info: true, hasSub: true },
-                { id: 'gemini-4-argon-medium', label: 'Gemini 4 Argon', effort: 'Medium', badge: 'Leaving Soon', info: true, hasSub: true },
-                { id: 'gemini-4-hydrogen-medium', label: 'Gemini 4 Hydrogen', effort: 'Medium', badge: 'New', info: true, hasSub: true },
-                { id: 'gemini-pro-orchestrator-neon', label: 'Orchestrator', effort: 'Claude Opus 5.5 High', badge: 'New', info: true, hasSub: true },
-                { id: 'gemini-3.8-flash-medium', label: 'Gemini 3.8 Flash', effort: 'Medium', badge: 'Leaving Soon', info: true, hasSub: true },
-                { id: 'claude-opus-5-5-medium', label: 'Claude Opus 5.5', effort: 'Medium', badge: 'New', info: false, hasSub: true },
-                { id: 'claude-sonnet-5-5-medium', label: 'Claude Sonnet 5.5', effort: 'Medium', badge: 'New', info: false, hasSub: true },
-                { id: 'gpt-oss-120b-medium', label: 'GPT-OSS 120B (Medium)', effort: '', badge: 'Notice', info: true, hasSub: false },
-              ];
-              const curModel = prefs.model || opts.defaultModel || 'gemini-4-neon-high';
-              content = [
-                h(
-                  'div',
-                  { key: 'hdr-agm', style: { fontSize: '11.5px', color: '#8a8a93', padding: '2px 8px 3px', fontWeight: 400 } },
-                  'Model',
-                ),
-                ...agModels.map((m) => {
-                  const isSel = m.id === curModel || (curModel === 'gemini-4-neon' && m.id === 'gemini-4-neon-high');
-                  return h(
-                    'button',
-                    {
-                      key: 'agm-' + m.id,
-                      type: 'button',
-                      'data-dsb-pop-row': '1',
-                      onClick: (ev) => {
-                        ev.stopPropagation();
-                        const eff = m.effort.toLowerCase().includes('high') ? 'high' : m.effort.toLowerCase().includes('low') ? 'low' : 'medium';
-                        updateHarnessPrefs('antigravity', { model: m.id, effort: eff });
-                        setComposerPopover(null);
+            panelWidth = 304;
+            const curModel = prefs.model || uo.defaultModel;
+            const curEffort = prefs.effort || uo.defaultEffort;
+            const fastOn = Boolean(prefs.fastSpeed);
+            content = [
+              h(
+                'div',
+                { key: 'mdl-hdr', style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '3px 10px 5px' } },
+                h('span', { style: { fontSize: '11px', fontWeight: 500, color: t.muted } }, meta.label + ' · 选择模型'),
+                activeHarness === 'codex'
+                  ? h(
+                      'button',
+                      {
+                        type: 'button',
+                        onClick: (ev) => { ev.stopPropagation(); updateHarnessPrefs('codex', { fastSpeed: !fastOn }); },
+                        style: {
+                          border: '1px solid ' + (fastOn ? t.accentBorder : t.subtleBorder),
+                          background: fastOn ? t.accentBg : 'transparent',
+                          color: fastOn ? t.accent : t.muted,
+                          borderRadius: '999px',
+                          padding: '1px 8px',
+                          fontSize: '10.5px',
+                          cursor: 'pointer',
+                        },
                       },
-                      style: {
-                        width: '100%',
-                        display: 'flex',
-                        alignItems: 'center',
-                        justifyContent: 'space-between',
-                        gap: '6px',
-                        padding: '3px 8px',
-                        minHeight: '25px',
-                        borderRadius: '6px',
-                        border: 'none',
-                        background: 'transparent',
-                        color: isSel ? '#f4f4f5' : '#c8c8d0',
-                        cursor: 'pointer',
-                        textAlign: 'left',
-                        fontSize: '12px',
-                        lineHeight: '17px',
-                        boxSizing: 'border-box',
-                      },
-                    },
-                    h(
-                      'span',
-                      { style: { display: 'inline-flex', alignItems: 'center', gap: '5px', minWidth: 0, overflow: 'hidden' } },
-                      h('span', { style: { color: isSel ? '#f4f4f5' : '#d4d4d8', fontWeight: isSel ? 500 : 400, whiteSpace: 'nowrap' } }, m.label),
-                      m.effort
-                        ? h('span', { style: { color: '#7c7c86', fontSize: '11.5px', whiteSpace: 'nowrap' } }, m.effort)
-                        : null,
-                      m.badge ? pillBadge(m.badge, m.info) : null,
-                    ),
-                    isSel ? POP_ICONS.check('#e4e4e7', 12) : m.hasSub ? POP_ICONS.chevronRight('#63636c', 11) : null,
-                  );
-                }),
-                h('div', { key: 'agm-div', style: { height: '1px', background: '#26262c', margin: '3px 4px' } }),
-                h(
-                  'button',
-                  {
-                    key: 'agm-usage',
-                    type: 'button',
-                    'data-dsb-pop-row': '1',
-                    onClick: (ev) => {
-                      ev.stopPropagation();
-                      setComposerPopover(null);
-                      const agSel = dsbRuntime.externalSelection.antigravity || {};
-                      tauriInvoke('harness_focus_desktop', {
-                        harness: 'antigravity',
-                        sessionId: agSel.sessionId || '',
-                        title: agSel.title || '',
-                        workspacePath: agSel.workspacePath || '',
-                      }).catch(() => {});
-                    },
-                    style: {
-                      width: '100%',
-                      display: 'flex',
-                      alignItems: 'center',
-                      justifyContent: 'space-between',
-                      padding: '4px 8px',
-                      minHeight: '26px',
-                      borderRadius: '6px',
-                      border: 'none',
-                      background: 'transparent',
-                      color: '#c8c8d0',
-                      cursor: 'pointer',
-                      fontSize: '12px',
-                      boxSizing: 'border-box',
-                    },
+                      '⚡ 1.5x ' + (fastOn ? '开' : '关'),
+                    )
+                  : null,
+              ),
+              ...uo.models.map((m) => {
+                const isSel = m.id === curModel || (curModel === 'gemini-4-neon' && m.id === 'gemini-4-neon-high');
+                const tagText = m.tag || (m.desc && m.desc.includes('|') ? m.desc.split('|')[1] : '');
+                return popRow(
+                  'mdl-' + m.id,
+                  null,
+                  m.label,
+                  '',
+                  isSel,
+                  () => {
+                    updateHarnessPrefs(activeHarness, { model: m.id });
                   },
                   h(
                     'span',
-                    { style: { display: 'inline-flex', alignItems: 'center', gap: '7px' } },
-                    POP_ICONS.gauge('#a1a1aa', 13),
-                    h('span', null, 'View Usage'),
+                    { style: { display: 'inline-flex', alignItems: 'center', gap: '6px', flexShrink: 0 } },
+                    tagText
+                      ? h(
+                          'span',
+                          {
+                            style: {
+                              fontSize: '10px',
+                              padding: '1px 6px',
+                              borderRadius: '999px',
+                              background: t.isDark ? 'rgba(255,255,255,0.07)' : 'rgba(15,23,42,0.06)',
+                              color: t.muted,
+                            },
+                          },
+                          tagText,
+                        )
+                      : null,
+                    isSel ? ICONS.check(t.accent) : null,
                   ),
-                  POP_ICONS.chevronRight('#63636c', 11),
-                ),
-              ];
-            } else if (activeHarness === 'codex') {
-              // 1:1 Codex Desktop effort slider card + inline model selector mapped to Codex app-server `effort` & `model`
-              const cxModels =
-                Array.isArray(opts.models) && opts.models.length > 0
-                  ? opts.models
-                  : [
-                      { id: 'default', label: '默认' },
-                      { id: 'gpt-6.2-sol', label: 'GPT-6.2 Sol' },
-                      { id: 'gpt-6.2-astra', label: 'GPT-6.2 Astra' },
-                      { id: 'gpt-6.1-terra', label: 'GPT-6.1 Terra' },
-                      { id: 'gpt-6.1-sol', label: 'GPT-6.1 Sol' },
-                      { id: 'gpt-6-astra', label: 'GPT-6 Astra' },
-                      { id: 'gpt-6-sol', label: 'GPT-6 Sol' },
-                      { id: 'gpt-6-luna', label: 'GPT-6 Luna' },
-                      { id: 'gpt-5.6-sol', label: 'GPT-5.6 Sol' },
-                      { id: 'gpt-5.6-terra', label: 'GPT-5.6 Terra' },
-                    ];
-              const cxEfforts = [
-                { id: 'minimal', label: '极低' },
-                { id: 'low', label: '低' },
-                { id: 'high', label: '高' },
-                { id: 'xhigh', label: '极高' },
-                { id: 'max', label: '最高' },
-              ];
-              const curModelId = prefs.model || opts.defaultModel || 'gpt-6-luna';
-              const curEffortId = prefs.effort || opts.defaultEffort || 'high';
-              const curModelObj = cxModels.find((m) => m.id === curModelId) || cxModels.find((m) => m.id === 'gpt-6-luna') || cxModels[0];
-              const effIdx = Math.max(0, cxEfforts.findIndex((e) => e.id === curEffortId));
-              const curEffortObj = cxEfforts[effIdx] || cxEfforts[2];
-              const fastOn = Boolean(prefs.fastSpeed);
-
-              if (composerSubView === 'codex-models') {
-                panelWidth = 256;
-                const defItem = cxModels.find((m) => m.id === 'default') || { id: 'default', label: '默认' };
-                const recModels = cxModels.filter((m) => m.id !== 'default');
-                content = [
-                  h('div', { key: 'cxm-hdr', style: { fontSize: '12px', color: '#8f8f8f', padding: '3px 12px 3px', fontWeight: 400 } }, '选择模型'),
-                  h(
-                    'button',
-                    {
-                      key: 'cxm-def',
-                      type: 'button',
-                      'data-dsb-pop-row': '1',
-                      onClick: (ev) => {
-                        ev.stopPropagation();
-                        updateHarnessPrefs('codex', { model: 'default' });
-                        setComposerSubView(null);
-                      },
-                      style: {
-                        width: '100%',
-                        display: 'flex',
-                        alignItems: 'center',
-                        justifyContent: 'space-between',
-                        padding: '4px 12px',
-                        borderRadius: '999px',
-                        border: 'none',
-                        background: 'transparent',
-                        color: '#ededed',
-                        fontSize: '13px',
-                        cursor: 'pointer',
-                        textAlign: 'left',
-                      },
-                    },
-                    h('span', null, defItem.label),
-                    curModelId === 'default' ? POP_ICONS.check('#d4d4d4', 14) : null,
-                  ),
-                  h('div', { key: 'cxm-sub', style: { fontSize: '11.5px', color: '#8f8f8f', padding: '3px 12px 3px', fontWeight: 400 } }, '推荐模型集'),
-                  ...recModels.map((m) => {
-                    const isSel = m.id === curModelId;
-                    return h(
-                      'button',
-                      {
-                        key: 'cxm-' + m.id,
-                        type: 'button',
-                        'data-dsb-pop-row': '1',
-                        onClick: (ev) => {
-                          ev.stopPropagation();
-                          updateHarnessPrefs('codex', { model: m.id });
-                          setComposerSubView(null);
-                        },
-                        style: {
-                          width: '100%',
-                          display: 'flex',
-                          alignItems: 'center',
-                          justifyContent: 'space-between',
-                          padding: '6px 12px',
-                          borderRadius: '999px',
-                          border: 'none',
-                          background: 'transparent',
-                          color: '#ededed',
-                          fontSize: '13px',
-                          cursor: 'pointer',
-                          textAlign: 'left',
-                        },
-                      },
-                      h('span', null, m.label),
-                      isSel ? POP_ICONS.check('#d4d4d4', 14) : null,
-                    );
-                  }),
-                ];
-              } else {
-                panelWidth = 268;
-                const fillPct = Math.round(((effIdx + 0.5) / cxEfforts.length) * 100);
-                content = [
-                  h(
+                );
+              }),
+              uo.efforts.length > 0
+                ? h(
                     'div',
                     {
-                      key: 'cxe-top',
+                      key: 'eff-bar',
                       style: {
-                        display: 'flex',
-                        alignItems: 'flex-start',
-                        justifyContent: 'space-between',
-                        padding: '4px 6px 14px',
+                        marginTop: '6px',
+                        padding: '7px 6px 2px',
+                        borderTop: '1px solid ' + t.subtleBorder,
                       },
                     },
-                    h(
-                      'button',
-                      {
-                        type: 'button',
-                        title: '1.5 倍速度 · 用量更多',
-                        onClick: (ev) => {
-                          ev.stopPropagation();
-                          updateHarnessPrefs('codex', { fastSpeed: !fastOn });
-                        },
-                        style: {
-                          width: '30px',
-                          height: '30px',
-                          borderRadius: '9px',
-                          border: 'none',
-                          background: fastOn ? '#3f3f46' : 'transparent',
-                          cursor: 'pointer',
-                          display: 'inline-flex',
-                          alignItems: 'center',
-                          justifyContent: 'center',
-                          padding: 0,
-                        },
-                      },
-                      POP_ICONS.bolt(fastOn ? '#60a5fa' : '#9ca3af', 16),
-                    ),
+                    h('div', { style: { fontSize: '10.5px', color: t.muted, marginBottom: '5px', paddingLeft: '2px' } }, '推理强度'),
                     h(
                       'div',
-                      { style: { display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '2px' } },
-                      h('span', { style: { fontSize: '16px', fontWeight: 600, color: '#3b82f6', lineHeight: '22px' } }, curEffortObj.label),
-                      h(
-                        'button',
-                        {
-                          type: 'button',
-                          onClick: (ev) => {
-                            ev.stopPropagation();
-                            setComposerSubView('codex-models');
-                            scheduleLayoutReport(220);
+                      { style: { display: 'flex', gap: '4px' } },
+                      uo.efforts.map((ef) => {
+                        const isSel = ef.id === curEffort;
+                        return h(
+                          'button',
+                          {
+                            key: 'ef-' + ef.id,
+                            type: 'button',
+                            onClick: (ev) => {
+                              ev.stopPropagation();
+                              updateHarnessPrefs(activeHarness, { effort: ef.id });
+                            },
+                            style: {
+                              flex: 1,
+                              padding: '5px 3px',
+                              borderRadius: '8px',
+                              border: '1px solid ' + (isSel ? t.accentBorder : t.subtleBorder),
+                              background: isSel ? t.accentBg : 'transparent',
+                              color: isSel ? t.accent : t.muted,
+                              fontSize: '11.5px',
+                              fontWeight: isSel ? 600 : 400,
+                              cursor: 'pointer',
+                            },
                           },
-                          style: {
-                            border: 'none',
-                            background: 'transparent',
-                            color: '#cfcfcf',
-                            fontSize: '13px',
-                            cursor: 'pointer',
-                            display: 'inline-flex',
-                            alignItems: 'center',
-                            gap: '2px',
-                            padding: '1px 6px',
-                            borderRadius: '6px',
-                          },
-                        },
-                        curModelObj.label,
-                        POP_ICONS.chevronRight('#9ca3af', 12),
-                      ),
+                          ef.label,
+                        );
+                      }),
                     ),
-                    h(
-                      'button',
-                      {
-                        type: 'button',
-                        title: '重置为默认推理强度',
-                        onClick: (ev) => {
-                          ev.stopPropagation();
-                          updateHarnessPrefs('codex', { effort: opts.defaultEffort || 'high', fastSpeed: false });
-                        },
-                        style: {
-                          width: '30px',
-                          height: '30px',
-                          borderRadius: '9px',
-                          border: 'none',
-                          background: 'transparent',
-                          cursor: 'pointer',
-                          display: 'inline-flex',
-                          alignItems: 'center',
-                          justifyContent: 'center',
-                          padding: 0,
-                        },
-                      },
-                      POP_ICONS.refresh('#9ca3af', 15),
-                    ),
-                  ),
-                  // 5-stop pill slider matching Codex Desktop (`paste-2.png`)
-                  h(
-                    'div',
-                    {
-                      key: 'cxe-slider',
-                      style: {
-                        position: 'relative',
-                        height: '32px',
-                        margin: '2px 8px 6px',
-                        borderRadius: '999px',
-                        background: '#3d3d3d',
-                        display: 'flex',
-                        alignItems: 'center',
-                        justifyContent: 'space-between',
-                        padding: '0 6px',
-                        boxSizing: 'border-box',
-                        overflow: 'visible',
-                      },
-                    },
-                    h('div', {
-                      style: {
-                        position: 'absolute',
-                        left: 0,
-                        top: 0,
-                        bottom: 0,
-                        width: Math.max(14, fillPct) + '%',
-                        borderRadius: '999px',
-                        background: '#2f7df6',
-                        pointerEvents: 'none',
-                      },
-                    }),
-                    ...cxEfforts.map((ef, idx) => {
-                      const isCur = idx === effIdx;
-                      return h(
-                        'button',
-                        {
-                          key: 'stop-' + ef.id,
-                          type: 'button',
-                          title: ef.label,
-                          onClick: (ev) => {
-                            ev.stopPropagation();
-                            updateHarnessPrefs('codex', { effort: ef.id });
-                          },
-                          style: {
-                            position: 'relative',
-                            zIndex: 2,
-                            width: isCur ? '28px' : '22px',
-                            height: isCur ? '28px' : '22px',
-                            borderRadius: '999px',
-                            border: 'none',
-                            background: isCur ? '#ffffff' : 'transparent',
-                            boxShadow: isCur ? '0 2px 6px rgba(0,0,0,0.45)' : 'none',
-                            cursor: 'pointer',
-                            display: 'inline-flex',
-                            alignItems: 'center',
-                            justifyContent: 'center',
-                            padding: 0,
-                          },
-                        },
-                        isCur
-                          ? null
-                          : h('span', {
-                              style: {
-                                width: '4px',
-                                height: '4px',
-                                borderRadius: '999px',
-                                background: idx < effIdx ? 'rgba(255,255,255,0.45)' : 'rgba(255,255,255,0.28)',
-                              },
-                            }),
-                      );
-                    }),
-                  ),
-                ];
-              }
-            } else {
-              panelWidth = 276;
-              const defaultModels = [
-                { id: 'claude-opus-5-5', label: 'Opus 5.5', desc: 'Best for everyday, complex tasks' },
-                { id: 'claude-fable-5-2', label: 'Fable 5.2', desc: 'Most capable for hardest tasks' },
-                { id: 'claude-sonnet-5-5', label: 'Sonnet 5.5', desc: 'Efficient for routine tasks' },
-                { id: 'claude-haiku-5-5', label: 'Haiku 5.5', desc: 'Fastest for quick answers' },
-              ];
-              const defaultEfforts = [
-                { id: 'low', label: '低', desc: '快速响应' },
-                { id: 'medium', label: '中', desc: '常规推理' },
-                { id: 'high', label: '高', desc: '深度推理' },
-                { id: 'max', label: '极高', desc: '最大思考深度' },
-              ];
-              const models = Array.isArray(opts.models) && opts.models.length > 0 ? opts.models : defaultModels;
-              const efforts = Array.isArray(opts.efforts) && opts.efforts.length > 0 ? opts.efforts : defaultEfforts;
-              const curModel = prefs.model || opts.defaultModel || (models[0] && models[0].id) || '';
-              const curEffort = prefs.effort || opts.defaultEffort || 'medium';
-              content = [
-                h('div', { key: 'hdr-m', style: { fontSize: '11.5px', color: 'rgba(209,213,219,0.52)', padding: '3px 10px 5px', fontWeight: 500 } }, '选择模型'),
-                ...models.map((m) =>
-                  rowBtn('m-' + m.id, null, m.label, m.desc, m.id === curModel, () => {
-                    updateHarnessPrefs(activeHarness, { model: m.id });
-                  }),
-                ),
-                h(
-                  'div',
-                  {
-                    key: 'eff-box',
-                    style: {
-                      marginTop: '6px',
-                      padding: '8px 8px 4px',
-                      borderTop: '1px solid rgba(255,255,255,0.08)',
-                    },
-                  },
-                  h('div', { style: { fontSize: '11px', color: 'rgba(209,213,219,0.52)', marginBottom: '6px', paddingLeft: '2px' } }, '推理深度'),
-                  h(
-                    'div',
-                    { style: { display: 'flex', gap: '4px' } },
-                    efforts.map((ef) =>
-                      h(
-                        'button',
-                        {
-                          key: ef.id,
-                          type: 'button',
-                          title: ef.desc,
-                          onClick: (ev) => {
-                            ev.stopPropagation();
-                            updateHarnessPrefs(activeHarness, { effort: ef.id });
-                          },
-                          style: {
-                            flex: 1,
-                            padding: '5px 4px',
-                            borderRadius: '7px',
-                            border: ef.id === curEffort ? '1px solid ' + meta.accentBorder : '1px solid rgba(255,255,255,0.08)',
-                            background: ef.id === curEffort ? meta.accentBg : 'rgba(255,255,255,0.04)',
-                            color: ef.id === curEffort ? meta.accent : '#d4d4d8',
-                            fontSize: '11.5px',
-                            fontWeight: ef.id === curEffort ? 600 : 400,
-                            cursor: 'pointer',
-                          },
-                        },
-                        ef.label,
-                      ),
-                    ),
-                  ),
-                ),
-              ];
-            }
-          } else if (composerPopover.kind === 'mode') {
-            if (activeHarness === 'antigravity') {
-              // 1:1 Antigravity 2.35.1 `This Conversation` permissions selector mapped to `agy` flags
-              panelWidth = 286;
-              const agModes = [
-                { id: 'request-review', label: 'Request Review', desc: 'Every command requires approval.', icon: POP_ICONS.eye('#a1a1aa', 15) },
-                { id: 'default', label: 'Default', badge: 'Default', info: true, desc: 'Ask before sensitive operations.', icon: POP_ICONS.lock('#a1a1aa', 15) },
-                { id: 'auto', label: 'Auto', desc: 'Automatically decide if commands run.', icon: POP_ICONS.shieldOutline('#a1a1aa', 15) },
-                { id: 'turbo', label: 'Turbo', desc: 'Run all commands without restrictions.', icon: POP_ICONS.shieldAlert('#d4d4d8', 15) },
-              ];
-              const curMode = prefs.mode || opts.defaultMode || 'turbo';
-              content = [
-                h(
-                  'div',
-                  {
-                    key: 'hdr-agp',
-                    style: {
-                      display: 'inline-flex',
-                      alignItems: 'center',
-                      gap: '5px',
-                      fontSize: '11.5px',
-                      color: '#8a8a93',
-                      padding: '2px 8px 4px',
-                      fontWeight: 400,
-                    },
-                  },
-                  'This Conversation',
-                  POP_ICONS.infoCircle('#71717a', 11),
-                ),
-                ...agModes.map((md) => {
-                  const isSel = md.id === curMode;
-                  return h(
-                    'button',
-                    {
-                      key: 'agp-' + md.id,
-                      type: 'button',
-                      'data-dsb-pop-row': '1',
-                      onClick: (ev) => {
-                        ev.stopPropagation();
-                        updateHarnessPrefs('antigravity', { mode: md.id });
-                        setComposerPopover(null);
-                      },
-                      style: {
-                        width: '100%',
-                        display: 'flex',
-                        alignItems: 'center',
-                        justifyContent: 'space-between',
-                        gap: '10px',
-                        padding: '5px 8px',
-                        borderRadius: '7px',
-                        border: 'none',
-                        background: 'transparent',
-                        cursor: 'pointer',
-                        textAlign: 'left',
-                        boxSizing: 'border-box',
-                      },
-                    },
-                    h(
-                      'div',
-                      { style: { display: 'flex', alignItems: 'center', gap: '10px', minWidth: 0, flex: 1 } },
-                      md.icon,
-                      h(
-                        'div',
-                        { style: { minWidth: 0, flex: 1 } },
-                        h(
-                          'div',
-                          { style: { display: 'flex', alignItems: 'center', gap: '6px', fontSize: '12.5px', fontWeight: isSel ? 500 : 400, color: '#e4e4e7', lineHeight: '17px' } },
-                          md.label,
-                          md.badge ? pillBadge(md.badge, md.info) : null,
-                        ),
-                        h(
-                          'div',
-                          { style: { fontSize: '11.5px', color: '#7c7c86', lineHeight: '16px', marginTop: '1px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' } },
-                          md.desc,
-                        ),
-                      ),
-                    ),
-                    isSel ? POP_ICONS.check('#e4e4e7', 13) : null,
-                  );
-                }),
-              ];
-            } else if (activeHarness === 'codex') {
-              // 1:1 Codex Desktop `应如何批准 ChatGPT 操作?` permissions menu mapped to Codex app-server
-              panelWidth = 348;
-              const cxModes = [
-                { id: 'request-approval', label: '请求批准', desc: '编辑外部文件和使用互联网时始终询问', icon: POP_ICONS.handStop('#d4d4d4', 17), danger: false },
-                { id: 'help-approve', label: '帮我批准', desc: '仅对检测到的风险操作请求批准', icon: POP_ICONS.shieldTerm('#d4d4d4', 17), danger: false },
-                { id: 'danger-full-access', label: '完全访问权限', desc: '可不受限制地访问互联网和你电脑上的任何文件', icon: POP_ICONS.shieldAlert('#d96b27', 17), danger: true },
-              ];
-              const curMode = prefs.mode || opts.defaultMode || 'danger-full-access';
-              content = [
-                h(
-                  'div',
-                  {
-                    key: 'hdr-cxp',
-                    style: {
-                      display: 'flex',
-                      alignItems: 'center',
-                      justifyContent: 'space-between',
-                      padding: '4px 10px 6px',
-                      fontSize: '12px',
-                      color: '#9a9a9a',
-                    },
-                  },
-                  h('span', null, '应如何批准 ChatGPT 操作?'),
-                  h('span', { style: { textDecoration: 'underline', color: '#9a9a9a', cursor: 'default' } }, '了解更多'),
-                ),
-                ...cxModes.map((md) => {
-                  const isSel = md.id === curMode;
-                  const titleColor = md.danger ? '#d96b27' : '#ededed';
-                  const subColor = md.danger ? '#b85b22' : '#8f8f8f';
-                  return h(
-                    'button',
-                    {
-                      key: 'cxp-' + md.id,
-                      type: 'button',
-                      'data-dsb-pop-row': '1',
-                      onClick: (ev) => {
-                        ev.stopPropagation();
-                        updateHarnessPrefs('codex', { mode: md.id });
-                        setComposerPopover(null);
-                      },
-                      style: {
-                        width: '100%',
-                        display: 'flex',
-                        alignItems: 'center',
-                        justifyContent: 'space-between',
-                        gap: '10px',
-                        padding: '6px 10px',
-                        borderRadius: '10px',
-                        border: 'none',
-                        background: 'transparent',
-                        cursor: 'pointer',
-                        textAlign: 'left',
-                        boxSizing: 'border-box',
-                      },
-                    },
-                    h(
-                      'div',
-                      { style: { display: 'flex', alignItems: 'center', gap: '11px', minWidth: 0, flex: 1 } },
-                      md.icon,
-                      h(
-                        'div',
-                        { style: { minWidth: 0, flex: 1 } },
-                        h('div', { style: { fontSize: '13px', fontWeight: 500, color: titleColor, lineHeight: '18px', whiteSpace: 'nowrap' } }, md.label),
-                        h('div', { style: { fontSize: '11.5px', color: subColor, lineHeight: '16px', marginTop: '1px', whiteSpace: 'nowrap' } }, md.desc),
-                      ),
-                    ),
-                    isSel ? POP_ICONS.check(md.danger ? '#d96b27' : '#ededed', 14) : null,
-                  );
-                }),
-              ];
-            } else {
-              panelWidth = 256;
-              const modes =
-                Array.isArray(opts.modes) && opts.modes.length > 0
-                  ? opts.modes
-                  : [
-                      { id: 'auto', label: '自动', desc: '智能自动执行并拦截高危操作' },
-                      { id: 'acceptEdits', label: '自动编辑', desc: '自动允许文件编辑' },
-                      { id: 'plan', label: '仅规划', desc: '只读分析与规划，不修改文件' },
-                      { id: 'dontAsk', label: '免询问', desc: '免交互确认提示' },
-                    ];
-              const curMode = prefs.mode || opts.defaultMode || (modes[0] && modes[0].id) || '';
-              content = [
-                h('div', { key: 'hdr-mode', style: { fontSize: '11.5px', color: 'rgba(209,213,219,0.52)', padding: '3px 10px 5px', fontWeight: 500 } }, '执行模式'),
-                ...modes.map((md) =>
-                  rowBtn('md-' + md.id, HARNESS_SDK_ICONS.shield(md.id === curMode ? meta.accent : '#9ca3af'), md.label, md.desc, md.id === curMode, () => {
-                    updateHarnessPrefs(activeHarness, { mode: md.id });
-                    setComposerPopover(null);
-                  }),
-                ),
-              ];
-            }
+                  )
+                : null,
+            ];
           }
 
-          const isFullWidth = Boolean(composerPopover.fullWidth || isCodexPlus);
-          const clampedLeft = isFullWidth
-            ? 0
-            : Math.max(8, Math.min(window.innerWidth - panelWidth - 8, composerPopover.left));
-          const isAgAny = activeHarness === 'antigravity';
+          const clampedLeft = Math.max(8, Math.min(window.innerWidth - panelWidth - 8, composerPopover.left));
           const pop = h(
             'div',
             {
@@ -6728,16 +5934,16 @@ window.__ModuleLoader__.load({
               style: {
                 position: 'fixed',
                 left: clampedLeft + 'px',
-                right: isFullWidth ? '0px' : 'auto',
                 bottom: composerPopover.bottom + 'px',
-                width: isFullWidth ? '100vw' : panelWidth + 'px',
-                maxHeight: isCodexPlus ? '410px' : isAgAny ? '360px' : '340px',
+                width: panelWidth + 'px',
+                maxHeight: '360px',
                 overflowY: 'auto',
-                background: panelBg,
-                border: '1px solid ' + panelBorder,
-                borderRadius: isCodexPlus ? '18px' : isAgAny ? '10px' : activeHarness === 'codex' ? '16px' : '14px',
-                padding: isCodexPlus ? '10px 8px' : isAgAny ? '4px' : activeHarness === 'codex' ? '8px' : '7px 6px',
-                boxShadow: '0 16px 42px rgba(0, 0, 0, 0.58)',
+                background: t.popover,
+                color: t.fg,
+                border: '1px solid ' + t.border,
+                borderRadius: '14px',
+                padding: '7px',
+                boxShadow: panelShadow,
                 zIndex: 9999,
                 boxSizing: 'border-box',
                 fontFamily: '"Segoe UI", "Inter", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif',
@@ -6792,10 +5998,7 @@ window.__ModuleLoader__.load({
             },
           };
 
-          if (adapter && typeof adapter.renderComposer === 'function') {
-            return adapter.renderComposer(composerCtx);
-          }
-          return renderDefaultAdaptiveComposer(composerCtx);
+          return renderUnifiedDshComposer(composerCtx);
         };
 
         return h(
@@ -8114,12 +7317,19 @@ window.__ModuleLoader__.load({
             ? Math.max(8, Math.min(Math.round(chipRect.left), Math.max(8, winW - totalCascadeW - 8)))
             : 12;
 
-          const panelBg = harnessTheme.surface;
-          const panelBorder = harnessTheme.border;
-          const browsedTheme = browsedMeta;
+          const unifiedPanelTheme = getUnifiedTheme(activeHarness);
+          const panelBg = unifiedPanelTheme.popover;
+          const panelBorder = unifiedPanelTheme.border;
+          const panelFg = unifiedPanelTheme.fg;
+          const panelMuted = unifiedPanelTheme.muted;
+          const panelRowBg = unifiedPanelTheme.isDark ? 'rgba(255,255,255,0.04)' : 'rgba(15,23,42,0.04)';
+          const panelShadow = unifiedPanelTheme.isDark
+            ? '0 10px 28px rgba(0,0,0,0.46)'
+            : '0 10px 26px rgba(15,23,42,0.14)';
+          const browsedTheme = Object.assign({}, browsedMeta, getUnifiedTheme(browsedHarness));
 
           const snap = dsbRuntime.appSettings || {
-            version: '0.5.4',
+            version: '0.6.0',
             isElevated: false,
             dshStatus: '已连接',
             config: {
@@ -8169,7 +7379,8 @@ window.__ModuleLoader__.load({
                   gap: '10px',
                   padding: '6px 8px',
                   borderRadius: '10px',
-                  background: 'rgba(255,255,255,0.03)',
+                  background: panelRowBg,
+                  color: panelFg,
                 },
               },
               h(
@@ -8237,8 +7448,9 @@ window.__ModuleLoader__.load({
                   borderRadius: '14px',
                   padding: '9px 10px',
                   background: panelBg,
+                  color: panelFg,
                   border: '1px solid ' + panelBorder,
-                  boxShadow: '0 8px 24px rgba(0,0,0,0.38)',
+                  boxShadow: panelShadow,
                   display: 'flex',
                   flexDirection: 'column',
                   gap: '6px',
@@ -8259,7 +7471,7 @@ window.__ModuleLoader__.load({
                 h(
                   'div',
                   { style: { display: 'flex', alignItems: 'center', gap: '6px' } },
-                  h('span', { style: { fontSize: '12.5px', fontWeight: 650 } }, '插件与悬浮条设置'),
+                  h('span', { style: { fontSize: '12.5px', fontWeight: 650, color: panelFg } }, '插件与悬浮条设置'),
                   h(
                     'span',
                     {
@@ -8267,12 +7479,12 @@ window.__ModuleLoader__.load({
                         fontSize: '10.5px',
                         padding: '1px 6px',
                         borderRadius: '999px',
-                        background: harnessTheme.accentBg,
-                        color: harnessTheme.accent,
-                        border: '1px solid ' + harnessTheme.accentBorder,
+                        background: unifiedPanelTheme.accentBg,
+                        color: unifiedPanelTheme.accent,
+                        border: '1px solid ' + unifiedPanelTheme.accentBorder,
                       },
                     },
-                    'v' + (snap.version || '0.5.4'),
+                    'v' + (snap.version || '0.6.0'),
                   ),
                   actionToast
                     ? h('span', { style: { fontSize: '11px', color: '#34d399', marginLeft: '4px' } }, actionToast)
@@ -8286,8 +7498,8 @@ window.__ModuleLoader__.load({
                     onClick: () => setSettingsView(false),
                     style: {
                       border: '1px solid ' + panelBorder,
-                      background: 'rgba(255,255,255,0.05)',
-                      color: 'inherit',
+                      background: panelRowBg,
+                      color: panelFg,
                       borderRadius: '8px',
                       padding: '3px 8px',
                       fontSize: '11.5px',
@@ -8297,10 +7509,48 @@ window.__ModuleLoader__.load({
                   '← 返回菜单',
                 ),
               ),
+              // Dual-Theme Mode Selector (Auto / Light / Dark)
               h(
                 'div',
                 { style: { display: 'flex', flexDirection: 'column', gap: '4px' } },
-                h('div', { style: { fontSize: '11px', opacity: 0.65, paddingLeft: '4px' } }, '选区胶囊投递目标'),
+                h('div', { style: { fontSize: '11px', color: panelMuted, paddingLeft: '4px' } }, '外观主题（支持明亮 / 黑暗双模）'),
+                h(
+                  'div',
+                  { style: { display: 'flex', gap: '4px' } },
+                  [
+                    { id: 'auto', label: '跟随 DSH' },
+                    { id: 'light', label: '☀️ 明亮' },
+                    { id: 'dark', label: '🌙 黑暗' },
+                  ].map((opt) => {
+                    const active = (dsbRuntime.themePref || 'auto') === opt.id;
+                    return h(
+                      'button',
+                      {
+                        key: 'theme-' + opt.id,
+                        type: 'button',
+                        'data-dsb-theme-opt': opt.id,
+                        onClick: () => setThemePreference(opt.id),
+                        style: {
+                          flex: 1,
+                          padding: '5px 6px',
+                          borderRadius: '8px',
+                          fontSize: '11.5px',
+                          fontWeight: active ? 600 : 450,
+                          cursor: 'pointer',
+                          border: active ? '1px solid ' + unifiedPanelTheme.accentBorder : '1px solid transparent',
+                          background: active ? unifiedPanelTheme.accentBg : panelRowBg,
+                          color: active ? unifiedPanelTheme.accent : panelFg,
+                        },
+                      },
+                      opt.label,
+                    );
+                  }),
+                ),
+              ),
+              h(
+                'div',
+                { style: { display: 'flex', flexDirection: 'column', gap: '4px' } },
+                h('div', { style: { fontSize: '11px', color: panelMuted, paddingLeft: '4px' } }, '选区胶囊投递目标'),
                 h(
                   'div',
                   { style: { display: 'flex', gap: '4px' } },
@@ -8324,9 +7574,9 @@ window.__ModuleLoader__.load({
                           fontSize: '11.5px',
                           fontWeight: active ? 600 : 450,
                           cursor: 'pointer',
-                          border: active ? '1px solid ' + harnessTheme.accentBorder : '1px solid transparent',
-                          background: active ? harnessTheme.accentBg : 'rgba(255,255,255,0.04)',
-                          color: active ? '#ffffff' : 'rgba(229,231,235,0.78)',
+                          border: active ? '1px solid ' + unifiedPanelTheme.accentBorder : '1px solid transparent',
+                          background: active ? unifiedPanelTheme.accentBg : panelRowBg,
+                          color: active ? unifiedPanelTheme.accent : panelFg,
                         },
                       },
                       opt.label,
@@ -8505,8 +7755,9 @@ window.__ModuleLoader__.load({
                         borderRadius: '14px',
                         padding: '6px',
                         background: panelBg,
+                        color: panelFg,
                         border: '1px solid ' + panelBorder,
-                        boxShadow: '0 8px 24px rgba(0,0,0,0.38)',
+                        boxShadow: panelShadow,
                         display: 'flex',
                         flexDirection: 'column',
                         gap: '2px',
