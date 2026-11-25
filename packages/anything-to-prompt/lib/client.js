@@ -3277,13 +3277,26 @@ window.__ModuleLoader__.load({
               });
             }
             const explicitBottom = Number(el.getAttribute('data-dsb-popup-bottom'));
+            const minPopupH = Number(el.getAttribute('data-dsb-popup-min-height')) || 0;
+            const effectivePopupH = Math.max(pr.height, minPopupH);
             const neededForPopup =
               Number.isFinite(explicitBottom) && explicitBottom > 0
-                ? Math.ceil(explicitBottom + pr.height + 8)
+                ? Math.ceil(explicitBottom + effectivePopupH + 8)
                 : Math.ceil(window.innerHeight - pr.top + 8);
             if (neededForPopup > targetHeight) {
               targetHeight = neededForPopup;
             }
+          }
+
+          // Monotonic height lock while any ATP popup stays open so hovering between
+          // different Harnesses / Workspaces / Conversations NEVER resizes the Win32 window!
+          const hasAtpPopup = Boolean(document.querySelector('[data-dsb-popup]'));
+          if (hasAtpPopup) {
+            const locked = Math.max(dsbRuntime.popupHeightLock || 0, targetHeight);
+            dsbRuntime.popupHeightLock = locked;
+            targetHeight = locked;
+          } else {
+            dsbRuntime.popupHeightLock = 0;
           }
 
           targetHeight = Math.max(COLLAPSED_LIP_PX, Math.min(880, Math.ceil(targetHeight)));
@@ -6331,6 +6344,9 @@ window.__ModuleLoader__.load({
             setHarnessQuery('');
             setHarnessSearchOpen(HARNESS_ORDER.length > 6);
             refreshHarnessAvailability();
+            if (!dsbRuntime.appSettings) {
+              refreshAppSettings();
+            }
             if (!activeMeta.useNativeComposer) {
               refreshExternalCatalog(activeHarness, false);
             }
@@ -6698,7 +6714,7 @@ window.__ModuleLoader__.load({
           const col3W = compact3Col ? 176 : 236;
           const totalCascadeW = settingsView
             ? Math.min(468, Math.max(360, winW - 16))
-            : col1W + 6 + col2W + (hoveredGroup ? 6 + col3W : 0);
+            : col1W + 6 + col2W + 6 + col3W;
           const leftPx = chipRect
             ? Math.max(8, Math.min(Math.round(chipRect.left), Math.max(8, winW - totalCascadeW - 8)))
             : 12;
@@ -6708,7 +6724,7 @@ window.__ModuleLoader__.load({
           const browsedTheme = browsedMeta;
 
           const snap = dsbRuntime.appSettings || {
-            version: '0.4.0',
+            version: '0.5.2',
             isElevated: false,
             dshStatus: '已连接',
             config: {
@@ -6861,7 +6877,7 @@ window.__ModuleLoader__.load({
                         border: '1px solid ' + harnessTheme.accentBorder,
                       },
                     },
-                    'v' + (snap.version || '0.4.0'),
+                    'v' + (snap.version || '0.5.2'),
                   ),
                   actionToast
                     ? h('span', { style: { fontSize: '11px', color: '#34d399', marginLeft: '4px' } }, actionToast)
@@ -7059,6 +7075,7 @@ window.__ModuleLoader__.load({
               ref: menuRef,
               'data-dsb-popup': '1',
               'data-dsb-popup-bottom': String(bottomPx),
+              'data-dsb-popup-min-height': String(settingsView ? 438 : 308),
               style: {
                 position: 'fixed',
                 bottom: bottomPx + 'px',
@@ -7324,7 +7341,7 @@ window.__ModuleLoader__.load({
                         h('span', { style: { fontSize: '12.5px', opacity: 0.85 } }, '⚙'),
                         h('span', null, '设置'),
                       ),
-                      h('span', { style: { fontSize: '10.5px', opacity: 0.45 } }, 'v' + (snap.version || '0.4.0')),
+                      h('span', { style: { fontSize: '10.5px', opacity: 0.45 } }, 'v' + (snap.version || '0.5.2')),
                     ),
                   ),
 
@@ -7350,7 +7367,6 @@ window.__ModuleLoader__.load({
                         flexDirection: 'column',
                         gap: '2px',
                         boxSizing: 'border-box',
-                        transition: 'margin-bottom 90ms ease-out',
                       },
                     },
                     manualPathMode
@@ -7554,7 +7570,6 @@ window.__ModuleLoader__.load({
                             flexDirection: 'column',
                             gap: '2px',
                             boxSizing: 'border-box',
-                            transition: 'margin-bottom 90ms ease-out',
                           },
                         },
                         hoveredGroup.workspaceId !== '__ungrouped__'

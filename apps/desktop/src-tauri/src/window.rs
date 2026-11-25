@@ -564,18 +564,26 @@ pub fn apply_bar_layout(
     unsafe {
         let overlay_vis = visible_overlay_hwnd();
         let already_topmost = (GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as u32 & WS_EX_TOPMOST.0) != 0;
+        let mut cur_rc = RECT::default();
+        let same_rect = GetWindowRect(hwnd, &mut cur_rc).is_ok()
+            && cur_rc.left == x
+            && cur_rc.top == y
+            && (cur_rc.right - cur_rc.left) == phys_w
+            && (cur_rc.bottom - cur_rc.top) == phys_h;
         if overlay_vis.is_none() && already_topmost {
-            // Preserve existing topmost Z-order without fighting floating voice-input capsules
-            // (Chatterfly, LogiVoice) or IME candidate windows on every resize/layout report!
-            let _ = SetWindowPos(
-                hwnd,
-                None,
-                x,
-                y,
-                phys_w,
-                phys_h,
-                SWP_NOZORDER | SWP_NOACTIVATE,
-            );
+            if !same_rect {
+                // Preserve existing topmost Z-order without fighting floating voice-input capsules
+                // (Chatterfly, LogiVoice) or IME candidate windows on every resize/layout report!
+                let _ = SetWindowPos(
+                    hwnd,
+                    None,
+                    x,
+                    y,
+                    phys_w,
+                    phys_h,
+                    SWP_NOZORDER | SWP_NOACTIVATE,
+                );
+            }
         } else {
             let insert_after = overlay_vis.unwrap_or(HWND_TOPMOST);
             let _ = SetWindowPos(
