@@ -1083,9 +1083,9 @@ window.__ModuleLoader__.load({
         // When targeting an external CLI, hide DSH's native [data-composer-card]
         // and display the 1:1 replicated desktop composer ([data-dsb-external-composer]).
         // =====================================================================
-        'html[data-dsh-bar-clone="1"][data-dsb-harness="antigravity"] [data-composer-card],',
-        'html[data-dsh-bar-clone="1"][data-dsb-harness="codex"] [data-composer-card],',
-        'html[data-dsh-bar-clone="1"][data-dsb-harness="claude_code"] [data-composer-card] {',
+        'html[data-dsh-bar-clone="1"][data-dsb-harness="antigravity"]:has([data-dsb-external-composer]) [data-composer-card],',
+        'html[data-dsh-bar-clone="1"][data-dsb-harness="codex"]:has([data-dsb-external-composer]) [data-composer-card],',
+        'html[data-dsh-bar-clone="1"][data-dsb-harness="claude_code"]:has([data-dsb-external-composer]) [data-composer-card] {',
         '  display: none !important;',
         '}',
         'html[data-dsh-bar-clone="1"][data-dsb-mode="lip"] [data-dsb-external-composer] {',
@@ -2384,6 +2384,14 @@ window.__ModuleLoader__.load({
             }
           }
           installGlobalBridge();
+          if (IS_BAR) {
+            sendBarReport({ kind: 'diag', detail: 'CardDock MOUNT sessionId=' + sessionId });
+          }
+          return () => {
+            if (IS_BAR) {
+              sendBarReport({ kind: 'diag', detail: 'CardDock UNMOUNT sessionId=' + sessionId });
+            }
+          };
         }, []);
 
         useEffect(() => {
@@ -3087,15 +3095,25 @@ window.__ModuleLoader__.load({
             if (!msg || msg.sourceClientId === SELF_CLIENT_ID) return;
 
             if (IS_BAR) {
-              const incomingId = typeof msg.sessionId === 'string' ? msg.sessionId : '';
-              const incomingPath = typeof msg.sessionPath === 'string' ? msg.sessionPath : '';
-              if (incomingId && incomingId !== sessionId) {
-                switchToSession(incomingId, incomingPath);
-                return;
-              }
-              if (!incomingId && incomingPath && incomingPath.startsWith('/') && incomingPath !== window.location.pathname) {
-                switchToSession('', incomingPath);
-                return;
+              // Never let an initial SSE snapshot or a bare root `/` path kick the Bar off an open
+              // session back to the landing page ("选择一个工作区开始") where conversation.input.dock unmounts.
+              if (!isSnapshot) {
+                const incomingId = typeof msg.sessionId === 'string' ? msg.sessionId : '';
+                const incomingPath = typeof msg.sessionPath === 'string' ? msg.sessionPath : '';
+                if (incomingId && incomingId !== sessionId) {
+                  switchToSession(incomingId, incomingPath);
+                  return;
+                }
+                if (
+                  !incomingId &&
+                  incomingPath &&
+                  incomingPath.startsWith('/') &&
+                  incomingPath !== '/' &&
+                  incomingPath !== window.location.pathname
+                ) {
+                  switchToSession('', incomingPath);
+                  return;
+                }
               }
             }
 
@@ -5795,7 +5813,7 @@ window.__ModuleLoader__.load({
           const panelBorder = harnessTheme.border;
 
           const snap = dsbRuntime.appSettings || {
-            version: '0.3.9',
+            version: '0.3.10',
             isElevated: false,
             dshStatus: '已连接',
             config: {
@@ -6788,38 +6806,103 @@ window.__ModuleLoader__.load({
           directoryPicker = ctx.get?.('remote.directoryPicker') || ctx.remote?.directoryPicker || null;
         } catch {}
 
-        // In Bar mode on root without an open session, restore last bound session once sessions load
+        // In Bar mode, always ensure *this* WebView2 tab actually opens a session so
+        // `conversation.input.dock` (CardholderSlipDock + ExternalComposer) mounts!
+        // Note: `mainSessionIdOfList(snap)` reflects server-wide `retainedBy.mainView`, which can
+        // be non-empty when another DSH browser tab is open even while this Bar tab is still on `/`.
+        // Guard strictly against re-entrancy because `uiWorkspace.openSession` notifies `sessions.list`.
         if (IS_BAR && sessions && sessions.list && uiWorkspace) {
-          let restored = false;
-          const tryRestore = () => {
-            if (restored) return;
-            const snap = sessions.list.getSnapshot();
-            if (!snap || snap.phase === 'pending') return;
-            const currentId = mainSessionIdOfList(snap);
-            if (currentId) {
-              restored = true;
-              dsbRuntime.sessionId = currentId;
-              writeStoredString(STORAGE_KEY_LAST_SESSION, currentId);
-              return;
-            }
-            const lastId = readStoredString(STORAGE_KEY_LAST_SESSION, '');
-            const targetId =
-              (lastId && snap.byId && snap.byId[lastId] ? lastId : '') ||
-              (Array.isArray(snap.ids) && snap.ids.length > 0 ? String(snap.ids[0]) : '');
-            if (targetId) {
-              restored = true;
-              try {
-                uiWorkspace.openSession(targetId);
-              } catch {}
+          let openInFlight = false;
+          let openAttempts = 0;
+          let offRestore = null;
+          const attemptedIds = new Set();
+          const getArchivedSet = () => {
+            try {
+              const wsSnap = workspaces && workspaces.list ? workspaces.list.getSnapshot() : null;
+              return new Set(
+                wsSnap && Array.isArray(wsSnap.archivedSessionIds) ? wsSnap.archivedSessionIds : [],
+              );
+            } catch {
+              return new Set();
             }
           };
-          tryRestore();
-          if (!restored && typeof sessions.list.subscribe === 'function') {
-            const offRestore = sessions.list.subscribe(() => {
-              tryRestore();
-              if (restored) {
-                try { offRestore(); } catch {}
+          const isValidCandidate = (snap, archivedSet, id) => {
+            if (!id || attemptedIds.has(id) || archivedSet.has(id)) return false;
+            const row = snap.byId && snap.byId[id];
+            if (!row) return false;
+            if (row.origin === 'subagent' || row.blank) return false;
+            return true;
+          };
+          const pickBestSessionId = (snap) => {
+            if (!snap || !snap.byId) return '';
+            const archivedSet = getArchivedSet();
+            const lastId = readStoredString(STORAGE_KEY_LAST_SESSION, '');
+            if (isValidCandidate(snap, archivedSet, lastId)) {
+              return lastId;
+            }
+            const currentId = mainSessionIdOfList(snap);
+            if (isValidCandidate(snap, archivedSet, currentId)) {
+              return currentId;
+            }
+            const ids = Array.isArray(snap.ids) ? snap.ids : Object.keys(snap.byId);
+            for (const rawId of ids) {
+              const id = String((snap.byId[rawId] && snap.byId[rawId].id) || rawId);
+              if (isValidCandidate(snap, archivedSet, id)) {
+                return id;
               }
+            }
+            for (const rawId of ids) {
+              const id = String(rawId);
+              if (!attemptedIds.has(id)) return id;
+            }
+            return '';
+          };
+          const tryRestore = (fromTimer) => {
+            if (typeof document !== 'undefined' && document.querySelector('[data-dsb-card]')) {
+              if (offRestore) {
+                try { offRestore(); } catch {}
+                offRestore = null;
+              }
+              return true;
+            }
+            if (openInFlight || openAttempts >= 4) return false;
+            const snap = sessions.list.getSnapshot();
+            if (!snap || snap.phase === 'pending') return false;
+            const targetId = pickBestSessionId(snap);
+            if (!targetId) return false;
+            if (!fromTimer && openAttempts > 0) return false;
+            openInFlight = true;
+            openAttempts += 1;
+            attemptedIds.add(targetId);
+            dsbRuntime.sessionId = targetId;
+            writeStoredString(STORAGE_KEY_LAST_SESSION, targetId);
+            setTimeout(() => {
+              try {
+                if (!document.querySelector('[data-dsb-card]')) {
+                  sendBarReport({
+                    kind: 'diag',
+                    detail: 'tryRestore opening session=' + targetId + ' attempt=' + openAttempts + ' path=' + window.location.pathname,
+                  });
+                  uiWorkspace.openSession(targetId);
+                }
+              } catch (e) {
+                sendBarReport({ kind: 'diag', detail: 'tryRestore openSession err=' + String(e) });
+              }
+              setTimeout(() => {
+                openInFlight = false;
+              }, 350);
+            }, 0);
+            return false;
+          };
+          tryRestore(false);
+          for (const ms of [450, 1300, 2500, 4000]) {
+            setTimeout(() => {
+              tryRestore(true);
+            }, ms);
+          }
+          if (typeof sessions.list.subscribe === 'function') {
+            offRestore = sessions.list.subscribe(() => {
+              tryRestore(false);
             });
           }
         }
@@ -6830,6 +6913,45 @@ window.__ModuleLoader__.load({
         const ConversationPickerChip = makeConversationPickerChip(services);
         const HarnessRightControls = makeHarnessRightControls();
 
+        // Capture unhandled errors & CardDock mount/unmount lifecycle in Bar mode for instant diagnosis
+        const reportDiag = (msg) => {
+          sendBarReport({ kind: 'diag', detail: String(msg || '') });
+        };
+        if (typeof window !== 'undefined' && !window.__DSB_ERR_HOOKED__) {
+          window.__DSB_ERR_HOOKED__ = true;
+          window.addEventListener('error', (ev) => {
+            reportDiag('WIN_ERR: ' + (ev && (ev.message || (ev.error && ev.error.stack)) || 'unknown'));
+          });
+          window.addEventListener('unhandledrejection', (ev) => {
+            const r = ev && ev.reason;
+            reportDiag('REJ_ERR: ' + (r && r.stack ? r.stack.slice(0, 260) : String(r)));
+          });
+        }
+
+        const SafeCardholderSlipDock = (() => {
+          if (typeof React.Component !== 'function') return CardholderSlipDock;
+          class CardDockBoundary extends React.Component {
+            constructor(props) {
+              super(props);
+              this.state = { err: null };
+            }
+            static getDerivedStateFromError(error) {
+              return { err: error };
+            }
+            componentDidCatch(error) {
+              reportDiag(
+                'CARD_BOUNDARY: ' +
+                  (error && error.stack ? error.stack.slice(0, 320) : String(error)),
+              );
+            }
+            render() {
+              if (this.state.err) return null;
+              return h(CardholderSlipDock, this.props);
+            }
+          }
+          return CardDockBoundary;
+        })();
+
         slots.inject('conversation.input.dock', () =>
           slots.register(
             {
@@ -6837,7 +6959,7 @@ window.__ModuleLoader__.load({
               id: 'cardholder-slip',
               order: 6,
             },
-            CardholderSlipDock,
+            SafeCardholderSlipDock,
           ),
         );
 

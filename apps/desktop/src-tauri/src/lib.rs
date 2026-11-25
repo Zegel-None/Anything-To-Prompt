@@ -326,6 +326,7 @@ pub struct BarReportPayload {
     pub composer_focused: bool,
     pub capsule_count: usize,
     pub after_insert: bool,
+    pub detail: String,
 }
 
 #[tauri::command]
@@ -450,6 +451,10 @@ fn bar_report(app: AppHandle, payload: BarReportPayload) {
                 &shared.dsh_conn,
                 dsh::DiscoveryOutcome::MissingPlugin { port },
             );
+        }
+
+        "diag" => {
+            log::info!("[WEBVIEW-DIAG] {}", payload.detail);
         }
 
         other => {
@@ -1842,7 +1847,42 @@ pub fn run() {
                     // Safety net: if DSH hasn't loaded @local/deepseek-bar yet, switch to clean guide pill
                     // instead of ever exposing raw DSH top header chrome.
                     let _ = webview.eval(
-                        "setTimeout(() => { if (!window.__DSB_BRIDGE__ && window.__TAURI__ && window.__TAURI__.core) { window.__TAURI__.core.invoke('bar_report', { payload: { kind: 'plugin_not_loaded' } }).catch(() => {}); } }, 1600);",
+                        r#"(function(){
+                          const sendDiag = (tag) => {
+                            try {
+                              const core = window.__TAURI__ && window.__TAURI__.core;
+                              if (!core || typeof core.invoke !== 'function') return;
+                              const card = document.querySelector('[data-dsb-card]');
+                              const comp = document.querySelector('[data-composer-card]');
+                              const ext = document.querySelector('[data-dsb-external-composer]');
+                              const cr = card ? card.getBoundingClientRect() : null;
+                              const ir = (ext || comp) ? (ext || comp).getBoundingClientRect() : null;
+                              const detail = JSON.stringify({
+                                tag,
+                                url: location.href,
+                                vis: document.visibilityState,
+                                hidden: document.hidden,
+                                hasBridge: Boolean(window.__DSB_BRIDGE__),
+                                harness: document.documentElement.getAttribute('data-dsb-harness'),
+                                mode: document.documentElement.getAttribute('data-dsb-mode'),
+                                cloneAttr: document.documentElement.getAttribute('data-dsh-bar-clone'),
+                                inner: window.innerWidth + 'x' + window.innerHeight,
+                                cardRect: cr ? [Math.round(cr.left), Math.round(cr.top), Math.round(cr.width), Math.round(cr.height)] : null,
+                                compRect: ir ? [Math.round(ir.left), Math.round(ir.top), Math.round(ir.width), Math.round(ir.height)] : null,
+                                rootLen: (document.getElementById('root') && document.getElementById('root').innerHTML.length) || 0,
+                                text: ((document.body && document.body.innerText) || '').replace(/\s+/g, ' ').slice(0, 120)
+                              });
+                              core.invoke('bar_report', { payload: { kind: 'diag', detail } }).catch(() => {});
+                            } catch (e) {}
+                          };
+                          setTimeout(() => sendDiag('t+800ms'), 800);
+                          setTimeout(() => {
+                            sendDiag('t+2000ms');
+                            if (!window.__DSB_BRIDGE__ && window.__TAURI__ && window.__TAURI__.core) {
+                              window.__TAURI__.core.invoke('bar_report', { payload: { kind: 'plugin_not_loaded' } }).catch(() => {});
+                            }
+                          }, 2000);
+                        })();"#,
                     );
                 }
             }
