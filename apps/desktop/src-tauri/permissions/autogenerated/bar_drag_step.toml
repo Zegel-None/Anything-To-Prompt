@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-bar-drag-step"
+description = "Enables the bar_drag_step command without any pre-configured scope."
+commands.allow = ["bar_drag_step"]
+
+[[permission]]
+identifier = "deny-bar-drag-step"
+description = "Denies the bar_drag_step command without any pre-configured scope."
+commands.deny = ["bar_drag_step"]

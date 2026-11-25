@@ -218,7 +218,16 @@ window.__ModuleLoader__.load({
       if (!core || typeof core.invoke !== 'function') {
         return Promise.reject(new Error('no tauri core'));
       }
-      return core.invoke(cmd, args || {});
+      return core.invoke(cmd, args || {}).catch((err) => {
+        if (cmd !== 'bar_report') {
+          try {
+            core.invoke('bar_report', {
+              payload: { kind: 'diag', detail: 'INVOKE_ERR ' + cmd + ': ' + String(err) },
+            }).catch(() => {});
+          } catch {}
+        }
+        throw err;
+      });
     }
 
     const SELF_CLIENT_ID = 'dsh-twin-' + Math.random().toString(36).slice(2, 10);
@@ -1365,8 +1374,11 @@ window.__ModuleLoader__.load({
         '  transform: none !important;',
         '  left: 0 !important;',
         '}',
-        'html[data-dsh-bar-clone="1"] [data-composer-seat] *:has([data-composer-card]) > *:not([data-composer-card]):not(:has([data-composer-card])):not([data-donegate-dock-wrap]):not(:has([data-donegate-dock-wrap])):not([data-dsb-external-composer]):not(:has([data-dsb-external-composer])):not([data-dsb-stack]):not(:has([data-dsb-stack])):not([data-queue-dock]):not(:has([data-queue-dock])):not([data-slot="conversation.input.dock"]):not(:has([data-slot="conversation.input.dock"])) {',
+        'html[data-dsh-bar-clone="1"] [data-composer-seat] *:has([data-composer-card]) > *:not([data-composer-card]):not(:has([data-composer-card])):not([data-donegate-dock-wrap]):not(:has([data-donegate-dock-wrap])):not([data-dsb-external-composer]):not(:has([data-dsb-external-composer])):not([data-dsb-stack]):not(:has([data-dsb-stack])):not([data-queue-dock]):not(:has([data-queue-dock])):not([data-slot="conversation.input.dock"]):not(:has([data-slot="conversation.input.dock"])):not([data-composer-overlay]):not(:has([data-composer-overlay])):not([data-conversation-composer-overlay]):not(:has([data-conversation-composer-overlay])):not([data-trigger-menu]):not(:has([data-trigger-menu])) {',
         '  display: none !important;',
+        '}',
+        'html[data-dsh-bar-clone="1"] [data-trigger-menu] {',
+        '  max-height: 380px !important;',
         '}',
         'html[data-dsh-bar-clone="1"] [data-composer-seat] [data-slot="conversation.input.dock"],',
         'html[data-dsh-bar-clone="1"] [data-composer-seat] [data-composer-dock],',
@@ -1389,7 +1401,7 @@ window.__ModuleLoader__.load({
         'html[data-dsh-bar-clone="1"] [data-width-handle] {',
         '  display: none !important;',
         '}',
-        'html[data-dsh-bar-clone="1"] [data-composer-card] ~ * {',
+        'html[data-dsh-bar-clone="1"] [data-composer-card] ~ *:not([data-composer-overlay]):not(:has([data-composer-overlay])):not([data-conversation-composer-overlay]):not(:has([data-conversation-composer-overlay])):not([data-trigger-menu]):not(:has([data-trigger-menu])) {',
         '  display: none !important;',
         '}',
         'html[data-dsh-bar-clone="1"][data-dsb-mode="lip"] [data-composer-card],',
@@ -3114,7 +3126,7 @@ window.__ModuleLoader__.load({
           const onKeyDownCapture = (e) => {
             if (e.key !== 'Escape' || e.isComposing) return;
             const hasNativeMenu = Boolean(
-              document.querySelector('[role="menu"], [role="listbox"], [role="dialog"], [data-radix-popper-content-wrapper], [data-floating-ui-portal]'),
+              document.querySelector('[data-trigger-menu], [data-composer-overlay], [role="menu"], [role="listbox"], [role="dialog"], [data-radix-popper-content-wrapper], [data-floating-ui-portal]'),
             );
             if (dsbRuntime.popupOpen || dsbRuntime.quickSearchOpen || dsbRuntime.modalOpen || hasNativeMenu) return;
             e.preventDefault();
@@ -3241,9 +3253,9 @@ window.__ModuleLoader__.load({
             targetHeight = Math.max(COLLAPSED_LIP_PX, baseSpan + detachedTop);
           }
 
-          // 5. All open popups (Harness 3-level switcher, composer +/model/mode menus, AND DSH native popups!)
+          // 5. All open popups (Harness 3-level switcher, composer +/model/mode menus, AND DSH native +///@ popups!)
           const popupEls = document.querySelectorAll(
-            '[data-dsb-popup], [role="menu"], [role="listbox"], [role="dialog"], [data-radix-popper-content-wrapper], [data-floating-ui-portal], [data-popover], [data-dsw-popover]',
+            '[data-dsb-popup], [data-trigger-menu], [data-composer-overlay]:not(:has([data-trigger-menu])), [role="menu"], [role="listbox"], [role="dialog"], [data-radix-popper-content-wrapper], [data-floating-ui-portal], [data-popover], [data-dsw-popover]',
           );
           for (const el of popupEls) {
             if (!(el instanceof HTMLElement)) continue;
@@ -3288,10 +3300,12 @@ window.__ModuleLoader__.load({
             }
           }
 
-          // Monotonic height lock while any ATP popup stays open so hovering between
-          // different Harnesses / Workspaces / Conversations NEVER resizes the Win32 window!
-          const hasAtpPopup = Boolean(document.querySelector('[data-dsb-popup]'));
-          if (hasAtpPopup) {
+          // Monotonic height lock while any ATP or DSH trigger popup stays open so hovering/filtering
+          // between different Harnesses / Workspaces / Commands NEVER resizes or shakes the Win32 window!
+          const hasStickyPopup = Boolean(
+            document.querySelector('[data-dsb-popup], [data-trigger-menu]'),
+          );
+          if (hasStickyPopup) {
             const locked = Math.max(dsbRuntime.popupHeightLock || 0, targetHeight);
             dsbRuntime.popupHeightLock = locked;
             targetHeight = locked;
@@ -4599,16 +4613,24 @@ window.__ModuleLoader__.load({
 
         const pickFilesForExtComposer = (imagesOnly) => {
           const initDir = (extSel && extSel.workspacePath) || '';
+          dsbRuntime.modalOpen = true;
+          notifyBarRuntime();
           tauriInvoke('app_pick_files', { initialDir: initDir || null, imagesOnly: Boolean(imagesOnly) })
             .then((list) => {
               if (Array.isArray(list) && list.length > 0) addExtAttachments(list);
-              focusComposerElement();
             })
-            .catch(() => {});
+            .catch(() => {})
+            .finally(() => {
+              dsbRuntime.modalOpen = false;
+              notifyBarRuntime();
+              focusComposerElement();
+            });
         };
 
         const pickFolderForExtComposer = () => {
           const initDir = (extSel && extSel.workspacePath) || '';
+          dsbRuntime.modalOpen = true;
+          notifyBarRuntime();
           tauriInvoke('app_pick_folder', { initialDir: initDir || null })
             .then((picked) => {
               if (typeof picked === 'string' && picked.trim()) {
@@ -4618,8 +4640,12 @@ window.__ModuleLoader__.load({
               }
               return null;
             })
-            .then(() => focusComposerElement())
-            .catch(() => {});
+            .catch(() => {})
+            .finally(() => {
+              dsbRuntime.modalOpen = false;
+              notifyBarRuntime();
+              focusComposerElement();
+            });
         };
 
         const handleExtPaste = (ev) => {
@@ -6724,7 +6750,7 @@ window.__ModuleLoader__.load({
           const browsedTheme = browsedMeta;
 
           const snap = dsbRuntime.appSettings || {
-            version: '0.5.2',
+            version: '0.5.3',
             isElevated: false,
             dshStatus: '已连接',
             config: {
@@ -6877,7 +6903,7 @@ window.__ModuleLoader__.load({
                         border: '1px solid ' + harnessTheme.accentBorder,
                       },
                     },
-                    'v' + (snap.version || '0.5.2'),
+                    'v' + (snap.version || '0.5.3'),
                   ),
                   actionToast
                     ? h('span', { style: { fontSize: '11px', color: '#34d399', marginLeft: '4px' } }, actionToast)
@@ -7341,7 +7367,7 @@ window.__ModuleLoader__.load({
                         h('span', { style: { fontSize: '12.5px', opacity: 0.85 } }, '⚙'),
                         h('span', null, '设置'),
                       ),
-                      h('span', { style: { fontSize: '10.5px', opacity: 0.45 } }, 'v' + (snap.version || '0.5.2')),
+                      h('span', { style: { fontSize: '10.5px', opacity: 0.45 } }, 'v' + (snap.version || '0.5.3')),
                     ),
                   ),
 

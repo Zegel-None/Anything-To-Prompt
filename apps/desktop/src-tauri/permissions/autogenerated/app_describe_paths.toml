@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-app-describe-paths"
+description = "Enables the app_describe_paths command without any pre-configured scope."
+commands.allow = ["app_describe_paths"]
+
+[[permission]]
+identifier = "deny-app-describe-paths"
+description = "Denies the app_describe_paths command without any pre-configured scope."
+commands.deny = ["app_describe_paths"]

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-app-read-clipboard-files"
+description = "Enables the app_read_clipboard_files command without any pre-configured scope."
+commands.allow = ["app_read_clipboard_files"]
+
+[[permission]]
+identifier = "deny-app-read-clipboard-files"
+description = "Denies the app_read_clipboard_files command without any pre-configured scope."
+commands.deny = ["app_read_clipboard_files"]

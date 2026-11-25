@@ -2572,4 +2572,43 @@ mod tests {
         assert_eq!(st.in_flight, 0);
         assert_eq!(st.allocate_next(), 3);
     }
+
+    #[test]
+    fn all_remote_and_local_capabilities_allow_all_bar_commands() {
+        let remote = include_str!("../capabilities/remote.json");
+        let local = include_str!("../capabilities/local.json");
+        for perm in [
+            "allow-bar-report",
+            "allow-bar-reconnect",
+            "allow-bar-drag-begin",
+            "allow-bar-drag-step",
+            "allow-bar-drag-end",
+            "allow-bar-drag-reset",
+            "allow-harness-get-active",
+            "allow-harness-set-active",
+            "allow-harness-list-available",
+            "allow-harness-list-options",
+            "allow-harness-load-catalog",
+            "allow-harness-load-messages",
+            "allow-harness-send-message",
+            "allow-harness-cancel-turn",
+            "allow-harness-focus-desktop",
+            "allow-app-get-settings",
+            "allow-app-update-settings",
+            "allow-app-settings-action",
+            "allow-app-pick-folder",
+            "allow-app-pick-files",
+            "allow-app-read-clipboard-files",
+            "allow-app-describe-paths",
+            "allow-app-save-clipboard-image",
+            "allow-quick-search-query",
+            "allow-quick-search-status",
+            "allow-quick-search-build-capsule",
+            "allow-quick-search-open-path",
+            "allow-quick-search-refresh",
+        ] {
+            assert!(remote.contains(perm), "remote.json missing {perm}");
+            assert!(local.contains(perm), "local.json missing {perm}");
+        }
+    }
 }
