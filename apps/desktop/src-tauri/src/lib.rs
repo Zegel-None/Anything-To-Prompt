@@ -576,6 +576,22 @@ fn harness_cancel_turn(app: AppHandle, turn_id: String) -> bool {
     resp.ok
 }
 
+#[tauri::command]
+fn harness_focus_desktop(
+    app: AppHandle,
+    harness: String,
+    session_id: Option<String>,
+    title: Option<String>,
+) -> Result<String, String> {
+    let kind = harness::HarnessKind::parse(&harness);
+    let dsh_port = app
+        .try_state::<AppShared>()
+        .and_then(|s| s.dsh_conn.lock().ok().and_then(|c| c.active_port));
+    // Step Bar out of the way so the target desktop app receives clean unobstructed foreground focus
+    dispatch_state_event(&app, StateEvent::OutsideClickHide);
+    harness::focus_harness_desktop(kind, session_id, title, dsh_port)
+}
+
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 struct AppSettingsSnapshot {
@@ -1898,6 +1914,7 @@ pub fn run() {
             harness_load_messages,
             harness_send_message,
             harness_cancel_turn,
+            harness_focus_desktop,
             app_get_settings,
             app_update_settings,
             app_settings_action,

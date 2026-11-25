@@ -23,6 +23,7 @@
     "allow-harness-load-messages",
     "allow-harness-send-message",
     "allow-harness-cancel-turn",
+    "allow-harness-focus-desktop",
     "allow-quick-search-query",
     "allow-quick-search-status",
     "allow-quick-search-build-capsule",

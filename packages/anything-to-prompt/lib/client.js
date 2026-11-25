@@ -3085,6 +3085,9 @@ window.__ModuleLoader__.load({
           if (isExpanded && scrollRef.current) {
             scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
           }
+          if (IS_BAR && isExpanded) {
+            refreshHarnessAvailability();
+          }
         }, [isExpanded, entries.length, latestSingleLine]);
 
         // =====================================================================
@@ -5079,43 +5082,58 @@ window.__ModuleLoader__.load({
                         onMouseDown: (ev) => ev.stopPropagation(),
                       },
                       activeHarness !== 'dsh'
-                        ? h(
-                            'span',
-                            {
-                              style: {
-                                fontSize: '11px',
-                                fontWeight: 600,
-                                padding: '2px 7px',
-                                borderRadius: '999px',
-                                background: HARNESS_META[activeHarness].accentBg,
-                                border: '1px solid ' + HARNESS_META[activeHarness].accentBorder,
-                                color: HARNESS_META[activeHarness].accent,
-                                letterSpacing: '0.01em',
-                                display: 'inline-flex',
-                                alignItems: 'center',
-                                gap: '5px',
+                        ? (() => {
+                            const meta = HARNESS_META[activeHarness] || HARNESS_META.dsh;
+                            const isDesktopRunning = Boolean(
+                              (activeAvail && activeAvail.running) ||
+                                (dsbRuntime.liveSyncMeta[activeHarness] &&
+                                  dsbRuntime.liveSyncMeta[activeHarness].running),
+                            );
+                            const sel = dsbRuntime.externalSelection[activeHarness] || {};
+                            return h(
+                              'button',
+                              {
+                                type: 'button',
+                                title: isDesktopRunning
+                                  ? '点击将 ' + meta.label + ' 桌面端拉到前台并定位到当前对话'
+                                  : '点击启动 ' + meta.label + ' 桌面端并打开当前对话',
+                                onClick: (ev) => {
+                                  ev.stopPropagation();
+                                  tauriInvoke('harness_focus_desktop', {
+                                    harness: activeHarness,
+                                    sessionId: sel.sessionId || '',
+                                    title: sel.title || '',
+                                  }).catch(() => {});
+                                },
+                                style: {
+                                  fontSize: '11px',
+                                  fontWeight: 600,
+                                  padding: '2px 8px',
+                                  borderRadius: '999px',
+                                  background: meta.accentBg,
+                                  border: '1px solid ' + meta.accentBorder,
+                                  color: meta.accent,
+                                  letterSpacing: '0.01em',
+                                  display: 'inline-flex',
+                                  alignItems: 'center',
+                                  gap: '5px',
+                                  cursor: 'pointer',
+                                  transition: 'filter 0.14s ease',
+                                },
                               },
-                            },
-                            dsbRuntime.liveSyncMeta[activeHarness]
-                              ? h('span', {
-                                  style: {
-                                    width: '6px',
-                                    height: '6px',
-                                    borderRadius: '999px',
-                                    background: '#34d399',
-                                    boxShadow: '0 0 6px #34d399',
-                                    flexShrink: 0,
-                                  },
-                                })
-                              : null,
-                            HARNESS_META[activeHarness].label +
-                              ' · ' +
-                              (dsbRuntime.liveSyncMeta[activeHarness]
-                                ? dsbRuntime.liveSyncMeta[activeHarness].running
-                                  ? '实时同步（运行中）'
-                                  : '实时同步'
-                                : HARNESS_META[activeHarness].syncHint),
-                          )
+                              h('span', {
+                                style: {
+                                  width: '6px',
+                                  height: '6px',
+                                  borderRadius: '999px',
+                                  background: isDesktopRunning ? '#34d399' : '#71717a',
+                                  boxShadow: isDesktopRunning ? '0 0 6px #34d399' : 'none',
+                                  flexShrink: 0,
+                                },
+                              }),
+                              meta.label + (isDesktopRunning ? '运行中' : '未运行'),
+                            );
+                          })()
                         : null,
                       activeHarness !== 'dsh' &&
                         dsbRuntime.externalActiveTurn &&
@@ -5813,7 +5831,7 @@ window.__ModuleLoader__.load({
           const panelBorder = harnessTheme.border;
 
           const snap = dsbRuntime.appSettings || {
-            version: '0.3.11',
+            version: '0.3.12',
             isElevated: false,
             dshStatus: '已连接',
             config: {

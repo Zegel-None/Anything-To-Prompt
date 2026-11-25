@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-harness-focus-desktop"
+description = "Enables the harness_focus_desktop command without any pre-configured scope."
+commands.allow = ["harness_focus_desktop"]
+
+[[permission]]
+identifier = "deny-harness-focus-desktop"
+description = "Denies the harness_focus_desktop command without any pre-configured scope."
+commands.deny = ["harness_focus_desktop"]

@@ -1,15 +1,31 @@
 use crate::broker::{BrokerClient, BrokerRequest};
 use rusqlite::{Connection, OpenFlags};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::ffi::OsStr;
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
+use std::os::windows::ffi::OsStrExt;
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 use tauri::{AppHandle, Manager};
-use windows::Win32::System::Threading::CREATE_NO_WINDOW;
+use windows::core::{BOOL, PCWSTR, PWSTR};
+use windows::Win32::Foundation::{CloseHandle, HWND, LPARAM, RECT};
+use windows::Win32::System::Diagnostics::ToolHelp::{
+    CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
+};
+use windows::Win32::System::Threading::{
+    CreateProcessW, CREATE_BREAKAWAY_FROM_JOB, CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW,
+    DETACHED_PROCESS, PROCESS_INFORMATION, STARTF_USESHOWWINDOW, STARTUPINFOW,
+};
+use windows::Win32::UI::Shell::ShellExecuteW;
+use windows::Win32::UI::WindowsAndMessaging::{
+    EnumWindows, GetWindowRect, GetWindowThreadProcessId, IsIconic, IsWindowVisible,
+    SetForegroundWindow, ShowWindow, SW_RESTORE, SW_SHOW, SW_SHOWMINNOACTIVE,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -48,6 +64,7 @@ pub struct HarnessAvailability {
     pub label: String,
     pub subtitle: String,
     pub available: bool,
+    pub running: bool,
     pub exe_path: Option<String>,
     pub sync_note: String,
     pub model_label: String,
@@ -414,10 +431,437 @@ fn read_codex_config_display() -> (String, String, String) {
     (model_label, effort_label, access_label)
 }
 
+fn to_wide_null(s: &str) -> Vec<u16> {
+    OsStr::new(s)
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect()
+}
+
+pub fn collect_pids_for_exe(exe_lower: &str) -> HashSet<u32> {
+    let mut pids = HashSet::new();
+    unsafe {
+        let Ok(snap) = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) else {
+            return pids;
+        };
+        let mut entry = PROCESSENTRY32W {
+            dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
+            ..Default::default()
+        };
+        if Process32FirstW(snap, &mut entry).is_ok() {
+            loop {
+                let len = entry
+                    .szExeFile
+                    .iter()
+                    .position(|&c| c == 0)
+                    .unwrap_or(entry.szExeFile.len());
+                let name = String::from_utf16_lossy(&entry.szExeFile[..len]).to_ascii_lowercase();
+                if name == exe_lower {
+                    pids.insert(entry.th32ProcessID);
+                }
+                if Process32NextW(snap, &mut entry).is_err() {
+                    break;
+                }
+            }
+        }
+        let _ = CloseHandle(snap);
+    }
+    pids
+}
+
+pub fn is_process_name_running(exe_lower: &str) -> bool {
+    !collect_pids_for_exe(exe_lower).is_empty()
+}
+
+pub fn resolve_antigravity_desktop_exe() -> Option<PathBuf> {
+    if let Ok(local) = std::env::var("LOCALAPPDATA") {
+        let p = PathBuf::from(local)
+            .join("Programs")
+            .join("antigravity")
+            .join("Antigravity.exe");
+        if p.exists() {
+            return Some(p);
+        }
+    }
+    if let Ok(pf) = std::env::var("ProgramFiles") {
+        let p = PathBuf::from(pf).join("Antigravity").join("Antigravity.exe");
+        if p.exists() {
+            return Some(p);
+        }
+    }
+    None
+}
+
+fn find_main_window_for_exe(exe_lower: &str) -> Option<HWND> {
+    let pids = collect_pids_for_exe(exe_lower);
+    if pids.is_empty() {
+        return None;
+    }
+    struct SearchCtx {
+        pids: HashSet<u32>,
+        best_hwnd: Option<HWND>,
+        best_score: i64,
+    }
+    unsafe extern "system" fn enum_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
+        let ctx = &mut *(lparam.0 as *mut SearchCtx);
+        let mut pid = 0u32;
+        GetWindowThreadProcessId(hwnd, Some(&mut pid));
+        if !ctx.pids.contains(&pid) {
+            return BOOL(1);
+        }
+        let iconic = IsIconic(hwnd).as_bool();
+        let visible = IsWindowVisible(hwnd).as_bool();
+        if !visible && !iconic {
+            return BOOL(1);
+        }
+        let mut rc = RECT::default();
+        let _ = GetWindowRect(hwnd, &mut rc);
+        let w = (rc.right - rc.left) as i64;
+        let h = (rc.bottom - rc.top) as i64;
+        let score = if iconic {
+            500_000
+        } else if w >= 240 && h >= 160 {
+            w * h
+        } else {
+            return BOOL(1);
+        };
+        if score > ctx.best_score {
+            ctx.best_score = score;
+            ctx.best_hwnd = Some(hwnd);
+        }
+        BOOL(1)
+    }
+    let mut ctx = SearchCtx {
+        pids,
+        best_hwnd: None,
+        best_score: 0,
+    };
+    unsafe {
+        let _ = EnumWindows(Some(enum_proc), LPARAM(&mut ctx as *mut SearchCtx as isize));
+    }
+    ctx.best_hwnd
+}
+
+/// Launches a desktop Harness GUI silently in the background (minimized without activating),
+/// completely decoupled from the caller's Job Object.
+fn launch_desktop_app_silently(exe: &Path, exe_lower_for_guard: &'static str) -> bool {
+    let exe_str = exe.to_string_lossy().to_string();
+    let exe_w = to_wide_null(&exe_str);
+    let cmdline = format!("\"{exe_str}\"");
+    let si = STARTUPINFOW {
+        cb: std::mem::size_of::<STARTUPINFOW>() as u32,
+        dwFlags: STARTF_USESHOWWINDOW,
+        wShowWindow: SW_SHOWMINNOACTIVE.0 as u16,
+        ..Default::default()
+    };
+    let mut cmd_w = to_wide_null(&cmdline);
+    let mut pi = PROCESS_INFORMATION::default();
+    let launched = unsafe {
+        CreateProcessW(
+            PCWSTR(exe_w.as_ptr()),
+            Some(PWSTR(cmd_w.as_mut_ptr())),
+            None,
+            None,
+            false,
+            CREATE_BREAKAWAY_FROM_JOB | DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP,
+            None,
+            PCWSTR::null(),
+            &si,
+            &mut pi,
+        )
+        .is_ok()
+    } || {
+        let mut cmd_w2 = to_wide_null(&cmdline);
+        unsafe {
+            CreateProcessW(
+                PCWSTR(exe_w.as_ptr()),
+                Some(PWSTR(cmd_w2.as_mut_ptr())),
+                None,
+                None,
+                false,
+                DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP,
+                None,
+                PCWSTR::null(),
+                &si,
+                &mut pi,
+            )
+            .is_ok()
+        }
+    };
+    if launched {
+        unsafe {
+            let _ = CloseHandle(pi.hThread);
+            let _ = CloseHandle(pi.hProcess);
+        }
+        // Guard for 4.5s in case Electron ignores STARTF_USESHOWWINDOW and tries to pop up on first paint
+        std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_millis(4500);
+            let mut minimized_once = false;
+            while Instant::now() < deadline {
+                if let Some(hwnd) = find_main_window_for_exe(exe_lower_for_guard) {
+                    unsafe {
+                        if !IsIconic(hwnd).as_bool() {
+                            let _ = ShowWindow(hwnd, SW_SHOWMINNOACTIVE);
+                            minimized_once = true;
+                        }
+                    }
+                    if minimized_once {
+                        std::thread::sleep(Duration::from_millis(350));
+                        // Re-check once more in case splash transitioned to main window
+                        if let Some(hwnd2) = find_main_window_for_exe(exe_lower_for_guard) {
+                            unsafe {
+                                if !IsIconic(hwnd2).as_bool() {
+                                    let _ = ShowWindow(hwnd2, SW_SHOWMINNOACTIVE);
+                                }
+                            }
+                        }
+                        break;
+                    }
+                }
+                std::thread::sleep(Duration::from_millis(140));
+            }
+        });
+    }
+    launched
+}
+
+fn title_matches_target(candidate_raw: &str, target_raw: &str) -> u8 {
+    let cand = candidate_raw.trim();
+    let target = target_raw.trim();
+    if cand.is_empty() || target.is_empty() {
+        return 0;
+    }
+    fn strip_dots(s: &str) -> &str {
+        s.trim_end_matches(['…', '.', ' ']).trim()
+    }
+    let c_clean = strip_dots(cand);
+    let t_clean = strip_dots(target);
+    if c_clean.is_empty() || t_clean.is_empty() {
+        return 0;
+    }
+    if c_clean.eq_ignore_ascii_case(t_clean) {
+        return 3;
+    }
+    let c_low = c_clean.to_lowercase();
+    let t_low = t_clean.to_lowercase();
+    let c_chars = c_low.chars().count();
+    let t_chars = t_low.chars().count();
+    if c_chars >= 4 && t_chars >= 4 && (t_low.starts_with(&c_low) || c_low.starts_with(&t_low)) {
+        return 2;
+    }
+    if t_chars >= 5 && c_low.contains(&t_low) {
+        return 1;
+    }
+    0
+}
+
+fn select_conversation_in_window_uia(hwnd: HWND, target_title: &str) -> bool {
+    let target = target_title.trim();
+    if target.is_empty() {
+        return false;
+    }
+    let Ok(auto) = uiautomation::UIAutomation::new() else {
+        return false;
+    };
+    let Ok(walker) = auto.get_control_view_walker() else {
+        return false;
+    };
+    let Ok(root) = auto.element_from_handle(uiautomation::types::Handle::from(hwnd.0 as isize))
+    else {
+        return false;
+    };
+
+    let mut win_rc = RECT::default();
+    unsafe {
+        let _ = GetWindowRect(hwnd, &mut win_rc);
+    }
+    let sidebar_right = win_rc.left + 500;
+
+    let mut queue: std::collections::VecDeque<(uiautomation::UIElement, usize)> =
+        std::collections::VecDeque::new();
+    queue.push_back((root, 0));
+    let mut visited = 0usize;
+    let mut best: Option<(u8, bool, uiautomation::UIElement)> = None;
+
+    while let Some((el, depth)) = queue.pop_front() {
+        visited += 1;
+        if visited > 1800 {
+            break;
+        }
+        if let Ok(name) = el.get_name() {
+            let score = title_matches_target(&name, target);
+            if score > 0 {
+                let in_sidebar = el
+                    .get_bounding_rectangle()
+                    .ok()
+                    .map(|r| {
+                        let w = r.get_right() - r.get_left();
+                        let h = r.get_bottom() - r.get_top();
+                        w > 12 && h > 10 && h < 120 && r.get_left() <= sidebar_right
+                    })
+                    .unwrap_or(false);
+                let replace = match &best {
+                    None => true,
+                    Some((bs, b_side, _)) => (in_sidebar && !*b_side) || (in_sidebar == *b_side && score > *bs),
+                };
+                if replace {
+                    best = Some((score, in_sidebar, el.clone()));
+                    if score == 3 && in_sidebar {
+                        break;
+                    }
+                }
+            }
+        }
+        if depth < 14 {
+            if let Ok(mut child) = walker.get_first_child(&el) {
+                let mut sibs = 0usize;
+                loop {
+                    sibs += 1;
+                    if sibs > 160 {
+                        break;
+                    }
+                    queue.push_back((child.clone(), depth + 1));
+                    match walker.get_next_sibling(&child) {
+                        Ok(next) => child = next,
+                        Err(_) => break,
+                    }
+                }
+            }
+        }
+    }
+
+    let Some((_, _, chosen)) = best else {
+        return false;
+    };
+    if let Ok(inv) = chosen.get_pattern::<uiautomation::patterns::UIInvokePattern>() {
+        if inv.invoke().is_ok() {
+            return true;
+        }
+    }
+    if let Ok(sel) = chosen.get_pattern::<uiautomation::patterns::UISelectionItemPattern>() {
+        if sel.select().is_ok() {
+            return true;
+        }
+    }
+    chosen.click().is_ok()
+}
+
+pub fn focus_harness_desktop(
+    kind: HarnessKind,
+    session_id: Option<String>,
+    title: Option<String>,
+    dsh_port: Option<u16>,
+) -> Result<String, String> {
+    if kind == HarnessKind::Dsh {
+        let port = dsh_port.unwrap_or(3080);
+        let url = match session_id.as_deref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+            Some(sid) => format!("http://127.0.0.1:{port}/sessions/{sid}"),
+            None => format!("http://127.0.0.1:{port}/"),
+        };
+        let verb_w = to_wide_null("open");
+        let url_w = to_wide_null(&url);
+        unsafe {
+            let _ = ShellExecuteW(
+                None,
+                PCWSTR(verb_w.as_ptr()),
+                PCWSTR(url_w.as_ptr()),
+                PCWSTR::null(),
+                PCWSTR::null(),
+                SW_SHOW,
+            );
+        }
+        return Ok("已打开 DeepSeek Harness".to_string());
+    }
+
+    let exe_lower = match kind {
+        HarnessKind::Antigravity => "antigravity.exe",
+        HarnessKind::Codex => "codex.exe",
+        HarnessKind::ClaudeCode => "claude.exe",
+        HarnessKind::Dsh => unreachable!(),
+    };
+
+    let resolved_title = title
+        .as_deref()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            let sid = session_id.as_deref()?.trim();
+            if sid.is_empty() {
+                return None;
+            }
+            match kind {
+                HarnessKind::Antigravity => {
+                    lookup_antigravity_conversation_meta(sid).map(|(t, _, _, _)| t)
+                }
+                HarnessKind::Codex => lookup_codex_thread_name(sid),
+                _ => None,
+            }
+        });
+
+    std::thread::spawn(move || {
+        let mut freshly_launched = false;
+        let mut hwnd = find_main_window_for_exe(exe_lower);
+        if hwnd.is_none() && kind == HarnessKind::Antigravity {
+            if let Some(exe) = resolve_antigravity_desktop_exe() {
+                let verb_w = to_wide_null("open");
+                let exe_w = to_wide_null(&exe.to_string_lossy());
+                unsafe {
+                    let _ = ShellExecuteW(
+                        None,
+                        PCWSTR(verb_w.as_ptr()),
+                        PCWSTR(exe_w.as_ptr()),
+                        PCWSTR::null(),
+                        PCWSTR::null(),
+                        SW_SHOW,
+                    );
+                }
+                freshly_launched = true;
+                let deadline = Instant::now() + Duration::from_secs(10);
+                while Instant::now() < deadline {
+                    std::thread::sleep(Duration::from_millis(250));
+                    if let Some(found) = find_main_window_for_exe(exe_lower) {
+                        hwnd = Some(found);
+                        break;
+                    }
+                }
+            }
+        }
+
+        let Some(target_hwnd) = hwnd else {
+            log::warn!("focus_harness_desktop: no window found for {exe_lower}");
+            return;
+        };
+
+        unsafe {
+            if IsIconic(target_hwnd).as_bool() {
+                let _ = ShowWindow(target_hwnd, SW_RESTORE);
+            } else {
+                let _ = ShowWindow(target_hwnd, SW_SHOW);
+            }
+            crate::window::send_dummy_vk_e8();
+            let _ = SetForegroundWindow(target_hwnd);
+        }
+
+        if let Some(ref conv_title) = resolved_title {
+            std::thread::sleep(Duration::from_millis(if freshly_launched { 1600 } else { 220 }));
+            let ok = select_conversation_in_window_uia(target_hwnd, conv_title);
+            log::info!(
+                "focus_harness_desktop({exe_lower}): foregrounded window, select_conversation({:?})={ok}",
+                conv_title
+            );
+        }
+    });
+
+    Ok(format!("正在切换到 {}", kind.as_str()))
+}
+
 pub fn list_harness_availability(dsh_connected: bool) -> Vec<HarnessAvailability> {
     let agy = resolve_agy_exe();
     let codex = resolve_codex_exe();
     let claude = resolve_claude_exe();
+    let agy_running = is_process_name_running("antigravity.exe");
+    let codex_running = is_process_name_running("codex.exe");
+    let claude_running = is_process_name_running("claude.exe");
     let (codex_model, codex_effort, codex_access) = read_codex_config_display();
     let (claude_model, claude_effort, claude_access) = read_claude_code_config_display();
     vec![
@@ -430,6 +874,7 @@ pub fn list_harness_availability(dsh_connected: bool) -> Vec<HarnessAvailability
                 "未连接本地 DSH 服务".to_string()
             },
             available: dsh_connected,
+            running: dsh_connected,
             exe_path: None,
             sync_note: "毫秒级双向同步".to_string(),
             model_label: String::new(),
@@ -440,7 +885,8 @@ pub fn list_harness_availability(dsh_connected: bool) -> Vec<HarnessAvailability
             id: "antigravity".to_string(),
             label: "Antigravity".to_string(),
             subtitle: "CLI Project 原生同步桌面端".to_string(),
-            available: agy.is_some(),
+            available: agy.is_some() || resolve_antigravity_desktop_exe().is_some(),
+            running: agy_running,
             exe_path: agy.map(|p| p.to_string_lossy().to_string()),
             sync_note: "自动同步至桌面端 CLI Project".to_string(),
             model_label: "Gemini 4 Neon".to_string(),
@@ -452,6 +898,7 @@ pub fn list_harness_availability(dsh_connected: bool) -> Vec<HarnessAvailability
             label: "Codex".to_string(),
             subtitle: "app-server 同库共享历史".to_string(),
             available: codex.is_some(),
+            running: codex_running,
             exe_path: codex.map(|p| p.to_string_lossy().to_string()),
             sync_note: "写入 ~/.codex 历史（桌面端刷新可见）".to_string(),
             model_label: codex_model,
@@ -463,6 +910,7 @@ pub fn list_harness_availability(dsh_connected: bool) -> Vec<HarnessAvailability
             label: "Claude Code".to_string(),
             subtitle: "CLI 原生流式 & 同库共享历史".to_string(),
             available: claude.is_some(),
+            running: claude_running,
             exe_path: claude.map(|p| p.to_string_lossy().to_string()),
             sync_note: "与 ~/.claude/projects 共享会话历史".to_string(),
             model_label: claude_model,
@@ -1874,22 +2322,72 @@ fn try_run_antigravity_via_desktop_sidecar(
     let resp = match crate::harness_sync::call_antigravity_sidecar(&req) {
         Ok(r) => r,
         Err(e) if e.starts_with("SIDE_OFFLINE:") => {
-            emit_stream_event(
-                pipe_writer,
-                &HarnessStreamEvent {
-                    turn_id: turn_id.to_string(),
-                    harness: "antigravity".to_string(),
-                    kind: "error".to_string(),
-                    session_id: target_sid.map(|s| s.to_string()),
-                    text: None,
-                    tool_name: None,
-                    error: Some(
-                        "Antigravity 桌面端静默桥接 Sidecar 尚未就绪：请重启一次 Antigravity 桌面端（插件已自动注册并启用）即可支持后台静默直发已有桌面对话；或切换至「CLI Project (桌面端同步)」使用 CLI 通道。"
-                            .to_string(),
-                    ),
-                },
-            );
-            return true;
+            // Antigravity Desktop is closed or sidecar is still booting: silently launch it in the
+            // background (minimized without activating!) and wait for the sidecar pipe to connect.
+            let mut woken: Option<crate::harness_sync::AntigravitySidecarResponse> = None;
+            if let Some(exe) = resolve_antigravity_desktop_exe() {
+                emit_stream_event(
+                    pipe_writer,
+                    &HarnessStreamEvent {
+                        turn_id: turn_id.to_string(),
+                        harness: "antigravity".to_string(),
+                        kind: "tool".to_string(),
+                        session_id: target_sid.map(|s| s.to_string()),
+                        text: None,
+                        tool_name: Some("正在后台静默启动 Antigravity…".to_string()),
+                        error: None,
+                    },
+                );
+                if !is_process_name_running("antigravity.exe") {
+                    let _ = launch_desktop_app_silently(&exe, "antigravity.exe");
+                }
+                let deadline = Instant::now() + Duration::from_secs(25);
+                while Instant::now() < deadline {
+                    std::thread::sleep(Duration::from_millis(600));
+                    match crate::harness_sync::call_antigravity_sidecar(&req) {
+                        Ok(r) => {
+                            woken = Some(r);
+                            break;
+                        }
+                        Err(err2) if err2.starts_with("SIDE_OFFLINE:") => continue,
+                        Err(err2) => {
+                            emit_stream_event(
+                                pipe_writer,
+                                &HarnessStreamEvent {
+                                    turn_id: turn_id.to_string(),
+                                    harness: "antigravity".to_string(),
+                                    kind: "error".to_string(),
+                                    session_id: target_sid.map(|s| s.to_string()),
+                                    text: None,
+                                    tool_name: None,
+                                    error: Some(format!("Antigravity Sidecar 通信失败: {err2}")),
+                                },
+                            );
+                            return true;
+                        }
+                    }
+                }
+            }
+            if let Some(r) = woken {
+                r
+            } else {
+                emit_stream_event(
+                    pipe_writer,
+                    &HarnessStreamEvent {
+                        turn_id: turn_id.to_string(),
+                        harness: "antigravity".to_string(),
+                        kind: "error".to_string(),
+                        session_id: target_sid.map(|s| s.to_string()),
+                        text: None,
+                        tool_name: None,
+                        error: Some(
+                            "Antigravity 后台启动超时，Sidecar 尚未就绪：可点击抽屉右上角按钮拉起 Antigravity 桌面端后重试。"
+                                .to_string(),
+                        ),
+                    },
+                );
+                return true;
+            }
         }
         Err(e) => {
             emit_stream_event(

@@ -11,6 +11,7 @@ fn main() {
             "harness_load_messages",
             "harness_send_message",
             "harness_cancel_turn",
+            "harness_focus_desktop",
             "quick_search_query",
             "quick_search_status",
             "quick_search_build_capsule",
