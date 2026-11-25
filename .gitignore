@@ -5,3 +5,6 @@ dist/
 apps/desktop/src-tauri/gen/
 release/*.exe
 release/*.msi
+
+__pycache__/
+*.pyc
