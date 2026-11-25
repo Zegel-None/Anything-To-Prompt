@@ -9,7 +9,7 @@ use std::os::windows::ffi::OsStrExt;
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Manager};
 use windows::core::{BOOL, PCWSTR, PWSTR};
@@ -18,14 +18,15 @@ use windows::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
 };
 use windows::Win32::System::Threading::{
-    CreateProcessW, CREATE_BREAKAWAY_FROM_JOB, CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW,
-    DETACHED_PROCESS, PROCESS_INFORMATION, STARTF_USESHOWWINDOW, STARTUPINFOW,
+    CreateProcessW, OpenProcess, QueryFullProcessImageNameW, CREATE_BREAKAWAY_FROM_JOB,
+    CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW, DETACHED_PROCESS, PROCESS_INFORMATION,
+    PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, STARTF_USESHOWWINDOW, STARTUPINFOW,
 };
 use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::{
-    BringWindowToTop, EnumWindows, GetWindowRect, GetWindowThreadProcessId, IsIconic,
-    IsWindowVisible, SetForegroundWindow, SetWindowPos, ShowWindow, HWND_NOTOPMOST, HWND_TOPMOST,
-    SWP_NOMOVE, SWP_NOSIZE, SW_RESTORE, SW_SHOW, SW_SHOWMINNOACTIVE,
+    BringWindowToTop, EnumWindows, GetWindowRect, GetWindowTextW, GetWindowThreadProcessId,
+    IsIconic, IsWindowVisible, SetForegroundWindow, SetWindowPos, ShowWindow, HWND_NOTOPMOST,
+    HWND_TOPMOST, SWP_NOMOVE, SWP_NOSIZE, SW_RESTORE, SW_SHOW, SW_SHOWMINNOACTIVE,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -493,13 +494,44 @@ pub fn resolve_antigravity_desktop_exe() -> Option<PathBuf> {
     None
 }
 
-fn find_main_window_for_exe(exe_lower: &str) -> Option<HWND> {
-    let pids = collect_pids_for_exe(exe_lower);
+fn query_exe_path_for_pid(pid: u32) -> Option<String> {
+    unsafe {
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
+        let mut buf = vec![0u16; 1024];
+        let mut len = buf.len() as u32;
+        let ok = QueryFullProcessImageNameW(
+            handle,
+            PROCESS_NAME_WIN32,
+            PWSTR(buf.as_mut_ptr()),
+            &mut len,
+        )
+        .is_ok();
+        let _ = CloseHandle(handle);
+        if ok && len > 0 {
+            Some(String::from_utf16_lossy(&buf[..len as usize]))
+        } else {
+            None
+        }
+    }
+}
+
+fn window_title_text(hwnd: HWND) -> String {
+    let mut buf = [0u16; 256];
+    let len = unsafe { GetWindowTextW(hwnd, &mut buf) };
+    if len > 0 {
+        String::from_utf16_lossy(&buf[..len as usize])
+    } else {
+        String::new()
+    }
+}
+
+fn find_main_window_for_pids(pids: HashSet<u32>, required_title_lower: Option<&str>) -> Option<HWND> {
     if pids.is_empty() {
         return None;
     }
     struct SearchCtx {
         pids: HashSet<u32>,
+        required_title_lower: Option<String>,
         best_hwnd: Option<HWND>,
         best_score: i64,
     }
@@ -514,6 +546,12 @@ fn find_main_window_for_exe(exe_lower: &str) -> Option<HWND> {
         let visible = IsWindowVisible(hwnd).as_bool();
         if !visible && !iconic {
             return BOOL(1);
+        }
+        if let Some(ref req) = ctx.required_title_lower {
+            let title = window_title_text(hwnd).trim().to_ascii_lowercase();
+            if title != *req && !title.starts_with(req) {
+                return BOOL(1);
+            }
         }
         let mut rc = RECT::default();
         let _ = GetWindowRect(hwnd, &mut rc);
@@ -534,6 +572,7 @@ fn find_main_window_for_exe(exe_lower: &str) -> Option<HWND> {
     }
     let mut ctx = SearchCtx {
         pids,
+        required_title_lower: required_title_lower.map(|s| s.to_ascii_lowercase()),
         best_hwnd: None,
         best_score: 0,
     };
@@ -541,6 +580,39 @@ fn find_main_window_for_exe(exe_lower: &str) -> Option<HWND> {
         let _ = EnumWindows(Some(enum_proc), LPARAM(&mut ctx as *mut SearchCtx as isize));
     }
     ctx.best_hwnd
+}
+
+fn find_main_window_for_exe(exe_lower: &str) -> Option<HWND> {
+    find_main_window_for_pids(collect_pids_for_exe(exe_lower), None)
+}
+
+/// Finds the real Codex Desktop GUI window (`WindowsApps\OpenAI.Codex_*\app\ChatGPT.exe`,
+/// or `codex.exe` if a future build renames it), distinguishing it from standalone ChatGPT Desktop.
+fn find_codex_desktop_window() -> Option<HWND> {
+    let mut codex_pids = collect_pids_for_exe("codex.exe");
+    let mut fallback_chatgpt_pids = HashSet::new();
+    for pid in collect_pids_for_exe("chatgpt.exe") {
+        match query_exe_path_for_pid(pid) {
+            Some(path) if path.to_ascii_lowercase().contains("openai.codex") => {
+                codex_pids.insert(pid);
+            }
+            None => {
+                fallback_chatgpt_pids.insert(pid);
+            }
+            _ => {}
+        }
+    }
+    find_main_window_for_pids(codex_pids, None)
+        .or_else(|| find_main_window_for_pids(fallback_chatgpt_pids, Some("codex")))
+}
+
+fn find_harness_desktop_window(kind: HarnessKind) -> Option<HWND> {
+    match kind {
+        HarnessKind::Antigravity => find_main_window_for_exe("antigravity.exe"),
+        HarnessKind::Codex => find_codex_desktop_window(),
+        HarnessKind::ClaudeCode => find_main_window_for_exe("claude.exe"),
+        HarnessKind::Dsh => None,
+    }
 }
 
 /// Launches a desktop Harness GUI silently in the background (minimized without activating),
@@ -679,21 +751,33 @@ fn select_conversation_in_window_uia(hwnd: HWND, target_title: &str) -> bool {
     let sidebar_right = win_rc.left + 500;
     let titlebar_bottom = win_rc.top + 52;
 
-    let mut queue: std::collections::VecDeque<(uiautomation::UIElement, usize)> =
+    // Two-tier queue: scan left-sidebar subtrees FIRST so huge right-pane chat transcripts
+    // never exhaust the UIA traversal budget before reaching the conversation list.
+    let mut primary_queue: std::collections::VecDeque<(uiautomation::UIElement, usize)> =
         std::collections::VecDeque::new();
-    queue.push_back((root, 0));
+    let mut secondary_queue: std::collections::VecDeque<(uiautomation::UIElement, usize)> =
+        std::collections::VecDeque::new();
+    primary_queue.push_back((root, 0));
     let mut visited = 0usize;
-    let mut best: Option<(u8, bool, uiautomation::UIElement)> = None;
+    let mut best: Option<(u8, bool, String, uiautomation::UIElement)> = None;
 
-    while let Some((el, depth)) = queue.pop_front() {
+    while let Some((el, depth)) = primary_queue.pop_front().or_else(|| {
+        // Only fall back to right-pane elements if sidebar didn't find anything
+        if best.as_ref().map(|(_, s, _, _)| *s).unwrap_or(false) {
+            None
+        } else {
+            secondary_queue.pop_front()
+        }
+    }) {
         visited += 1;
-        if visited > 2200 {
+        if visited > 5500 {
             break;
         }
+        let el_rect = el.get_bounding_rectangle().ok();
         if let Ok(name) = el.get_name() {
             let score = title_matches_target(&name, target);
             if score > 0 {
-                let rect_info = el.get_bounding_rectangle().ok().map(|r| {
+                let rect_info = el_rect.as_ref().map(|r| {
                     let w = r.get_right() - r.get_left();
                     let h = r.get_bottom() - r.get_top();
                     let below_titlebar = r.get_top() > titlebar_bottom;
@@ -704,12 +788,12 @@ fn select_conversation_in_window_uia(hwnd: HWND, target_title: &str) -> bool {
                 if let Some((true, in_sidebar)) = rect_info {
                     let replace = match &best {
                         None => true,
-                        Some((bs, b_side, _)) => {
+                        Some((bs, b_side, _, _)) => {
                             (in_sidebar && !*b_side) || (in_sidebar == *b_side && score > *bs)
                         }
                     };
                     if replace {
-                        best = Some((score, in_sidebar, el.clone()));
+                        best = Some((score, in_sidebar, name, el.clone()));
                         if score == 3 && in_sidebar {
                             break;
                         }
@@ -717,15 +801,29 @@ fn select_conversation_in_window_uia(hwnd: HWND, target_title: &str) -> bool {
                 }
             }
         }
-        if depth < 16 {
+        if depth < 24 {
             if let Ok(mut child) = walker.get_first_child(&el) {
                 let mut sibs = 0usize;
                 loop {
                     sibs += 1;
-                    if sibs > 180 {
+                    if sibs > 220 {
                         break;
                     }
-                    queue.push_back((child.clone(), depth + 1));
+                    let is_strictly_right_pane = depth >= 2
+                        && child
+                            .get_bounding_rectangle()
+                            .ok()
+                            .map(|r| {
+                                let w = r.get_right() - r.get_left();
+                                let h = r.get_bottom() - r.get_top();
+                                w > 20 && h > 20 && r.get_left() > sidebar_right
+                            })
+                            .unwrap_or(false);
+                    if is_strictly_right_pane {
+                        secondary_queue.push_back((child.clone(), depth + 1));
+                    } else {
+                        primary_queue.push_back((child.clone(), depth + 1));
+                    }
                     match walker.get_next_sibling(&child) {
                         Ok(next) => child = next,
                         Err(_) => break,
@@ -735,29 +833,34 @@ fn select_conversation_in_window_uia(hwnd: HWND, target_title: &str) -> bool {
         }
     }
 
-    let Some((_, _, chosen)) = best else {
+    let Some((score, in_sidebar, matched_name, chosen)) = best else {
+        log::info!(
+            "select_conversation_in_window_uia: no match for {:?} (visited={visited})",
+            target
+        );
         return false;
     };
-    if let Ok(inv) = chosen.get_pattern::<uiautomation::patterns::UIInvokePattern>() {
-        if inv.invoke().is_ok() {
-            return true;
-        }
-    }
-    if let Ok(sel) = chosen.get_pattern::<uiautomation::patterns::UISelectionItemPattern>() {
-        if sel.select().is_ok() {
-            return true;
-        }
-    }
-    if let Ok(parent) = walker.get_parent(&chosen) {
-        if let Ok(inv) = parent.get_pattern::<uiautomation::patterns::UIInvokePattern>() {
+    log::info!(
+        "select_conversation_in_window_uia: matched {:?} (score={score}, in_sidebar={in_sidebar}, visited={visited})",
+        matched_name
+    );
+
+    // Check chosen element and up to 3 ancestor levels for Invoke / SelectionItem patterns
+    let mut cur = chosen.clone();
+    for _ in 0..4 {
+        if let Ok(inv) = cur.get_pattern::<uiautomation::patterns::UIInvokePattern>() {
             if inv.invoke().is_ok() {
                 return true;
             }
         }
-        if let Ok(sel) = parent.get_pattern::<uiautomation::patterns::UISelectionItemPattern>() {
+        if let Ok(sel) = cur.get_pattern::<uiautomation::patterns::UISelectionItemPattern>() {
             if sel.select().is_ok() {
                 return true;
             }
+        }
+        match walker.get_parent(&cur) {
+            Ok(parent) => cur = parent,
+            Err(_) => break,
         }
     }
     chosen.click().is_ok()
@@ -839,30 +942,99 @@ fn bring_hwnd_to_front_force(target_hwnd: HWND) {
     }
 }
 
+/// Builds an authenticated DSH WebUI URL preserving `?token=...` across DSH's 302 auth redirect
+/// and passing the target session via URL fragment (`#atp_session=<sid>`) so DSH's SPA opens that
+/// exact conversation without hitting a 404 route.
+pub fn build_dsh_focus_url(launch_url: &str, session_id: Option<&str>) -> String {
+    let trimmed_url = launch_url.trim();
+    let sid = session_id.map(|s| s.trim()).filter(|s| !s.is_empty());
+    let Ok(mut parsed) = url::Url::parse(trimmed_url) else {
+        return match sid {
+            Some(id) => format!("{trimmed_url}#atp_session={id}"),
+            None => trimmed_url.to_string(),
+        };
+    };
+    let kept_pairs: Vec<(String, String)> = parsed
+        .query_pairs()
+        .filter(|(k, _)| k != "dsh_bar_clone" && k != "dsb_mode")
+        .map(|(k, v)| (k.into_owned(), v.into_owned()))
+        .collect();
+    if kept_pairs.is_empty() {
+        parsed.set_query(None);
+    } else {
+        let mut qp = parsed.query_pairs_mut();
+        qp.clear();
+        for (k, v) in kept_pairs {
+            qp.append_pair(&k, &v);
+        }
+    }
+    if let Some(id) = sid {
+        let encoded: String = url::form_urlencoded::byte_serialize(id.as_bytes())
+            .collect::<String>()
+            .replace('+', "%20");
+        parsed.set_fragment(Some(&format!("atp_session={encoded}")));
+    } else {
+        parsed.set_fragment(None);
+    }
+    parsed.to_string()
+}
+
 pub fn focus_harness_desktop(
+    app: AppHandle,
     kind: HarnessKind,
     session_id: Option<String>,
     title: Option<String>,
     workspace_path: Option<String>,
-    dsh_port: Option<u16>,
+    config: crate::config::AppConfig,
+    broker: Arc<BrokerClient>,
+    dsh_conn: Arc<Mutex<crate::dsh::DshConnectionState>>,
 ) -> Result<String, String> {
     if kind == HarnessKind::Dsh {
-        let port = dsh_port.unwrap_or(3080);
-        let url = match session_id.as_deref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
-            Some(sid) => format!("http://127.0.0.1:{port}/sessions/{sid}"),
-            None => format!("http://127.0.0.1:{port}/"),
-        };
-        launch_uri_or_exe_foreground(&url);
-        return Ok("已打开 DeepSeek Harness 对话".to_string());
+        std::thread::spawn(move || {
+            let _ = crate::plugin_sync::ensure_dsh_plugin_synced();
+            let outcome = crate::dsh::discover_or_start_dsh(&config, &broker, true);
+            match outcome {
+                crate::dsh::DiscoveryOutcome::Connected { port, launch_url } => {
+                    let needs_bar_nav = dsh_conn
+                        .lock()
+                        .map(|st| st.active_port != Some(port))
+                        .unwrap_or(false);
+                    if needs_bar_nav {
+                        crate::dsh::apply_discovery_to_bar(
+                            &app,
+                            &dsh_conn,
+                            crate::dsh::DiscoveryOutcome::Connected {
+                                port,
+                                launch_url: launch_url.clone(),
+                            },
+                        );
+                    }
+                    let url = build_dsh_focus_url(&launch_url, session_id.as_deref());
+                    log::info!(
+                        "focus_harness_desktop(dsh): opening authenticated WebUI on port {port} (session={:?})",
+                        session_id
+                    );
+                    launch_uri_or_exe_foreground(&url);
+                }
+                crate::dsh::DiscoveryOutcome::MissingPlugin { port } => {
+                    let url = build_dsh_focus_url(
+                        &format!("http://127.0.0.1:{port}/"),
+                        session_id.as_deref(),
+                    );
+                    log::warn!(
+                        "focus_harness_desktop(dsh): plugin missing on port {port}, opening fallback WebUI"
+                    );
+                    launch_uri_or_exe_foreground(&url);
+                }
+                crate::dsh::DiscoveryOutcome::Unavailable { reason } => {
+                    log::warn!("focus_harness_desktop(dsh): DSH unavailable: {reason}");
+                }
+            }
+        });
+        return Ok("正在启动并打开 DeepSeek Harness 对话".to_string());
     }
 
-    let exe_lower = match kind {
-        HarnessKind::Antigravity => "antigravity.exe",
-        HarnessKind::Codex => "codex.exe",
-        HarnessKind::ClaudeCode => "claude.exe",
-        HarnessKind::Dsh => unreachable!(),
-    };
-
+    let kind_label = kind.as_str();
     let resolved_title = title
         .as_deref()
         .map(|s| s.trim().to_string())
@@ -874,7 +1046,7 @@ pub fn focus_harness_desktop(
             }
             match kind {
                 HarnessKind::Antigravity => {
-                    lookup_antigravity_conversation_meta(sid).map(|(t, _, _, _)| t)
+                    lookup_antigravity_conversation_meta(sid).map(|(_, _, _, t)| t)
                 }
                 HarnessKind::Codex => lookup_codex_thread_name(sid),
                 _ => None,
@@ -883,7 +1055,7 @@ pub fn focus_harness_desktop(
 
     std::thread::spawn(move || {
         let mut freshly_launched = false;
-        let mut hwnd = find_main_window_for_exe(exe_lower);
+        let mut hwnd = find_harness_desktop_window(kind);
 
         if hwnd.is_none() {
             match kind {
@@ -958,7 +1130,7 @@ pub fn focus_harness_desktop(
                 let deadline = Instant::now() + Duration::from_secs(10);
                 while Instant::now() < deadline {
                     std::thread::sleep(Duration::from_millis(250));
-                    if let Some(found) = find_main_window_for_exe(exe_lower) {
+                    if let Some(found) = find_harness_desktop_window(kind) {
                         hwnd = Some(found);
                         break;
                     }
@@ -967,7 +1139,7 @@ pub fn focus_harness_desktop(
         }
 
         let Some(target_hwnd) = hwnd else {
-            log::warn!("focus_harness_desktop: no window found for {exe_lower}");
+            log::warn!("focus_harness_desktop: no window found for {kind_label}");
             return;
         };
 
@@ -977,7 +1149,8 @@ pub fn focus_harness_desktop(
             std::thread::sleep(Duration::from_millis(if freshly_launched { 1600 } else { 220 }));
             let ok = select_conversation_in_window_uia(target_hwnd, conv_title);
             log::info!(
-                "focus_harness_desktop({exe_lower}): foregrounded window, select_conversation({:?})={ok}",
+                "focus_harness_desktop({kind_label}): foregrounded window (title={:?}), select_conversation({:?})={ok}",
+                window_title_text(target_hwnd),
                 conv_title
             );
         }
@@ -992,7 +1165,7 @@ pub fn list_harness_availability(dsh_connected: bool) -> Vec<HarnessAvailability
     let claude = resolve_claude_exe();
     let agy_running = find_main_window_for_exe("antigravity.exe").is_some()
         || is_process_name_running("antigravity.exe");
-    let codex_running = find_main_window_for_exe("codex.exe").is_some();
+    let codex_running = find_codex_desktop_window().is_some();
     let claude_running = find_main_window_for_exe("claude.exe").is_some();
     let (codex_model, codex_effort, codex_access) = read_codex_config_display();
     let (claude_model, claude_effort, claude_access) = read_claude_code_config_display();
@@ -3938,5 +4111,19 @@ mod tests {
                 msgs.len()
             );
         }
+    }
+
+    #[test]
+    fn builds_authenticated_dsh_focus_url_with_session_fragment() {
+        let with_sid = build_dsh_focus_url(
+            "http://127.0.0.1:3080/?token=secret-tok&dsh_bar_clone=1&dsb_mode=lip",
+            Some("session-abc-123"),
+        );
+        assert_eq!(
+            with_sid,
+            "http://127.0.0.1:3080/?token=secret-tok#atp_session=session-abc-123"
+        );
+        let without_sid = build_dsh_focus_url("http://127.0.0.1:3080/?token=secret-tok", Some("  "));
+        assert_eq!(without_sid, "http://127.0.0.1:3080/?token=secret-tok");
     }
 }

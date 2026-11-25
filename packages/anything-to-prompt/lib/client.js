@@ -6813,8 +6813,81 @@ window.__ModuleLoader__.load({
     return {
       inject: ['slots', 'sessions', 'workspaces', 'uiWorkspace'],
       apply(ctx) {
-        // Never inject UI, styles, or slots into DSH's normal WebUI — only activate inside Anything-to-Prompt (?dsh_bar_clone=1)
-        if (!IS_BAR) return;
+        // In DSH's normal WebUI (not Bar), never inject UI, styles, or slots —
+        // ONLY honor an explicit `#atp_session=<sid>` deep-link fragment when launched via "查看详情".
+        if (!IS_BAR) {
+          try {
+            const rawHash =
+              typeof window !== 'undefined' ? String(window.location.hash || '') : '';
+            if (rawHash.startsWith('#atp_session=')) {
+              const targetSid = decodeURIComponent(
+                rawHash.slice('#atp_session='.length),
+              ).trim();
+              if (
+                window.history &&
+                typeof window.history.replaceState === 'function'
+              ) {
+                window.history.replaceState(
+                  null,
+                  '',
+                  window.location.pathname + window.location.search,
+                );
+              }
+              const sessions = ctx && (ctx.sessions || ctx.get?.('sessions'));
+              const uiWorkspace = ctx && (ctx.uiWorkspace || ctx.get?.('uiWorkspace'));
+              if (
+                targetSid &&
+                sessions &&
+                sessions.list &&
+                uiWorkspace &&
+                typeof uiWorkspace.openSession === 'function'
+              ) {
+                let opened = false;
+                let offSub = null;
+                const tryOpenDeepLink = () => {
+                  if (opened) return true;
+                  const snap = sessions.list.getSnapshot();
+                  if (!snap || snap.phase === 'pending') return false;
+                  opened = true;
+                  if (offSub) {
+                    try {
+                      offSub();
+                    } catch {}
+                    offSub = null;
+                  }
+                  setTimeout(() => {
+                    try {
+                      uiWorkspace.openSession(targetSid);
+                    } catch {}
+                    // Guard once in case DSH's own initial restore races right after boot
+                    setTimeout(() => {
+                      try {
+                        const afterSnap = sessions.list.getSnapshot();
+                        if (mainSessionIdOfList(afterSnap) !== targetSid) {
+                          uiWorkspace.openSession(targetSid);
+                        }
+                      } catch {}
+                    }, 480);
+                  }, 80);
+                  return true;
+                };
+                if (!tryOpenDeepLink()) {
+                  if (typeof sessions.list.subscribe === 'function') {
+                    offSub = sessions.list.subscribe(() => {
+                      tryOpenDeepLink();
+                    });
+                  }
+                  for (const ms of [350, 1000, 2200]) {
+                    setTimeout(() => {
+                      tryOpenDeepLink();
+                    }, ms);
+                  }
+                }
+              }
+            }
+          } catch {}
+          return;
+        }
         installGlobalBridge();
         ensureCardDockStyles();
         if (typeof document !== 'undefined') {

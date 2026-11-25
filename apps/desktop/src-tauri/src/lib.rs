@@ -585,12 +585,24 @@ fn harness_focus_desktop(
     workspace_path: Option<String>,
 ) -> Result<String, String> {
     let kind = harness::HarnessKind::parse(&harness);
-    let dsh_port = app
-        .try_state::<AppShared>()
-        .and_then(|s| s.dsh_conn.lock().ok().and_then(|c| c.active_port));
-    // Step Bar out of the way so the target desktop app receives clean unobstructed foreground focus
+    let Some(shared) = app.try_state::<AppShared>() else {
+        return Err("应用状态未就绪".to_string());
+    };
+    let config = shared.config.lock().map(|c| c.clone()).unwrap_or_default();
+    let broker = shared.broker.clone();
+    let dsh_conn = shared.dsh_conn.clone();
+    // Step Bar out of the way so the target desktop app / browser receives clean foreground focus
     dispatch_state_event(&app, StateEvent::OutsideClickHide);
-    harness::focus_harness_desktop(kind, session_id, title, workspace_path, dsh_port)
+    harness::focus_harness_desktop(
+        app.clone(),
+        kind,
+        session_id,
+        title,
+        workspace_path,
+        config,
+        broker,
+        dsh_conn,
+    )
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
