@@ -38,7 +38,7 @@ fn to_wide(s: &str) -> Vec<u16> {
 /// Spawns the single-instance Anything-to-Prompt desktop bar synchronously via Win32 `CreateProcessW`
 /// with `bInheritHandles = false` and `DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW`.
 /// Guaranteed to launch in ~3ms without inheriting MCP stdio pipes (zero hang, zero COM race).
-fn spawn_bar_companion_if_needed(harness: Option<&str>) {
+pub(crate) fn spawn_bar_companion_if_needed(harness: Option<&str>) {
     // If the bar's sync pipe is already reachable, it is already running — no need to spawn!
     if send_control_to_pipe("ping", harness).is_ok() {
         return;

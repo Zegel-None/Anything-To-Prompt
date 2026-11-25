@@ -2534,7 +2534,7 @@ window.__ModuleLoader__.load({
           return count;
         }, [entries]);
 
-        const isExpanded = pinned || hovered || previewExpanded;
+        const isExpanded = !dsbRuntime.popupOpen && (pinned || hovered || previewExpanded);
 
         // Track explicit user submit intent inside [data-composer-card] (prevents async session hydration from misfiring 'submitted')
         // Also intercepts Enter / Send clicks when targeting Antigravity or Codex so messages never leak to DSH!
@@ -2791,7 +2791,8 @@ window.__ModuleLoader__.load({
           let targetHeight = cardTarget;
           if (ir && ir.height > 0 && barMode !== 'lip') {
             const anchorTop = hasQueue ? Math.min(ir.top, qr.top) : ir.top;
-            targetHeight = cardTarget + Math.ceil(window.innerHeight - anchorTop);
+            const composerSpan = Math.max(ir.height, ir.bottom - anchorTop);
+            targetHeight = cardTarget + Math.ceil(composerSpan);
           }
 
           const popupEls = document.querySelectorAll(
@@ -2810,7 +2811,11 @@ window.__ModuleLoader__.load({
               h: Math.round(pr.height),
               r: 12,
             });
-            const neededForPopup = Math.ceil(window.innerHeight - pr.top + 6);
+            const explicitBottom = Number(el.getAttribute('data-dsb-popup-bottom'));
+            const neededForPopup =
+              Number.isFinite(explicitBottom) && explicitBottom > 0
+                ? Math.ceil(explicitBottom + pr.height + 8)
+                : Math.ceil(window.innerHeight - pr.top + 6);
             if (neededForPopup > targetHeight) {
               targetHeight = neededForPopup;
             }
@@ -3701,11 +3706,23 @@ window.__ModuleLoader__.load({
         const renderQuickSearchPopup = () => {
           if (!IS_BAR || barMode === 'lip' || quickHits.length === 0) return null;
           const cardEl = typeof document !== 'undefined' ? document.querySelector('[data-dsb-card]') : null;
+          const compEl =
+            typeof document !== 'undefined'
+              ? dsbRuntime.activeHarness !== 'dsh'
+                ? document.querySelector('[data-dsb-external-composer]')
+                : document.querySelector('[data-composer-card]')
+              : null;
           const cr = cardEl ? cardEl.getBoundingClientRect() : null;
+          const ir = compEl ? compEl.getBoundingClientRect() : null;
           const validCard = cr && cr.width > 10 && cr.height > 10;
-          const bottomPx = validCard
-            ? Math.max(96, Math.min(360, Math.round(window.innerHeight - cr.top + 6)))
-            : 158;
+          const validComp = ir && ir.width > 10 && ir.height > 10;
+          const slabSpan =
+            validCard && validComp
+              ? Math.round(Math.max(cr.bottom, ir.bottom) - Math.min(cr.top, ir.top))
+              : validCard
+                ? Math.round(cr.height)
+                : 152;
+          const bottomPx = Math.max(96, Math.min(360, slabSpan + 6));
           const theme = HARNESS_META[activeHarness] || HARNESS_META.dsh;
 
           const badgeMetaForHit = (hit) => {
@@ -3722,6 +3739,7 @@ window.__ModuleLoader__.load({
             'div',
             {
               'data-dsb-popup': '1',
+              'data-dsb-popup-bottom': String(bottomPx),
               'data-dsb-quick-search': '1',
               onMouseDown: (ev) => ev.preventDefault(),
               style: {
@@ -5656,17 +5674,26 @@ window.__ModuleLoader__.load({
           const cr = cardEl ? cardEl.getBoundingClientRect() : null;
           const ir = compEl ? compEl.getBoundingClientRect() : null;
           let slabTop = null;
-          if (isValidRect(cr)) slabTop = cr.top;
-          if (isValidRect(ir)) slabTop = slabTop === null ? ir.top : Math.min(slabTop, ir.top);
+          let slabBottom = null;
+          if (isValidRect(cr)) {
+            slabTop = cr.top;
+            slabBottom = cr.bottom;
+          }
+          if (isValidRect(ir)) {
+            slabTop = slabTop === null ? ir.top : Math.min(slabTop, ir.top);
+            slabBottom = slabBottom === null ? ir.bottom : Math.max(slabBottom, ir.bottom);
+          }
           const fallbackSlabH =
             dsbRuntime.activeHarness === 'codex'
               ? 196
               : dsbRuntime.activeHarness === 'claude_code'
                 ? 174
                 : 158;
+          // Pure element-span height (slabBottom - slabTop) is 100% invariant to
+          // Win32 SetWindowPos resizes and window.innerHeight lag, eliminating 60Hz vertical jitter.
           const slabHeight =
-            slabTop !== null
-              ? Math.max(56, Math.min(380, Math.round(window.innerHeight - slabTop)))
+            slabTop !== null && slabBottom !== null
+              ? Math.max(56, Math.min(380, Math.round(slabBottom - slabTop)))
               : fallbackSlabH;
           const bottomPx = slabHeight + 8;
 
@@ -5697,7 +5724,7 @@ window.__ModuleLoader__.load({
           const panelBorder = harnessTheme.border;
 
           const snap = dsbRuntime.appSettings || {
-            version: '0.3.0',
+            version: '0.3.4',
             isElevated: false,
             dshStatus: '已连接',
             config: {
@@ -5806,16 +5833,19 @@ window.__ModuleLoader__.load({
               'div',
               {
                 'data-dsb-settings-panel': '1',
+                'data-dg-scroll': '1',
                 style: {
                   width: '466px',
+                  maxHeight: '430px',
+                  overflowY: 'auto',
                   borderRadius: '14px',
-                  padding: '10px',
+                  padding: '9px 10px',
                   background: panelBg,
                   border: '1px solid ' + panelBorder,
                   boxShadow: '0 8px 24px rgba(0,0,0,0.38)',
                   display: 'flex',
                   flexDirection: 'column',
-                  gap: '8px',
+                  gap: '6px',
                   boxSizing: 'border-box',
                 },
               },
@@ -6046,6 +6076,7 @@ window.__ModuleLoader__.load({
             {
               ref: menuRef,
               'data-dsb-popup': '1',
+              'data-dsb-popup-bottom': String(bottomPx),
               style: {
                 position: 'fixed',
                 bottom: bottomPx + 'px',

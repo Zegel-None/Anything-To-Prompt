@@ -48,6 +48,7 @@ pub struct CliOptions {
     pub broker_pipe: Option<String>,
     pub hook_event: Option<(String, Option<String>)>,
     pub mcp_sidecar: bool,
+    pub antigravity_sidecar: bool,
     pub mcp_harness: Option<String>,
     pub ensure_running: bool,
     pub launched_by: Option<String>,
@@ -105,6 +106,9 @@ impl CliOptions {
                 }
                 "--mcp-sidecar" => {
                     out.mcp_sidecar = true;
+                }
+                "--antigravity-sidecar" => {
+                    out.antigravity_sidecar = true;
                 }
                 "--harness" => {
                     if i + 1 < vec.len() {
@@ -1521,6 +1525,12 @@ pub fn run() {
     // 0b. Native stdio MCP sidecar loaded by Antigravity / Claude Code / Codex plugins
     if cli.mcp_sidecar {
         mcp_sidecar::run_mcp_sidecar(cli.mcp_harness.as_deref());
+        return;
+    }
+
+    // 0b2. Official Antigravity Plugin Sidecar for silent background `agentapi` messaging
+    if cli.antigravity_sidecar {
+        harness_sync::run_antigravity_sidecar_cli();
         return;
     }
 

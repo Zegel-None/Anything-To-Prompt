@@ -771,6 +771,66 @@ pub fn lookup_antigravity_conversation_meta(
     None
 }
 
+/// Returns the most recently active Antigravity Desktop project_id (excluding CLI & free chats),
+/// used to pre-populate the official Plugin Sidecar's default `projectId` if unset.
+pub fn latest_antigravity_desktop_project_id() -> Option<String> {
+    let home = dirs::home_dir()?;
+    let db_path = home
+        .join(".gemini")
+        .join("antigravity")
+        .join("conversation_summaries.db");
+    let conn = open_sqlite_readonly(&db_path)?;
+    conn.query_row(
+        "SELECT project_id FROM conversation_summaries \
+         WHERE COALESCE(killed, 0) = 0 \
+           AND COALESCE(parent_conversation_id, '') = '' \
+           AND COALESCE(project_id, '') != '' \
+           AND project_id != 'default-cli-project' \
+           AND project_id != 'outside-of-project' \
+         ORDER BY last_modified_time DESC LIMIT 1",
+        [],
+        |r| r.get::<_, String>(0),
+    )
+    .ok()
+    .filter(|s| !s.trim().is_empty())
+}
+
+fn is_antigravity_cli_conversation(session_id: &str) -> bool {
+    let cid = session_id.trim();
+    if cid.is_empty() {
+        return false;
+    }
+    let Some(home) = dirs::home_dir() else {
+        return false;
+    };
+    if home
+        .join(".gemini")
+        .join("antigravity-cli")
+        .join("brain")
+        .join(cid)
+        .is_dir()
+    {
+        return true;
+    }
+    let db_path = home
+        .join(".gemini")
+        .join("antigravity")
+        .join("conversation_summaries.db");
+    if let Some(conn) = open_sqlite_readonly(&db_path) {
+        if let Ok((src, pid)) = conn.query_row(
+            "SELECT COALESCE(source, ''), COALESCE(project_id, '') \
+             FROM conversation_summaries WHERE conversation_id = ?1 LIMIT 1",
+            [cid],
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+        ) {
+            if src.to_ascii_uppercase().contains("CLI") || pid == "default-cli-project" {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 pub fn load_codex_catalog() -> ExternalHarnessCatalog {
     let exe = resolve_codex_exe();
     let Some(home) = dirs::home_dir() else {
@@ -1192,6 +1252,28 @@ pub fn parse_antigravity_transcript_lines(raw: &str) -> Vec<ExternalChatMessage>
                     });
                 }
             }
+            "SYSTEM_MESSAGE" => {
+                // Surface silent messages delivered by Anything-to-Prompt via official agentapi
+                if content.contains("Anything-to-Prompt") || content.contains("[Message]") {
+                    if let Some(idx_content) = content.find("content=") {
+                        let body = content[idx_content + "content=".len()..]
+                            .trim()
+                            .trim_end_matches("</SYSTEM_MESSAGE>")
+                            .trim();
+                        if !body.is_empty()
+                            && !body.starts_with("[BROWSER_HOST_FACTS")
+                            && !body.starts_with("Task id ")
+                        {
+                            out.push(ExternalChatMessage {
+                                id: format!("ag-su-{idx}"),
+                                role: "user".to_string(),
+                                text: body.to_string(),
+                                streaming: false,
+                            });
+                        }
+                    }
+                }
+            }
             "PLANNER_RESPONSE" => {
                 out.push(ExternalChatMessage {
                     id: format!("ag-a-{idx}"),
@@ -1495,6 +1577,217 @@ pub fn execute_harness_turn_in_medium(params: MediumTurnParams) {
     unregister_turn_pid(&params.turn_id);
 }
 
+fn try_run_antigravity_via_desktop_sidecar(
+    turn_id: &str,
+    session_id: Option<&str>,
+    prompt: &str,
+    pipe_writer: &mut impl Write,
+) -> bool {
+    let target_sid = session_id.map(|s| s.trim()).filter(|s| !s.is_empty());
+    let home = dirs::home_dir();
+    let baseline_assistant_count = match (&home, target_sid) {
+        (Some(h), Some(sid)) => {
+            let tp = h
+                .join(".gemini")
+                .join("antigravity")
+                .join("brain")
+                .join(sid)
+                .join(".system_generated")
+                .join("logs")
+                .join("transcript.jsonl");
+            fs::read_to_string(&tp)
+                .ok()
+                .map(|raw| {
+                    parse_antigravity_transcript_lines(&raw)
+                        .into_iter()
+                        .filter(|m| m.role == "assistant")
+                        .count()
+                })
+                .unwrap_or(0)
+        }
+        _ => 0,
+    };
+
+    let req = if let Some(sid) = target_sid {
+        crate::harness_sync::AntigravitySidecarRequest {
+            action: "send_message".to_string(),
+            conversation_id: Some(sid.to_string()),
+            prompt: Some(prompt.to_string()),
+            title: Some("Anything-to-Prompt".to_string()),
+        }
+    } else {
+        crate::harness_sync::AntigravitySidecarRequest {
+            action: "new_conversation".to_string(),
+            conversation_id: None,
+            prompt: Some(prompt.to_string()),
+            title: None,
+        }
+    };
+
+    let resp = match crate::harness_sync::call_antigravity_sidecar(&req) {
+        Ok(r) => r,
+        Err(e) if e.starts_with("SIDE_OFFLINE:") => {
+            emit_stream_event(
+                pipe_writer,
+                &HarnessStreamEvent {
+                    turn_id: turn_id.to_string(),
+                    harness: "antigravity".to_string(),
+                    kind: "error".to_string(),
+                    session_id: target_sid.map(|s| s.to_string()),
+                    text: None,
+                    tool_name: None,
+                    error: Some(
+                        "Antigravity 桌面端静默桥接 Sidecar 尚未就绪：请重启一次 Antigravity 桌面端（插件已自动注册并启用）即可支持后台静默直发已有桌面对话；或切换至「CLI Project (桌面端同步)」使用 CLI 通道。"
+                            .to_string(),
+                    ),
+                },
+            );
+            return true;
+        }
+        Err(e) => {
+            emit_stream_event(
+                pipe_writer,
+                &HarnessStreamEvent {
+                    turn_id: turn_id.to_string(),
+                    harness: "antigravity".to_string(),
+                    kind: "error".to_string(),
+                    session_id: target_sid.map(|s| s.to_string()),
+                    text: None,
+                    tool_name: None,
+                    error: Some(format!("Antigravity Sidecar 通信失败: {e}")),
+                },
+            );
+            return true;
+        }
+    };
+
+    if !resp.ok {
+        emit_stream_event(
+            pipe_writer,
+            &HarnessStreamEvent {
+                turn_id: turn_id.to_string(),
+                harness: "antigravity".to_string(),
+                kind: "error".to_string(),
+                session_id: resp.conversation_id.or_else(|| target_sid.map(|s| s.to_string())),
+                text: None,
+                tool_name: None,
+                error: Some(
+                    resp.error
+                        .unwrap_or_else(|| "Antigravity 桌面端投递失败".to_string()),
+                ),
+            },
+        );
+        return true;
+    }
+
+    let resolved_sid = resp
+        .conversation_id
+        .or_else(|| target_sid.map(|s| s.to_string()));
+    if let Some(ref sid) = resolved_sid {
+        emit_stream_event(
+            pipe_writer,
+            &HarnessStreamEvent {
+                turn_id: turn_id.to_string(),
+                harness: "antigravity".to_string(),
+                kind: "session".to_string(),
+                session_id: Some(sid.clone()),
+                text: None,
+                tool_name: None,
+                error: None,
+            },
+        );
+    }
+    emit_stream_event(
+        pipe_writer,
+        &HarnessStreamEvent {
+            turn_id: turn_id.to_string(),
+            harness: "antigravity".to_string(),
+            kind: "tool".to_string(),
+            session_id: resolved_sid.clone(),
+            text: None,
+            tool_name: Some("已静默投递至 Antigravity 桌面端，等待回复".to_string()),
+            error: None,
+        },
+    );
+
+    // Tail transcript.jsonl silently in the background until Antigravity writes a new PLANNER_RESPONSE
+    if let (Some(h), Some(ref sid)) = (home, &resolved_sid) {
+        let tp = h
+            .join(".gemini")
+            .join("antigravity")
+            .join("brain")
+            .join(sid)
+            .join(".system_generated")
+            .join("logs")
+            .join("transcript.jsonl");
+        let start = std::time::Instant::now();
+        let mut last_reply = String::new();
+        let mut last_change_at: Option<std::time::Instant> = None;
+
+        while start.elapsed() < std::time::Duration::from_secs(180) {
+            std::thread::sleep(std::time::Duration::from_millis(350));
+            if let Ok(raw) = fs::read_to_string(&tp) {
+                let assts: Vec<ExternalChatMessage> = parse_antigravity_transcript_lines(&raw)
+                    .into_iter()
+                    .filter(|m| m.role == "assistant")
+                    .collect();
+                if assts.len() > baseline_assistant_count {
+                    if let Some(newest) = assts.last() {
+                        if newest.text != last_reply && !newest.text.trim().is_empty() {
+                            last_reply = newest.text.clone();
+                            last_change_at = Some(std::time::Instant::now());
+                            emit_stream_event(
+                                pipe_writer,
+                                &HarnessStreamEvent {
+                                    turn_id: turn_id.to_string(),
+                                    harness: "antigravity".to_string(),
+                                    kind: "replace".to_string(),
+                                    session_id: Some(sid.clone()),
+                                    text: Some(last_reply.clone()),
+                                    tool_name: None,
+                                    error: None,
+                                },
+                            );
+                        }
+                    }
+                }
+            }
+            // Once a reply has arrived and remained stable for 1.5s, complete the turn cleanly
+            if let Some(changed) = last_change_at {
+                if changed.elapsed() >= std::time::Duration::from_millis(1500) {
+                    emit_stream_event(
+                        pipe_writer,
+                        &HarnessStreamEvent {
+                            turn_id: turn_id.to_string(),
+                            harness: "antigravity".to_string(),
+                            kind: "completed".to_string(),
+                            session_id: Some(sid.clone()),
+                            text: Some(last_reply),
+                            tool_name: None,
+                            error: None,
+                        },
+                    );
+                    return true;
+                }
+            }
+        }
+    }
+
+    emit_stream_event(
+        pipe_writer,
+        &HarnessStreamEvent {
+            turn_id: turn_id.to_string(),
+            harness: "antigravity".to_string(),
+            kind: "completed".to_string(),
+            session_id: resolved_sid,
+            text: None,
+            tool_name: None,
+            error: None,
+        },
+    );
+    true
+}
+
 fn run_antigravity_turn_in_medium(
     turn_id: &str,
     exe: &str,
@@ -1504,8 +1797,21 @@ fn run_antigravity_turn_in_medium(
     prompt: &str,
     pipe_writer: &mut impl Write,
 ) {
+    // Route existing Antigravity Desktop conversations (and Desktop projects) silently
+    // through the official Plugin Sidecar (`agentapi`) — zero CLI, zero foreground stealing!
+    let is_cli_target = match (session_id, project_id) {
+        (Some(sid), _) if !sid.trim().is_empty() => is_antigravity_cli_conversation(sid),
+        (_, Some("default-cli-project")) => true,
+        _ => false,
+    };
+    if !is_cli_target {
+        if try_run_antigravity_via_desktop_sidecar(turn_id, session_id, prompt, pipe_writer) {
+            return;
+        }
+    }
+
     let mut cmd = Command::new(exe);
-    cmd.args(["--print", "--output-format", "stream-json"]);
+    cmd.args(["--output-format", "stream-json"]);
     if let Some(sid) = session_id.filter(|s| !s.trim().is_empty()) {
         cmd.args(["--conversation", sid.trim()]);
     } else if let Some(pid) =
@@ -1515,6 +1821,7 @@ fn run_antigravity_turn_in_medium(
             cmd.args(["--project", pid.trim()]);
         }
     }
+    cmd.arg(format!("--print={prompt}"));
     if let Some(dir) = cwd.filter(|s| !s.trim().is_empty()) {
         let cleaned = clean_windows_path(dir);
         if Path::new(&cleaned).is_dir() {
@@ -1522,7 +1829,7 @@ fn run_antigravity_turn_in_medium(
         }
     }
     cmd.creation_flags(CREATE_NO_WINDOW.0)
-        .stdin(Stdio::piped())
+        .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
@@ -1546,12 +1853,6 @@ fn run_antigravity_turn_in_medium(
     };
 
     register_turn_pid(turn_id, child.id());
-
-    if let Some(mut stdin) = child.stdin.take() {
-        let _ = stdin.write_all(prompt.as_bytes());
-        let _ = stdin.flush();
-        drop(stdin);
-    }
 
     let Some(stdout) = child.stdout.take() else {
         let _ = child.kill();
@@ -1634,12 +1935,13 @@ fn run_antigravity_turn_in_medium(
             }
             "result" => {
                 completed = true;
-                let status = v
+                let res_obj = v.get("result").unwrap_or(&v);
+                let status = res_obj
                     .get("status")
                     .and_then(|s| s.as_str())
                     .unwrap_or("SUCCESS");
                 if status.eq_ignore_ascii_case("ERROR") || status.eq_ignore_ascii_case("FAILURE") {
-                    let err_msg = v
+                    let err_msg = res_obj
                         .get("error")
                         .and_then(|s| s.as_str())
                         .unwrap_or("Antigravity 执行失败")
@@ -1657,7 +1959,7 @@ fn run_antigravity_turn_in_medium(
                         },
                     );
                 } else {
-                    let final_text = v
+                    let final_text = res_obj
                         .get("response")
                         .and_then(|s| s.as_str())
                         .map(|s| s.to_string());

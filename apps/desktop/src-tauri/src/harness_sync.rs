@@ -10,7 +10,9 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::os::windows::ffi::OsStrExt;
 use std::os::windows::fs::OpenOptionsExt;
 use std::os::windows::io::FromRawHandle;
+use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -24,15 +26,36 @@ use windows::Win32::Security::{
     GetTokenInformation, TokenUser, PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES, TOKEN_QUERY,
     TOKEN_USER,
 };
-use windows::Win32::Storage::FileSystem::PIPE_ACCESS_INBOUND;
+use windows::Win32::Storage::FileSystem::{PIPE_ACCESS_DUPLEX, PIPE_ACCESS_INBOUND};
 use windows::Win32::System::Pipes::{
     ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, PIPE_READMODE_BYTE,
     PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_WAIT,
 };
-use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+use windows::Win32::System::Threading::{
+    GetCurrentProcess, OpenProcessToken, CREATE_NO_WINDOW,
+};
 
 const SYNC_PIPE_SHORT: &str = "atp-harness-sync-v1";
+const ANTIGRAVITY_SIDECAR_PIPE_SHORT: &str = "atp-antigravity-sidecar-v1";
+const ANTIGRAVITY_SIDECAR_ID: &str = "anything-to-prompt-sync/desktop-bridge";
 const PLUGIN_DIR_NAME: &str = "anything-to-prompt-sync";
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AntigravitySidecarRequest {
+    pub action: String, // "ping" | "send_message" | "new_conversation"
+    pub conversation_id: Option<String>,
+    pub prompt: Option<String>,
+    pub title: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AntigravitySidecarResponse {
+    pub ok: bool,
+    pub conversation_id: Option<String>,
+    pub error: Option<String>,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -473,6 +496,7 @@ pub fn apply_external_sync_plugins(enable: bool) -> ExternalSyncPluginStatus {
     let has_codex = home.join(".codex").is_dir();
 
     if !enable {
+        enable_antigravity_sidecar_in_config(&home, false);
         for dir in [&ag_dir, &cc_dir, &cx_dir] {
             if dir.exists() {
                 let _ = fs::remove_dir_all(dir);
@@ -490,22 +514,38 @@ pub fn apply_external_sync_plugins(enable: bool) -> ExternalSyncPluginStatus {
         };
     }
 
-    // 1. Antigravity native plugin (`plugin.json` + root `hooks.json` + `mcp_config.json`)
+    // 1. Antigravity native plugin (`plugin.json` + root `hooks.json` + `mcp_config.json` + `sidecars/desktop-bridge/sidecar.json`)
     let mut ag_ok = false;
     if home.join(".gemini").is_dir() {
         let manifest = serde_json::to_string_pretty(&serde_json::json!({
             "name": PLUGIN_DIR_NAME,
-            "description": "Anything-to-Prompt companion bar launcher, settings bridge, and real-time workspace transcript sync."
+            "description": "Anything-to-Prompt companion bar launcher, settings bridge, silent Desktop messaging sidecar, and real-time workspace transcript sync."
         }))
         .unwrap_or_default();
         let hooks = build_antigravity_hooks_json(&exe);
         let mcp = build_antigravity_mcp_json(&exe);
+        let sidecar_cfg = serde_json::to_string_pretty(&serde_json::json!({
+            "display_name": "Anything-to-Prompt Desktop Bridge",
+            "description": "Silently delivers prompts from Anything-to-Prompt into existing Antigravity Desktop conversations via official agentapi.",
+            "command": exe.to_string_lossy(),
+            "args": ["--antigravity-sidecar"],
+            "restart_policy": "always"
+        }))
+        .unwrap_or_default();
         let w1 = write_if_changed(&ag_dir.join("plugin.json"), &manifest);
         let w2 = write_if_changed(&ag_dir.join("hooks.json"), &hooks);
         let w3 = write_if_changed(&ag_dir.join("mcp_config.json"), &mcp);
-        ag_ok = w1.is_ok() && w2.is_ok() && w3.is_ok();
+        let w4 = write_if_changed(
+            &ag_dir
+                .join("sidecars")
+                .join("desktop-bridge")
+                .join("sidecar.json"),
+            &sidecar_cfg,
+        );
+        enable_antigravity_sidecar_in_config(&home, true);
+        ag_ok = w1.is_ok() && w2.is_ok() && w3.is_ok() && w4.is_ok();
         if ag_ok {
-            log::info!("Synced Antigravity companion plugin at {}", ag_dir.display());
+            log::info!("Synced Antigravity companion plugin + sidecar at {}", ag_dir.display());
         }
     }
 
@@ -1177,6 +1217,368 @@ pub fn start_live_sync_services(app: AppHandle, enabled_flag: Arc<AtomicBool>) {
                 }
             }
         });
+}
+
+pub fn antigravity_sidecar_pipe_full_path() -> String {
+    format!(r"\\.\pipe\{ANTIGRAVITY_SIDECAR_PIPE_SHORT}")
+}
+
+fn enable_antigravity_sidecar_in_config(home: &Path, enable: bool) {
+    let cfg_path = home.join(".gemini").join("config").join("config.json");
+    let mut root: serde_json::Value = if let Ok(raw) = fs::read_to_string(&cfg_path) {
+        serde_json::from_str(&raw).unwrap_or_else(|_| serde_json::json!({}))
+    } else {
+        if !enable {
+            return;
+        }
+        serde_json::json!({})
+    };
+    let Some(obj) = root.as_object_mut() else {
+        return;
+    };
+    let sidecars = obj
+        .entry("sidecars")
+        .or_insert_with(|| serde_json::json!({}));
+    let Some(sc_map) = sidecars.as_object_mut() else {
+        return;
+    };
+    if !enable {
+        if let Some(entry) = sc_map.get_mut(ANTIGRAVITY_SIDECAR_ID).and_then(|v| v.as_object_mut()) {
+            entry.insert("enabled".to_string(), serde_json::Value::Bool(false));
+        }
+    } else {
+        let entry = sc_map
+            .entry(ANTIGRAVITY_SIDECAR_ID)
+            .or_insert_with(|| serde_json::json!({}));
+        if let Some(em) = entry.as_object_mut() {
+            em.insert("enabled".to_string(), serde_json::Value::Bool(true));
+            let has_pid = em
+                .get("projectId")
+                .and_then(|v| v.as_str())
+                .map(|s| !s.trim().is_empty())
+                .unwrap_or(false);
+            if !has_pid {
+                if let Some(pid) = crate::harness::latest_antigravity_desktop_project_id() {
+                    em.insert("projectId".to_string(), serde_json::Value::String(pid));
+                }
+            }
+        }
+    }
+    if let Ok(pretty) = serde_json::to_string_pretty(&root) {
+        let _ = write_if_changed(&cfg_path, &pretty);
+    }
+}
+
+/// Resolves the direct executable and leading subcommand for Antigravity's official `agentapi`.
+/// On Windows, `agentapi.bat` wraps `language_server.exe agentapi %*`. Calling the `.exe` directly
+/// avoids `cmd.exe` batch mangling of newlines, `%`, `&`, and quotes in user prompts.
+fn resolve_agentapi_command() -> Option<(PathBuf, Vec<String>)> {
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    if let Ok(path_var) = std::env::var("PATH") {
+        for dir in std::env::split_paths(&path_var) {
+            for name in ["agentapi.exe", "agentapi.bat", "agentapi.cmd", "agentapi"] {
+                let p = dir.join(name);
+                if p.is_file() {
+                    candidates.push(p);
+                }
+            }
+        }
+    }
+    if let Some(home) = dirs::home_dir() {
+        for name in ["agentapi.exe", "agentapi.bat", "agentapi.cmd"] {
+            let p = home.join(".gemini").join("antigravity").join("bin").join(name);
+            if p.is_file() {
+                candidates.push(p);
+            }
+        }
+    }
+    for cand in candidates {
+        let lower = cand.to_string_lossy().to_ascii_lowercase();
+        if lower.ends_with(".exe") {
+            return Some((cand, Vec::new()));
+        }
+        if lower.ends_with(".bat") || lower.ends_with(".cmd") {
+            if let Ok(raw) = fs::read_to_string(&cand) {
+                for line in raw.lines() {
+                    let t = line.trim();
+                    if t.is_empty() || t.to_ascii_lowercase().starts_with("@echo") {
+                        continue;
+                    }
+                    if let Some(rest) = t.strip_prefix('"') {
+                        if let Some(end_q) = rest.find('"') {
+                            let exe_str = &rest[..end_q];
+                            let exe_path = PathBuf::from(exe_str);
+                            if exe_path.is_file() {
+                                let after = rest[end_q + 1..].trim();
+                                let leading: Vec<String> = after
+                                    .split_whitespace()
+                                    .take_while(|tok| !tok.contains('%'))
+                                    .map(|s| s.to_string())
+                                    .collect();
+                                return Some((exe_path, leading));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+fn execute_agentapi_request(req: &AntigravitySidecarRequest) -> AntigravitySidecarResponse {
+    if req.action == "ping" {
+        return AntigravitySidecarResponse {
+            ok: true,
+            conversation_id: None,
+            error: None,
+        };
+    }
+    let Some((exe, leading)) = resolve_agentapi_command() else {
+        return AntigravitySidecarResponse {
+            ok: false,
+            conversation_id: None,
+            error: Some("未找到官方 agentapi 可执行文件".to_string()),
+        };
+    };
+
+    let mut cmd = Command::new(&exe);
+    for arg in &leading {
+        cmd.arg(arg);
+    }
+    match req.action.as_str() {
+        "send_message" => {
+            let cid = req.conversation_id.as_deref().unwrap_or("").trim();
+            let prompt = req.prompt.as_deref().unwrap_or("");
+            if cid.is_empty() || prompt.trim().is_empty() {
+                return AntigravitySidecarResponse {
+                    ok: false,
+                    conversation_id: None,
+                    error: Some("缺少 conversationId 或消息内容".to_string()),
+                };
+            }
+            let title = req
+                .title
+                .as_deref()
+                .filter(|s| !s.trim().is_empty())
+                .unwrap_or("Anything-to-Prompt");
+            cmd.arg("send-message")
+                .arg(format!("--title={title}"))
+                .arg(cid)
+                .arg(prompt);
+        }
+        "new_conversation" => {
+            let prompt = req.prompt.as_deref().unwrap_or("");
+            if prompt.trim().is_empty() {
+                return AntigravitySidecarResponse {
+                    ok: false,
+                    conversation_id: None,
+                    error: Some("消息内容为空".to_string()),
+                };
+            }
+            cmd.arg("new-conversation");
+            if let Some(title) = req.title.as_deref().filter(|s| !s.trim().is_empty()) {
+                cmd.arg(format!("--title={title}"));
+            }
+            cmd.arg(prompt);
+        }
+        other => {
+            return AntigravitySidecarResponse {
+                ok: false,
+                conversation_id: None,
+                error: Some(format!("不支持的 sidecar action: {other}")),
+            };
+        }
+    }
+
+    cmd.creation_flags(CREATE_NO_WINDOW.0)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    match cmd.output() {
+        Ok(out) => {
+            let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+            let parsed_json = serde_json::from_str::<serde_json::Value>(&stdout).ok();
+            let json_err = parsed_json
+                .as_ref()
+                .and_then(|v| v.get("error"))
+                .and_then(|e| e.as_str())
+                .filter(|s| !s.trim().is_empty())
+                .map(|s| s.to_string());
+            if out.status.success() && json_err.is_none() {
+                let cid = parsed_json
+                    .as_ref()
+                    .and_then(|v| {
+                        v.pointer("/response/sendMessage/recipientId")
+                            .or_else(|| v.pointer("/response/newConversation/conversationId"))
+                            .or_else(|| v.pointer("/response/conversationId"))
+                            .and_then(|x| x.as_str())
+                    })
+                    .map(|s| s.to_string())
+                    .or_else(|| req.conversation_id.clone());
+                AntigravitySidecarResponse {
+                    ok: true,
+                    conversation_id: cid,
+                    error: None,
+                }
+            } else {
+                let err_msg = json_err
+                    .or_else(|| (!stderr.is_empty()).then_some(stderr))
+                    .or_else(|| (!stdout.is_empty()).then_some(stdout))
+                    .unwrap_or_else(|| format!("agentapi 退出码 {:?}", out.status.code()));
+                AntigravitySidecarResponse {
+                    ok: false,
+                    conversation_id: req.conversation_id.clone(),
+                    error: Some(err_msg),
+                }
+            }
+        }
+        Err(e) => AntigravitySidecarResponse {
+            ok: false,
+            conversation_id: req.conversation_id.clone(),
+            error: Some(format!("调用 agentapi 失败: {e}")),
+        },
+    }
+}
+
+fn create_duplex_user_pipe(pipe_full: &str) -> Option<HANDLE> {
+    let pipe_w = to_wide(pipe_full);
+    let sid = current_user_sid_string();
+    let sddl = sid.map(|s| format!("D:(A;;GA;;;{s})"));
+    let sddl_w = sddl.as_deref().map(to_wide);
+    let mut sd = PSECURITY_DESCRIPTOR::default();
+    let mut sa = SECURITY_ATTRIBUTES {
+        nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+        lpSecurityDescriptor: std::ptr::null_mut(),
+        bInheritHandle: false.into(),
+    };
+    let sa_ptr = if let Some(ref sw) = sddl_w {
+        let ok = unsafe {
+            ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                PCWSTR(sw.as_ptr()),
+                SDDL_REVISION_1,
+                &mut sd,
+                None,
+            )
+            .is_ok()
+        };
+        if ok {
+            sa.lpSecurityDescriptor = sd.0;
+            Some(&sa as *const SECURITY_ATTRIBUTES)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    let handle_res = unsafe {
+        CreateNamedPipeW(
+            PCWSTR(pipe_w.as_ptr()),
+            PIPE_ACCESS_DUPLEX,
+            PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
+            8,
+            65536,
+            65536,
+            0,
+            sa_ptr,
+        )
+    };
+    if !sd.0.is_null() {
+        unsafe {
+            let _ = LocalFree(Some(HLOCAL(sd.0)));
+        }
+    }
+
+    if handle_res != INVALID_HANDLE_VALUE && !handle_res.0.is_null() {
+        Some(handle_res)
+    } else {
+        None
+    }
+}
+
+/// Runs as an official Antigravity Plugin Sidecar (`anything-to-prompt.exe --antigravity-sidecar`).
+/// Antigravity Desktop launches this process in the background with official `agentapi` on PATH,
+/// enabling 100% silent background prompt delivery into existing Antigravity Desktop conversations.
+pub fn run_antigravity_sidecar_cli() {
+    crate::mcp_sidecar::spawn_bar_companion_if_needed(Some("antigravity"));
+    let full_pipe = antigravity_sidecar_pipe_full_path();
+    loop {
+        let Some(handle) = create_duplex_user_pipe(&full_pipe) else {
+            std::thread::sleep(Duration::from_millis(800));
+            continue;
+        };
+        let connected = unsafe {
+            match ConnectNamedPipe(handle, None) {
+                Ok(()) => true,
+                Err(e) => {
+                    let win_err = windows::core::Error::from_thread();
+                    win_err.code().0 as u32 == 0x80070217 || e.code().0 as u32 == 0x80070217
+                }
+            }
+        };
+        if !connected {
+            unsafe {
+                let _ = CloseHandle(handle);
+            }
+            continue;
+        }
+        let mut file = unsafe { std::fs::File::from_raw_handle(handle.0) };
+        let mut line = String::new();
+        {
+            let mut reader = BufReader::new(&mut file);
+            let _ = reader.read_line(&mut line);
+        }
+        let resp = match serde_json::from_str::<AntigravitySidecarRequest>(line.trim()) {
+            Ok(req) => execute_agentapi_request(&req),
+            Err(e) => AntigravitySidecarResponse {
+                ok: false,
+                conversation_id: None,
+                error: Some(format!("无效请求: {e}")),
+            },
+        };
+        if let Ok(resp_json) = serde_json::to_string(&resp) {
+            let _ = file.write_all(resp_json.as_bytes());
+            let _ = file.write_all(b"\n");
+            let _ = file.flush();
+        }
+        unsafe {
+            let _ = DisconnectNamedPipe(handle);
+        }
+    }
+}
+
+/// Calls the running Antigravity Plugin Sidecar over the per-user Named Pipe.
+pub fn call_antigravity_sidecar(
+    req: &AntigravitySidecarRequest,
+) -> Result<AntigravitySidecarResponse, String> {
+    let pipe_path = antigravity_sidecar_pipe_full_path();
+    let payload = serde_json::to_string(req).map_err(|e| format!("序列化失败: {e}"))?;
+    let mut last_err = String::new();
+    for _ in 0..3 {
+        match OpenOptions::new().read(true).write(true).open(&pipe_path) {
+            Ok(mut file) => {
+                file.write_all(payload.as_bytes())
+                    .and_then(|_| file.write_all(b"\n"))
+                    .and_then(|_| file.flush())
+                    .map_err(|e| format!("写入 Sidecar 管道失败: {e}"))?;
+                let mut reader = BufReader::new(file);
+                let mut resp_line = String::new();
+                reader
+                    .read_line(&mut resp_line)
+                    .map_err(|e| format!("读取 Sidecar 响应失败: {e}"))?;
+                return serde_json::from_str::<AntigravitySidecarResponse>(resp_line.trim())
+                    .map_err(|e| format!("解析 Sidecar 响应失败: {e}"));
+            }
+            Err(e) => {
+                last_err = e.to_string();
+                std::thread::sleep(Duration::from_millis(60));
+            }
+        }
+    }
+    Err(format!("SIDE_OFFLINE:{last_err}"))
 }
 
 #[cfg(test)]
