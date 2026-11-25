@@ -1555,15 +1555,12 @@ pub fn load_antigravity_catalog() -> ExternalHarnessCatalog {
         .join("conversation_summaries.db");
 
     // Map project_id -> (label, path, Vec<ExternalConversation>)
+    // Do NOT unconditionally inject a phantom "CLI Project" — only include projects that
+    // actually have active (non-killed, non-archived) conversations in Antigravity's DB,
+    // so deleted workspaces vanish immediately on refresh.
     let mut by_project: HashMap<String, (String, String, Vec<ExternalConversation>)> =
         HashMap::new();
     let mut seen_conv_ids: HashMap<String, usize> = HashMap::new();
-
-    // Provide CLI Project at the bottom (matching Antigravity Desktop sidebar order)
-    by_project.insert(
-        "default-cli-project".to_string(),
-        ("CLI Project".to_string(), String::new(), Vec::new()),
-    );
 
     if let Some(conn) = open_sqlite_readonly(&db_path) {
         if let Ok(mut stmt) = conn.prepare(

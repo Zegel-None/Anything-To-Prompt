@@ -706,8 +706,30 @@ window.__ModuleLoader__.load({
                 if (!Array.isArray(dsbRuntime.externalMessages[hId]) || dsbRuntime.externalMessages[hId].length === 0) {
                   loadExternalConversationMessages(hId, cur.sessionId);
                 }
+              } else if (groups.length > 0) {
+                const firstWs = groups[0];
+                const firstConv = Array.isArray(firstWs.convs) && firstWs.convs.length > 0 ? firstWs.convs[0] : null;
+                dsbRuntime.externalSelection[hId] = firstConv
+                  ? {
+                      workspaceId: firstWs.workspaceId || '',
+                      workspacePath: firstWs.path || firstConv.cwd || '',
+                      sessionId: firstConv.id,
+                      title: firstConv.title || firstWs.label || '新对话',
+                    }
+                  : {
+                      workspaceId: firstWs.workspaceId || '',
+                      workspacePath: firstWs.path || '',
+                      sessionId: '',
+                      title: (firstWs.label || HARNESS_META[hId].label) + ' · 新对话',
+                    };
+                writeStoredExtSelection(hId, dsbRuntime.externalSelection[hId]);
+                if (firstConv) loadExternalConversationMessages(hId, firstConv.id);
               }
-            } else if (autoSelectIfEmpty && groups.length > 0) {
+            } else if (
+              (autoSelectIfEmpty ||
+                (cur.workspaceId && !groups.some((g) => g && g.workspaceId === cur.workspaceId))) &&
+              groups.length > 0
+            ) {
               const firstWs = groups[0];
               const firstConv = Array.isArray(firstWs.convs) && firstWs.convs.length > 0 ? firstWs.convs[0] : null;
               if (firstConv) {
