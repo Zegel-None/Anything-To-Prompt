@@ -5336,10 +5336,14 @@ window.__ModuleLoader__.load({
         const [manualPathValue, setManualPathValue] = useState('');
         const [pickerError, setPickerError] = useState('');
         const [pillMetrics, setPillMetrics] = useState(null);
+        const [submenuMarginBottom, setSubmenuMarginBottom] = useState(0);
 
         const btnRef = useRef(null);
         const extAnchorRef = useRef(null);
         const menuRef = useRef(null);
+        const wsPanelRef = useRef(null);
+        const convPanelRef = useRef(null);
+        const wsRowRefs = useRef(new Map());
 
         useEffect(() => {
           dsbRuntime.toggleHarnessMenu = (anchorEl) => {
@@ -5682,6 +5686,42 @@ window.__ModuleLoader__.load({
         const hoveredGroup =
           groups.find((g) => g.workspaceId === hoveredWsId) || groups[0] || null;
 
+        const recomputeSubmenuAlignment = useCallback(() => {
+          if (!menuOpen || settingsView || !hoveredGroup) {
+            setSubmenuMarginBottom(0);
+            return;
+          }
+          const panelEl = wsPanelRef.current;
+          const convEl = convPanelRef.current;
+          const rowEl = wsRowRefs.current.get(hoveredGroup.workspaceId);
+          if (!panelEl || !convEl || !rowEl) {
+            setSubmenuMarginBottom(0);
+            return;
+          }
+          const pr = panelEl.getBoundingClientRect();
+          const cr = convEl.getBoundingClientRect();
+          const rr = rowEl.getBoundingClientRect();
+          if (pr.height < 12 || cr.height < 12 || rr.height < 8) {
+            setSubmenuMarginBottom(0);
+            return;
+          }
+          // Align the right panel's first row (6px padding + 1px border = 7px from panel top)
+          // directly with the hovered workspace row `rr.top`, while clamping so Level 2 never
+          // overflows above Level 1's top or below Level 1's bottom (above the Bar card).
+          const targetTop = Math.max(0, Math.round(rr.top - pr.top - 7));
+          const maxBottomOffset = Math.max(0, Math.round(pr.height - cr.height));
+          const desiredBottomOffset = Math.round(pr.height - (targetTop + cr.height));
+          const clamped = Math.max(0, Math.min(maxBottomOffset, desiredBottomOffset));
+          setSubmenuMarginBottom((prev) => (prev === clamped ? prev : clamped));
+        }, [menuOpen, settingsView, hoveredGroup ? hoveredGroup.workspaceId : '', hoveredGroup ? hoveredGroup.convs.length : 0]);
+
+        useLayoutEffect(() => {
+          recomputeSubmenuAlignment();
+          if (!menuOpen || settingsView) return undefined;
+          const raf = window.requestAnimationFrame(recomputeSubmenuAlignment);
+          return () => window.cancelAnimationFrame(raf);
+        }, [recomputeSubmenuAlignment, menuOpen, settingsView, activeHarness, groups.length]);
+
         const availById = useMemo(() => {
           const map = {};
           for (const item of dsbRuntime.harnessAvailability || []) {
@@ -5755,7 +5795,7 @@ window.__ModuleLoader__.load({
           const panelBorder = harnessTheme.border;
 
           const snap = dsbRuntime.appSettings || {
-            version: '0.3.5',
+            version: '0.3.6',
             isElevated: false,
             dshStatus: '已连接',
             config: {
@@ -6261,6 +6301,7 @@ window.__ModuleLoader__.load({
             h(
               'div',
               {
+                ref: wsPanelRef,
                 style: {
                   width: '196px',
                   maxHeight: '286px',
@@ -6368,6 +6409,7 @@ window.__ModuleLoader__.load({
                 'div',
                 {
                   'data-dsb-menu-scroll': '1',
+                  onScroll: recomputeSubmenuAlignment,
                   style: { overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '2px', maxHeight: '206px' },
                 },
                 activeHarness !== 'dsh' && dsbRuntime.externalLoading[activeHarness] && groups.length === 0
@@ -6381,6 +6423,10 @@ window.__ModuleLoader__.load({
                     'button',
                     {
                       key: g.workspaceId,
+                      ref: (el) => {
+                        if (el) wsRowRefs.current.set(g.workspaceId, el);
+                        else wsRowRefs.current.delete(g.workspaceId);
+                      },
                       type: 'button',
                       onMouseEnter: () => setHoveredWsId(g.workspaceId),
                       onClick: () => setHoveredWsId(g.workspaceId),
@@ -6413,14 +6459,16 @@ window.__ModuleLoader__.load({
               ),
             ),
 
-            // Level 2: Conversations in hovered workspace
+            // Level 2: Conversations in hovered workspace (first row aligned with hovered workspace row)
             hoveredGroup
               ? h(
                   'div',
                   {
+                    ref: convPanelRef,
                     style: {
                       width: '248px',
                       maxHeight: '286px',
+                      marginBottom: submenuMarginBottom + 'px',
                       borderRadius: '14px',
                       padding: '6px',
                       background: panelBg,
@@ -6430,6 +6478,7 @@ window.__ModuleLoader__.load({
                       flexDirection: 'column',
                       gap: '2px',
                       boxSizing: 'border-box',
+                      transition: 'margin-bottom 90ms ease-out',
                     },
                   },
                   hoveredGroup.workspaceId !== '__ungrouped__'
