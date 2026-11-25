@@ -26,7 +26,9 @@ use windows::Win32::Security::{
     GetTokenInformation, TokenUser, PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES, TOKEN_QUERY,
     TOKEN_USER,
 };
-use windows::Win32::Storage::FileSystem::{PIPE_ACCESS_DUPLEX, PIPE_ACCESS_INBOUND};
+use windows::Win32::Storage::FileSystem::{
+    FlushFileBuffers, PIPE_ACCESS_DUPLEX, PIPE_ACCESS_INBOUND,
+};
 use windows::Win32::System::Pipes::{
     ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, PIPE_READMODE_BYTE,
     PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_WAIT,
@@ -1549,8 +1551,12 @@ pub fn run_antigravity_sidecar_cli() {
             let _ = file.flush();
         }
         unsafe {
+            // CRITICAL on Win32 Named Pipes: wait until the client has read all response bytes
+            // before calling DisconnectNamedPipe, otherwise the client hits ERROR_PIPE_NOT_CONNECTED (233)!
+            let _ = FlushFileBuffers(handle);
             let _ = DisconnectNamedPipe(handle);
         }
+        drop(file);
     }
 }
 
@@ -1685,5 +1691,62 @@ mod tests {
         let parsed: HookSyncNotice = serde_json::from_str(received.trim()).unwrap();
         assert_eq!(parsed.session_id.as_deref(), Some("sess-pipe-1"));
         assert_eq!(parsed.last_assistant_message.as_deref(), Some("Done"));
+    }
+
+    #[test]
+    fn duplex_pipe_flush_prevents_error_233_across_rapid_roundtrips() {
+        let pipe = format!(
+            r"\\.\pipe\atp-duplex-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis()
+        );
+        let pipe_srv = pipe.clone();
+        let srv = std::thread::spawn(move || {
+            for i in 0..8 {
+                let h = create_duplex_user_pipe(&pipe_srv).expect("create duplex pipe");
+                let connected = unsafe {
+                    match ConnectNamedPipe(h, None) {
+                        Ok(()) => true,
+                        Err(e) => e.code().0 as u32 == 0x80070217,
+                    }
+                };
+                assert!(connected);
+                let mut f = unsafe { std::fs::File::from_raw_handle(h.0) };
+                let mut req_line = String::new();
+                {
+                    let mut r = BufReader::new(&mut f);
+                    let _ = r.read_line(&mut req_line);
+                }
+                let resp = format!("{{\"ok\":true,\"conversationId\":\"c-{i}\"}}\n");
+                f.write_all(resp.as_bytes()).expect("write resp");
+                unsafe {
+                    let _ = FlushFileBuffers(h);
+                    let _ = DisconnectNamedPipe(h);
+                }
+                drop(f);
+            }
+        });
+
+        for i in 0..8 {
+            let mut resp_line = String::new();
+            let mut ok = false;
+            for _ in 0..25 {
+                if let Ok(mut client) = OpenOptions::new().read(true).write(true).open(&pipe) {
+                    client.write_all(b"{\"action\":\"send_message\"}\n").unwrap();
+                    let mut r = BufReader::new(client);
+                    r.read_line(&mut resp_line).expect("must never hit os error 233");
+                    ok = true;
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(15));
+            }
+            assert!(ok, "client failed to connect on iteration {i}");
+            assert!(resp_line.contains(&format!("c-{i}")));
+        }
+
+        let _ = srv.join();
     }
 }

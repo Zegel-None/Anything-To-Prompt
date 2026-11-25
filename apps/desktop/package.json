@@ -1,6 +1,6 @@
 {
   "name": "@anything-to-prompt/desktop",
-  "version": "0.3.13",
+  "version": "0.3.14",
   "private": true,
   "description": "Anything-to-Prompt — Pick anything on your Windows desktop, straight into your AI prompt",
   "scripts": {

@@ -5837,7 +5837,7 @@ window.__ModuleLoader__.load({
           const panelBorder = harnessTheme.border;
 
           const snap = dsbRuntime.appSettings || {
-            version: '0.3.13',
+            version: '0.3.14',
             isElevated: false,
             dshStatus: '已连接',
             config: {
