@@ -1760,13 +1760,27 @@ window.__ModuleLoader__.load({
           }
 
           targetHeight = Math.max(COLLAPSED_LIP_PX, Math.min(880, Math.ceil(targetHeight)));
+          // Because the Tauri window is bottom-anchored, any pending vertical resize shifts
+          // every bottom-anchored element's viewport `top` by `deltaY = targetHeight - innerHeight`.
+          // Pre-adjusting `shape.y` keeps Win32 SetWindowRgn pixel-exact even on Frame 1!
+          const deltaY = Math.round(targetHeight - window.innerHeight);
+          const adjustedShapes =
+            deltaY !== 0
+              ? shapes.map((s) => ({
+                  x: s.x,
+                  y: Math.max(0, s.y + deltaY),
+                  w: s.w,
+                  h: s.h,
+                  r: s.r,
+                }))
+              : shapes;
           sendBarReport({
             kind: 'layout',
             targetHeight,
             width: Math.round(barWidth),
-            shapes,
+            shapes: adjustedShapes,
           });
-        }, [barMode, barWidth, isExpanded, expandedHeight]);
+        }, [barMode, barWidth, isExpanded, expandedHeight, activeHarness]);
 
         const scheduleLayoutReport = useCallback(
           (durationMs = 280) => {
@@ -2585,7 +2599,10 @@ window.__ModuleLoader__.load({
           if (!IS_BAR || barMode === 'lip' || quickHits.length === 0) return null;
           const cardEl = typeof document !== 'undefined' ? document.querySelector('[data-dsb-card]') : null;
           const cr = cardEl ? cardEl.getBoundingClientRect() : null;
-          const bottomPx = cr ? Math.max(120, Math.round(window.innerHeight - cr.top + 6)) : 158;
+          const validCard = cr && cr.width > 10 && cr.height > 10;
+          const bottomPx = validCard
+            ? Math.max(96, Math.min(360, Math.round(window.innerHeight - cr.top + 6)))
+            : 158;
           const theme = HARNESS_META[activeHarness] || HARNESS_META.dsh;
 
           const badgeMetaForHit = (hit) => {
@@ -4094,6 +4111,7 @@ window.__ModuleLoader__.load({
           const onPointerDown = (e) => {
             const t = e.target;
             if (btnRef.current && t instanceof Node && btnRef.current.contains(t)) return;
+            if (t instanceof Element && t.closest('[data-dsb-session-chip="1"]')) return;
             if (menuRef.current && t instanceof Node && menuRef.current.contains(t)) return;
             setMenuOpen(false);
           };
@@ -4104,13 +4122,28 @@ window.__ModuleLoader__.load({
               setMenuOpen(false);
             }
           };
+          const onWinResize = () => setTick((n) => n + 1);
           document.addEventListener('pointerdown', onPointerDown, true);
           document.addEventListener('keydown', onKeyDown, true);
+          window.addEventListener('resize', onWinResize);
           return () => {
             document.removeEventListener('pointerdown', onPointerDown, true);
             document.removeEventListener('keydown', onKeyDown, true);
+            window.removeEventListener('resize', onWinResize);
           };
         }, [menuOpen]);
+
+        // Re-snap popover coordinates on the next frame whenever harness switches while menu is open
+        useEffect(() => {
+          if (!menuOpen) return undefined;
+          const raf = window.requestAnimationFrame(() => {
+            setTick((n) => n + 1);
+            if (typeof dsbRuntime.scheduleLayoutReport === 'function') {
+              dsbRuntime.scheduleLayoutReport(280);
+            }
+          });
+          return () => window.cancelAnimationFrame(raf);
+        }, [menuOpen, activeHarness]);
 
         const handleOpenSession = (conv, group) => {
           setMenuOpen(false);
@@ -4214,15 +4247,49 @@ window.__ModuleLoader__.load({
 
         const renderMenu = () => {
           if (!menuOpen) return null;
-          const anchorEl =
-            dsbRuntime.activeHarness !== 'dsh' && extAnchorRef.current
-              ? extAnchorRef.current
-              : btnRef.current;
-          const btnRect = anchorEl ? anchorEl.getBoundingClientRect() : null;
-          const bottomPx = btnRect ? Math.max(44, Math.round(window.innerHeight - btnRect.top + 8)) : 52;
+          const isValidRect = (r) => !!(r && r.width > 4 && r.height > 4 && r.bottom > 0);
+
+          // Always measure the live, visible Bar slab (upper card + active composer) so `bottomPx`
+          // is mathematically invariant to window vertical resizes and NEVER drifts or flies off-screen
+          // when switching harnesses (where old buttons unmount with 0x0 rect).
+          const cardEl = document.querySelector('[data-dsb-card]');
+          const compEl =
+            dsbRuntime.activeHarness !== 'dsh'
+              ? document.querySelector('[data-dsb-external-composer]')
+              : document.querySelector('[data-composer-card]');
+          const cr = cardEl ? cardEl.getBoundingClientRect() : null;
+          const ir = compEl ? compEl.getBoundingClientRect() : null;
+          let slabTop = null;
+          if (isValidRect(cr)) slabTop = cr.top;
+          if (isValidRect(ir)) slabTop = slabTop === null ? ir.top : Math.min(slabTop, ir.top);
+          const fallbackSlabH = dsbRuntime.activeHarness === 'codex' ? 196 : 158;
+          const slabHeight =
+            slabTop !== null
+              ? Math.max(56, Math.min(380, Math.round(window.innerHeight - slabTop)))
+              : fallbackSlabH;
+          const bottomPx = slabHeight + 8;
+
+          // Live visible session chip for horizontal alignment (ignore detached / hidden 0x0 refs)
+          let chipRect = null;
+          if (dsbRuntime.activeHarness !== 'dsh') {
+            const liveExtChip = document.querySelector(
+              '[data-dsb-external-composer] [data-dsb-session-chip="1"]',
+            );
+            const r1 = liveExtChip ? liveExtChip.getBoundingClientRect() : null;
+            const r2 =
+              extAnchorRef.current && extAnchorRef.current.isConnected
+                ? extAnchorRef.current.getBoundingClientRect()
+                : null;
+            if (isValidRect(r1)) chipRect = r1;
+            else if (isValidRect(r2)) chipRect = r2;
+          } else if (btnRef.current && btnRef.current.isConnected) {
+            const r0 = btnRef.current.getBoundingClientRect();
+            if (isValidRect(r0)) chipRect = r0;
+          }
+
           const menuMaxW = 452;
-          const leftPx = btnRect
-            ? Math.max(8, Math.min(Math.round(btnRect.left), Math.max(8, window.innerWidth - menuMaxW - 8)))
+          const leftPx = chipRect
+            ? Math.max(8, Math.min(Math.round(chipRect.left), Math.max(8, window.innerWidth - menuMaxW - 8)))
             : 12;
 
           const panelBg = harnessTheme.surface;
