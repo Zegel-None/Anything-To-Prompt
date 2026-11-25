@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-harness-get-active"
+description = "Enables the harness_get_active command without any pre-configured scope."
+commands.allow = ["harness_get_active"]
+
+[[permission]]
+identifier = "deny-harness-get-active"
+description = "Denies the harness_get_active command without any pre-configured scope."
+commands.deny = ["harness_get_active"]

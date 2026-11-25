@@ -4,9 +4,13 @@ pub mod config;
 pub mod cursor;
 pub mod dsh;
 pub mod elevation;
+pub mod everything_ipc;
+pub mod harness;
 pub mod hooks;
+pub mod ntfs_usn;
 pub mod pick;
 pub mod plugin_sync;
+pub mod search;
 pub mod state;
 pub mod tray;
 pub mod window;
@@ -49,6 +53,7 @@ pub struct CliOptions {
     pub dev_draft: Option<String>,
     pub dev_pick_tap: Option<(i32, i32)>,
     pub dev_pick_stroke: Option<(i32, i32, i32, i32)>,
+    pub dev_pick_lasso: Option<Vec<(i32, i32)>>,
     pub passthrough_args: Vec<String>,
 }
 
@@ -138,6 +143,19 @@ impl CliOptions {
                         i += 1;
                     }
                 }
+                "--dev-pick-lasso" => {
+                    if i + 1 < vec.len() {
+                        let nums = parse_csv_ints(&vec[i + 1]);
+                        if nums.len() >= 4 && nums.len().is_multiple_of(2) {
+                            let pts: Vec<(i32, i32)> =
+                                nums.as_chunks::<2>().0.iter().map(|c| (c[0], c[1])).collect();
+                            out.dev_pick_lasso = Some(pts);
+                        }
+                        out.passthrough_args.push(vec[i].clone());
+                        out.passthrough_args.push(vec[i + 1].clone());
+                        i += 1;
+                    }
+                }
                 _ => {
                     out.passthrough_args.push(vec[i].clone());
                 }
@@ -207,6 +225,7 @@ pub struct AppShared {
     pub dsh_conn: Arc<Mutex<DshConnectionState>>,
     pub tray_handles: Mutex<Option<TrayHandles>>,
     pub broker: Arc<BrokerClient>,
+    pub search_engine: Arc<search::SearchEngine>,
     pub hook_shared: Arc<HookSharedConfig>,
     pub pick_counter: Mutex<PickCounterState>,
     pub compose_waiters: Mutex<HashMap<String, mpsc::Sender<String>>>,
@@ -387,6 +406,155 @@ fn overlay_compose_done(app: AppHandle, id: String, data_url: String) {
                 let _ = tx.send(data_url);
             }
         }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct HarnessSendPayload {
+    harness: String,
+    turn_id: String,
+    cwd: Option<String>,
+    project_id: Option<String>,
+    session_id: Option<String>,
+    prompt: String,
+}
+
+#[tauri::command]
+fn harness_get_active(app: AppHandle) -> String {
+    app.try_state::<AppShared>()
+        .and_then(|s| s.config.lock().ok().map(|c| c.active_harness.clone()))
+        .unwrap_or_else(|| "dsh".to_string())
+}
+
+#[tauri::command]
+fn harness_set_active(app: AppHandle, harness: String) -> String {
+    let normalized = harness::HarnessKind::parse(&harness).as_str().to_string();
+    if let Some(shared) = app.try_state::<AppShared>() {
+        if let Ok(mut cfg) = shared.config.lock() {
+            if cfg.active_harness != normalized {
+                cfg.active_harness = normalized.clone();
+                let _ = cfg.save();
+            }
+        }
+    }
+    normalized
+}
+
+#[tauri::command]
+fn harness_list_available(app: AppHandle) -> Vec<harness::HarnessAvailability> {
+    let dsh_connected = app
+        .try_state::<AppShared>()
+        .and_then(|s| s.dsh_conn.lock().ok().map(|c| c.active_port.is_some()))
+        .unwrap_or(false);
+    harness::list_harness_availability(dsh_connected)
+}
+
+#[tauri::command]
+fn harness_load_catalog(harness: String) -> harness::ExternalHarnessCatalog {
+    match harness::HarnessKind::parse(&harness) {
+        harness::HarnessKind::Antigravity => harness::load_antigravity_catalog(),
+        harness::HarnessKind::Codex => harness::load_codex_catalog(),
+        harness::HarnessKind::Dsh => harness::ExternalHarnessCatalog {
+            harness: "dsh".to_string(),
+            available: true,
+            exe_path: None,
+            groups: Vec::new(),
+            error: None,
+        },
+    }
+}
+
+#[tauri::command]
+fn harness_load_messages(harness: String, session_id: String) -> Vec<harness::ExternalChatMessage> {
+    let kind = harness::HarnessKind::parse(&harness);
+    harness::load_external_messages(kind, &session_id)
+}
+
+#[tauri::command]
+fn harness_send_message(app: AppHandle, payload: HarnessSendPayload) -> Result<(), String> {
+    let Some(shared) = app.try_state::<AppShared>() else {
+        return Err("应用状态未就绪".to_string());
+    };
+    let kind = harness::HarnessKind::parse(&payload.harness);
+    let broker = shared.broker.clone();
+    harness::start_external_harness_turn(
+        app.clone(),
+        broker,
+        harness::ExternalTurnRequest {
+            harness: kind,
+            turn_id: payload.turn_id,
+            cwd: payload.cwd,
+            project_id: payload.project_id,
+            session_id: payload.session_id,
+            prompt: payload.prompt,
+        },
+    )
+}
+
+#[tauri::command]
+fn harness_cancel_turn(app: AppHandle, turn_id: String) -> bool {
+    let Some(shared) = app.try_state::<AppShared>() else {
+        return false;
+    };
+    let resp = shared
+        .broker
+        .call(crate::broker::BrokerRequest::CancelHarnessTurn { turn_id });
+    resp.ok
+}
+
+#[tauri::command]
+fn quick_search_query(app: AppHandle, query: String, limit: Option<usize>) -> Vec<search::SearchHit> {
+    let Some(shared) = app.try_state::<AppShared>() else {
+        return Vec::new();
+    };
+    shared.search_engine.query(&query, limit.unwrap_or(8))
+}
+
+#[tauri::command]
+fn quick_search_status(app: AppHandle) -> search::SearchIndexStatus {
+    app.try_state::<AppShared>()
+        .map(|s| s.search_engine.status())
+        .unwrap_or(search::SearchIndexStatus {
+            ready: false,
+            indexing: false,
+            entry_count: 0,
+            last_build_ms: 0,
+            engine_mode: "high_value".to_string(),
+            drives: Vec::new(),
+        })
+}
+
+#[tauri::command]
+fn quick_search_build_capsule(
+    app: AppHandle,
+    path: String,
+    name: String,
+    kind: search::SearchEntryKind,
+) -> search::QuickSearchCapsule {
+    let n = app
+        .try_state::<AppShared>()
+        .map(|s| {
+            s.search_engine.record_use(&path);
+            s.allocate_pick_number()
+        })
+        .unwrap_or(1);
+    search::build_quick_search_capsule(n, &path, &name, kind)
+}
+
+#[tauri::command]
+fn quick_search_open_path(app: AppHandle, path: String) -> Result<(), String> {
+    let Some(shared) = app.try_state::<AppShared>() else {
+        return Err("应用状态未就绪".to_string());
+    };
+    shared.search_engine.record_use(&path);
+    search::open_search_path_medium(&shared.broker, &path)
+}
+
+#[tauri::command]
+fn quick_search_refresh(app: AppHandle) {
+    if let Some(shared) = app.try_state::<AppShared>() {
+        shared.search_engine.trigger_refresh_async();
     }
 }
 
@@ -838,13 +1006,17 @@ fn start_hook_event_router(app: AppHandle, rx: mpsc::Receiver<HookEvent>) {
                         }
                         push_hover(cur_gen, x, y);
                     }
-                    HookEvent::PenMouseDown { x, y } => {
+                    HookEvent::PenMouseDown { x, y, button } => {
                         pending_tap_allow_bg = bg_dwell
                             .lock()
                             .map(|mut d| is_bg_dwell_unlocked(&mut d))
                             .unwrap_or(false);
                         pending_raw_capture = pick::capture_mousedown_snapshot(x, y);
-                        if let Some(hit) = pick::adapters::office::detect_office_canvas_at(x, y) {
+                        // Right button ALWAYS draws a red doodle screenshot (never hijacked by Office text/cell drag).
+                        if button == hooks::PenButton::Right {
+                            active_drag_mode = pick::adapters::office::OfficeDragMode::NormalStroke;
+                            active_drag_hwnd = 0;
+                        } else if let Some(hit) = pick::adapters::office::detect_office_canvas_at(x, y) {
                             if hit.in_canvas {
                                 active_drag_mode = hit.kind.drag_mode();
                                 active_drag_hwnd = hit.root_hwnd.0 as isize;
@@ -864,51 +1036,69 @@ fn start_hook_event_router(app: AppHandle, rx: mpsc::Receiver<HookEvent>) {
                             active_drag_hwnd = 0;
                         }
                     }
-                    HookEvent::PenDrag { points } => {
+                    HookEvent::PenDrag { points, button } => {
                         if points.len() < 2 {
                             continue;
                         }
                         let first = points[0];
                         let last = *points.last().unwrap_or(&first);
-                        match active_drag_mode {
-                            pick::adapters::office::OfficeDragMode::WordTextSelect => {
-                                push_word_sel(active_drag_hwnd, first, last);
-                                if let Some(ov) = app.get_webview_window("overlay") {
-                                    let _ = ov.emit(
-                                        "pen:stroke",
-                                        serde_json::json!({
-                                            "mode": "word_text",
-                                            "start": { "x": first.0, "y": first.1 },
-                                            "end": { "x": last.0, "y": last.1 },
-                                        }),
-                                    );
-                                }
+                        if button == hooks::PenButton::Right {
+                            if let Some(ov) = app.get_webview_window("overlay") {
+                                let pts: Vec<serde_json::Value> = points
+                                    .into_iter()
+                                    .map(|(x, y)| serde_json::json!({ "x": x, "y": y }))
+                                    .collect();
+                                let _ = ov.emit(
+                                    "pen:stroke",
+                                    serde_json::json!({
+                                        "mode": "red_doodle",
+                                        "color": "red",
+                                        "points": pts,
+                                    }),
+                                );
                             }
-                            pick::adapters::office::OfficeDragMode::ExcelCellBox => {
-                                if let Some(ov) = app.get_webview_window("overlay") {
-                                    let _ = ov.emit(
-                                        "pen:stroke",
-                                        serde_json::json!({
-                                            "mode": "excel_box",
-                                            "start": { "x": first.0, "y": first.1 },
-                                            "end": { "x": last.0, "y": last.1 },
-                                        }),
-                                    );
+                        } else {
+                            match active_drag_mode {
+                                pick::adapters::office::OfficeDragMode::WordTextSelect => {
+                                    push_word_sel(active_drag_hwnd, first, last);
+                                    if let Some(ov) = app.get_webview_window("overlay") {
+                                        let _ = ov.emit(
+                                            "pen:stroke",
+                                            serde_json::json!({
+                                                "mode": "word_text",
+                                                "start": { "x": first.0, "y": first.1 },
+                                                "end": { "x": last.0, "y": last.1 },
+                                            }),
+                                        );
+                                    }
                                 }
-                            }
-                            pick::adapters::office::OfficeDragMode::NormalStroke => {
-                                if let Some(ov) = app.get_webview_window("overlay") {
-                                    let pts: Vec<serde_json::Value> = points
-                                        .into_iter()
-                                        .map(|(x, y)| serde_json::json!({ "x": x, "y": y }))
-                                        .collect();
-                                    let _ = ov.emit(
-                                        "pen:stroke",
-                                        serde_json::json!({
-                                            "mode": "stroke",
-                                            "points": pts,
-                                        }),
-                                    );
+                                pick::adapters::office::OfficeDragMode::ExcelCellBox => {
+                                    if let Some(ov) = app.get_webview_window("overlay") {
+                                        let _ = ov.emit(
+                                            "pen:stroke",
+                                            serde_json::json!({
+                                                "mode": "excel_box",
+                                                "start": { "x": first.0, "y": first.1 },
+                                                "end": { "x": last.0, "y": last.1 },
+                                            }),
+                                        );
+                                    }
+                                }
+                                pick::adapters::office::OfficeDragMode::NormalStroke => {
+                                    if let Some(ov) = app.get_webview_window("overlay") {
+                                        let pts: Vec<serde_json::Value> = points
+                                            .into_iter()
+                                            .map(|(x, y)| serde_json::json!({ "x": x, "y": y }))
+                                            .collect();
+                                        let _ = ov.emit(
+                                            "pen:stroke",
+                                            serde_json::json!({
+                                                "mode": "blue_select",
+                                                "color": "blue",
+                                                "points": pts,
+                                            }),
+                                        );
+                                    }
                                 }
                             }
                         }
@@ -924,7 +1114,7 @@ fn start_hook_event_router(app: AppHandle, rx: mpsc::Receiver<HookEvent>) {
                             pick::execute_tap_pick(&tap_app, x, y, pre, allow_bg);
                         });
                     }
-                    HookEvent::PenStroke { points } => {
+                    HookEvent::PenStroke { points, button } => {
                         let pre = pending_raw_capture.take();
                         pending_tap_allow_bg = false;
                         active_drag_mode = pick::adapters::office::OfficeDragMode::NormalStroke;
@@ -934,7 +1124,7 @@ fn start_hook_event_router(app: AppHandle, rx: mpsc::Receiver<HookEvent>) {
                         }
                         let stroke_app = app.clone();
                         std::thread::spawn(move || {
-                            pick::execute_stroke_pick(&stroke_app, points, pre);
+                            pick::execute_stroke_pick(&stroke_app, points, button, pre);
                         });
                     }
                     HookEvent::PenEnd { picked_any } => {
@@ -1090,6 +1280,9 @@ pub fn run() {
         status_label: "正在检测…".to_string(),
     }));
 
+    let search_engine = Arc::new(search::SearchEngine::new(config.search_roots.clone()));
+    search_engine.spawn_background_indexer();
+
     let app_shared = AppShared {
         config: Mutex::new(config),
         state_machine: Mutex::new(BarStateMachine::new()),
@@ -1108,6 +1301,7 @@ pub fn run() {
         dsh_conn: dsh_conn.clone(),
         tray_handles: Mutex::new(None),
         broker: Arc::new(BrokerClient::new()),
+        search_engine,
         hook_shared: hook_shared.clone(),
         pick_counter: Mutex::new(PickCounterState::default()),
         compose_waiters: Mutex::new(HashMap::new()),
@@ -1189,7 +1383,35 @@ pub fn run() {
                     }
                     let pre = pick::capture_mousedown_snapshot(x1, y1);
                     let pts = vec![(x1, y1), (x2, y1), (x2, y2), (x1, y2), (x1, y1)];
-                    pick::execute_stroke_pick(&handle, pts, pre);
+                    pick::execute_stroke_pick(&handle, pts, hooks::PenButton::Right, pre);
+                    if let Some(ov) = handle.get_webview_window("overlay") {
+                        let _ = ov.emit("pen:hide", serde_json::json!({}));
+                        hide_overlay(&ov);
+                    }
+                    dispatch_state_event(&handle, StateEvent::PenEnded { picked_any: true });
+                });
+            }
+            if let Some(lasso_pts) = forwarded.dev_pick_lasso {
+                let handle = app.clone();
+                std::thread::spawn(move || {
+                    if let Some(ov) = handle.get_webview_window("overlay") {
+                        let (mon, scale) = position_and_show_overlay(&ov);
+                        let _ = ov.emit(
+                            "pen:show",
+                            serde_json::json!({
+                                "monitorRect": {
+                                    "x": mon.monitor_left,
+                                    "y": mon.monitor_top,
+                                    "w": mon.monitor_right - mon.monitor_left,
+                                    "h": mon.monitor_bottom - mon.monitor_top,
+                                },
+                                "scale": scale,
+                            }),
+                        );
+                    }
+                    let (sx, sy) = lasso_pts[0];
+                    let pre = pick::capture_mousedown_snapshot(sx, sy);
+                    pick::execute_stroke_pick(&handle, lasso_pts, hooks::PenButton::Left, pre);
                     if let Some(ov) = handle.get_webview_window("overlay") {
                         let _ = ov.emit("pen:hide", serde_json::json!({}));
                         hide_overlay(&ov);
@@ -1230,15 +1452,21 @@ pub fn run() {
                         return;
                     }
 
-                    // Sync current BridgeMode once DSH Bar clone page finishes loading
+                    // Sync current BridgeMode & active Harness once DSH Bar clone page finishes loading
                     let mode = shared
                         .last_bridge_mode
                         .lock()
                         .map(|m| *m)
                         .unwrap_or(BridgeMode::Summon);
+                    let active_harness = shared
+                        .config
+                        .lock()
+                        .map(|c| c.active_harness.clone())
+                        .unwrap_or_else(|_| "dsh".to_string());
                     let js = format!(
-                        "window.__DSB_BRIDGE__ && window.__DSB_BRIDGE__.setMode('{}');",
-                        mode.as_str()
+                        "window.__DSB_BRIDGE__ && window.__DSB_BRIDGE__.setMode('{}'); window.__DSB_BRIDGE__ && window.__DSB_BRIDGE__.setHarness && window.__DSB_BRIDGE__.setHarness('{}');",
+                        mode.as_str(),
+                        crate::harness::HarnessKind::parse(&active_harness).as_str()
                     );
                     let _ = webview.eval(&js);
 
@@ -1264,7 +1492,19 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             bar_report,
             bar_reconnect,
-            overlay_compose_done
+            overlay_compose_done,
+            harness_get_active,
+            harness_set_active,
+            harness_list_available,
+            harness_load_catalog,
+            harness_load_messages,
+            harness_send_message,
+            harness_cancel_turn,
+            quick_search_query,
+            quick_search_status,
+            quick_search_build_capsule,
+            quick_search_open_path,
+            quick_search_refresh
         ])
         .setup(move |app| {
             let app_handle = app.handle().clone();

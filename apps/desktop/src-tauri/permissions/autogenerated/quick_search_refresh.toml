@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-quick-search-refresh"
+description = "Enables the quick_search_refresh command without any pre-configured scope."
+commands.allow = ["quick_search_refresh"]
+
+[[permission]]
+identifier = "deny-quick-search-refresh"
+description = "Denies the quick_search_refresh command without any pre-configured scope."
+commands.deny = ["quick_search_refresh"]

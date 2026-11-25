@@ -31,6 +31,8 @@ pub struct AppConfig {
     pub exclude_from_capture: bool,
     pub accept_injected_input: bool,
     pub output_target: OutputTarget,
+    pub active_harness: String,
+    pub search_roots: Vec<String>,
     pub app_source_map: HashMap<String, String>,
 }
 
@@ -49,6 +51,8 @@ impl Default for AppConfig {
             exclude_from_capture: true,
             accept_injected_input: false,
             output_target: OutputTarget::Dsh,
+            active_harness: "dsh".to_string(),
+            search_roots: Vec::new(),
             app_source_map: HashMap::new(),
         }
     }

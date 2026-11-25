@@ -50,6 +50,19 @@ pub enum BrokerRequest {
         cwd: Option<String>,
         hidden: bool,
     },
+    StartHarnessTurn {
+        turn_id: String,
+        harness: String,
+        exe: String,
+        cwd: Option<String>,
+        project_id: Option<String>,
+        session_id: Option<String>,
+        prompt: String,
+        out_pipe: String,
+    },
+    CancelHarnessTurn {
+        turn_id: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -246,6 +259,42 @@ foreach ($w in $sh.Windows()) {{
                 Err(e) => BrokerResponse::err(e.to_string()),
             }
         }
+
+        BrokerRequest::StartHarnessTurn {
+            turn_id,
+            harness,
+            exe,
+            cwd,
+            project_id,
+            session_id,
+            prompt,
+            out_pipe,
+        } => {
+            match std::thread::Builder::new()
+                .name(format!("med-harness-{harness}"))
+                .spawn(move || {
+                    crate::harness::execute_harness_turn_in_medium(
+                        crate::harness::MediumTurnParams {
+                            turn_id,
+                            harness,
+                            exe,
+                            cwd,
+                            project_id,
+                            session_id,
+                            prompt,
+                            out_pipe,
+                        },
+                    );
+                }) {
+                Ok(_) => BrokerResponse::ok_text("started".to_string()),
+                Err(e) => BrokerResponse::err(format!("failed to spawn harness worker: {e}")),
+            }
+        }
+
+        BrokerRequest::CancelHarnessTurn { turn_id } => {
+            let killed = crate::harness::kill_turn_pid_in_medium(&turn_id);
+            BrokerResponse::ok_text(if killed { "killed" } else { "not_found" }.to_string())
+        }
     }
 }
 
@@ -357,6 +406,40 @@ impl Drop for ActivePipeConn {
     }
 }
 
+pub struct OneshotReadPipe {
+    raw_handle: HANDLE,
+}
+
+unsafe impl Send for OneshotReadPipe {}
+
+impl OneshotReadPipe {
+    pub fn accept_and_read(self) -> Result<BufReader<std::fs::File>> {
+        let handle = self.raw_handle;
+        std::mem::forget(self);
+        unsafe {
+            if let Err(e) = ConnectNamedPipe(handle, None) {
+                let win_err = windows::core::Error::from_thread();
+                if win_err.code().0 as u32 != 0x80070217 && e.code().0 as u32 != 0x80070217 {
+                    let _ = CloseHandle(handle);
+                    return Err(anyhow!("ConnectNamedPipe(stream) failed: {e}"));
+                }
+            }
+            let file = std::fs::File::from_raw_handle(handle.0);
+            Ok(BufReader::new(file))
+        }
+    }
+}
+
+impl Drop for OneshotReadPipe {
+    fn drop(&mut self) {
+        if self.raw_handle != INVALID_HANDLE_VALUE && !self.raw_handle.0.is_null() {
+            unsafe {
+                let _ = CloseHandle(self.raw_handle);
+            }
+        }
+    }
+}
+
 pub struct BrokerClient {
     elevated: bool,
     conn: Mutex<Option<ActivePipeConn>>,
@@ -376,6 +459,68 @@ impl BrokerClient {
         Self {
             elevated: is_elevated(),
             conn: Mutex::new(None),
+        }
+    }
+
+    pub fn create_oneshot_read_pipe(&self, tag: &str) -> Result<(String, OneshotReadPipe)> {
+        let safe_tag: String = tag
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+            .take(32)
+            .collect();
+        let pipe_short = format!(
+            "anything-to-prompt-stream-{}-{}-{}",
+            std::process::id(),
+            safe_tag,
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis())
+                .unwrap_or(0)
+        );
+        let full_pipe = format!(r"\\.\pipe\{pipe_short}");
+        let pipe_w = to_wide(&full_pipe);
+        let trustee = current_user_sid_string().unwrap_or_else(|| "AU".to_string());
+        let sddl = format!("D:(A;;GA;;;{trustee})S:(ML;;NW;;;ME)");
+        let sddl_w = to_wide(&sddl);
+
+        unsafe {
+            let mut sd = PSECURITY_DESCRIPTOR::default();
+            ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                PCWSTR(sddl_w.as_ptr()),
+                SDDL_REVISION_1,
+                &mut sd,
+                None,
+            )
+            .context("ConvertStringSecurityDescriptorToSecurityDescriptorW failed for stream pipe")?;
+
+            let sa = SECURITY_ATTRIBUTES {
+                nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+                lpSecurityDescriptor: sd.0,
+                bInheritHandle: false.into(),
+            };
+
+            let pipe_handle = CreateNamedPipeW(
+                PCWSTR(pipe_w.as_ptr()),
+                PIPE_ACCESS_DUPLEX,
+                PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
+                1,
+                65536,
+                65536,
+                5000,
+                Some(&sa),
+            );
+            let _ = LocalFree(Some(HLOCAL(sd.0)));
+
+            if pipe_handle == INVALID_HANDLE_VALUE || pipe_handle.0.is_null() {
+                return Err(anyhow!("CreateNamedPipeW failed for {full_pipe}"));
+            }
+
+            Ok((
+                pipe_short,
+                OneshotReadPipe {
+                    raw_handle: pipe_handle,
+                },
+            ))
         }
     }
 

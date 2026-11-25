@@ -12,7 +12,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx, HHOOK, KBDLLHOOKSTRUCT,
     LLKHF_INJECTED, LLMHF_INJECTED, MSG, MSLLHOOKSTRUCT, WH_KEYBOARD_LL, WH_MOUSE_LL, WM_KEYDOWN,
     WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MOUSEMOVE, WM_RBUTTONDOWN,
-    WM_SYSKEYDOWN, WM_SYSKEYUP,
+    WM_RBUTTONUP, WM_SYSKEYDOWN, WM_SYSKEYUP,
 };
 
 const DUMMY_EXTRA_INFO: usize = 0xD5B0_00E8;
@@ -460,6 +460,18 @@ fn is_any_chord_key_down_os() -> bool {
     EXTRA.iter().any(|&vk| is_vk_down_os(vk))
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PenButton {
+    /// Left button in Ctrl selection mode: tap picks single element; drag draws BLUE freehand lasso (element group, never background).
+    Left,
+    /// Right button in Ctrl selection mode: drag draws RED doodle screenshot capsule; right-click context menu is suppressed.
+    Right,
+}
+
+const SWALLOW_NONE: u8 = 0;
+const SWALLOW_LEFT: u8 = 1;
+const SWALLOW_RIGHT: u8 = 2;
+
 #[derive(Debug, Clone)]
 pub enum HookEvent {
     SingleCtrlClose,
@@ -467,10 +479,10 @@ pub enum HookEvent {
     OutsideClick,
     PenStart { cursor_x: i32, cursor_y: i32 },
     PenHover { x: i32, y: i32 },
-    PenMouseDown { x: i32, y: i32 },
-    PenDrag { points: Vec<(i32, i32)> },
+    PenMouseDown { x: i32, y: i32, button: PenButton },
+    PenDrag { points: Vec<(i32, i32)>, button: PenButton },
     PenTap { x: i32, y: i32 },
-    PenStroke { points: Vec<(i32, i32)> },
+    PenStroke { points: Vec<(i32, i32)>, button: PenButton },
     PenEnd { picked_any: bool },
 }
 
@@ -535,6 +547,7 @@ enum RawSignal {
         y: i32,
         now_ms: u64,
         swallowed: bool,
+        button: PenButton,
     },
     OutsideClick,
     MouseMove {
@@ -546,6 +559,7 @@ enum RawSignal {
         y: i32,
         now_ms: u64,
         swallowed: bool,
+        button: PenButton,
     },
 }
 
@@ -553,7 +567,7 @@ struct GlobalHookBridge {
     shared: Arc<HookSharedConfig>,
     raw_tx: mpsc::Sender<RawSignal>,
     epoch: Instant,
-    swallowing_drag: AtomicBool,
+    swallowing_button: AtomicU8,
     ctrl_down_fast: AtomicBool,
     first_ctrl_tainted: AtomicBool,
     second_ctrl_fast: AtomicBool,
@@ -670,11 +684,17 @@ unsafe extern "system" fn low_level_mouse_proc(
                         let swallow = os_ctrl
                             && (pen_on || (!on_bar && (fast_second_hold || fast_first_hold)));
                         if swallow {
+                            if bridge.swallowing_button.load(Ordering::Acquire) == SWALLOW_RIGHT {
+                                // Ignore stray left-down while right-button red doodle is active
+                                return LRESULT(1);
+                            }
                             bridge
                                 .shared
                                 .pen_overlay_active
                                 .store(true, Ordering::Release);
-                            bridge.swallowing_drag.store(true, Ordering::Release);
+                            bridge
+                                .swallowing_button
+                                .store(SWALLOW_LEFT, Ordering::Release);
                         } else {
                             bridge.first_ctrl_tainted.store(true, Ordering::Release);
                             if bar_vis && !on_bar {
@@ -687,12 +707,61 @@ unsafe extern "system" fn low_level_mouse_proc(
                             y,
                             now_ms,
                             swallowed: swallow,
+                            button: PenButton::Left,
                         });
                         if swallow {
                             return LRESULT(1);
                         }
                     }
-                    WM_RBUTTONDOWN | WM_MBUTTONDOWN => {
+                    WM_RBUTTONDOWN => {
+                        let bar_vis = bridge.shared.bar_visible.load(Ordering::Acquire);
+                        let on_bar = bar_vis
+                            && is_pt_inside_bar_rect(
+                                ms.pt,
+                                bridge.shared.bar_hwnd_raw.load(Ordering::Relaxed),
+                            );
+                        let os_ctrl = is_ctrl_down_os();
+                        let pen_on = bridge.shared.pen_overlay_active.load(Ordering::Acquire);
+                        let other_mod = is_any_non_ctrl_modifier_down_os();
+                        let fast_second_hold = os_ctrl
+                            && bridge.second_ctrl_fast.load(Ordering::Acquire)
+                            && !other_mod;
+                        let fast_first_hold = os_ctrl
+                            && bridge.shared.is_bar_summoned()
+                            && bridge.ctrl_down_fast.load(Ordering::Acquire)
+                            && !bridge.first_ctrl_tainted.load(Ordering::Acquire)
+                            && !other_mod;
+
+                        let swallow = os_ctrl
+                            && (pen_on || (!on_bar && (fast_second_hold || fast_first_hold)));
+                        if swallow {
+                            if bridge.swallowing_button.load(Ordering::Acquire) == SWALLOW_LEFT {
+                                // Suppress context menu while left-button blue lasso is active
+                                return LRESULT(1);
+                            }
+                            bridge
+                                .shared
+                                .pen_overlay_active
+                                .store(true, Ordering::Release);
+                            bridge
+                                .swallowing_button
+                                .store(SWALLOW_RIGHT, Ordering::Release);
+                            let _ = bridge.raw_tx.send(RawSignal::MouseDown {
+                                x,
+                                y,
+                                now_ms,
+                                swallowed: true,
+                                button: PenButton::Right,
+                            });
+                            return LRESULT(1);
+                        }
+
+                        bridge.first_ctrl_tainted.store(true, Ordering::Release);
+                        if bar_vis && !on_bar {
+                            let _ = bridge.raw_tx.send(RawSignal::OutsideClick);
+                        }
+                    }
+                    WM_MBUTTONDOWN => {
                         let bar_vis = bridge.shared.bar_visible.load(Ordering::Acquire);
                         let on_bar = bar_vis
                             && is_pt_inside_bar_rect(
@@ -713,7 +782,8 @@ unsafe extern "system" fn low_level_mouse_proc(
                         }
                     }
                     WM_MOUSEMOVE => {
-                        let dragging = bridge.swallowing_drag.load(Ordering::Acquire);
+                        let dragging =
+                            bridge.swallowing_button.load(Ordering::Acquire) != SWALLOW_NONE;
                         let pen_on = bridge.shared.pen_overlay_active.load(Ordering::Acquire);
                         if dragging || pen_on {
                             let min_gap = if dragging { 12 } else { 14 };
@@ -725,14 +795,50 @@ unsafe extern "system" fn low_level_mouse_proc(
                         }
                     }
                     WM_LBUTTONUP => {
-                        let was_swallowing = bridge.swallowing_drag.swap(false, Ordering::AcqRel);
+                        let was_left = bridge
+                            .swallowing_button
+                            .compare_exchange(
+                                SWALLOW_LEFT,
+                                SWALLOW_NONE,
+                                Ordering::AcqRel,
+                                Ordering::Acquire,
+                            )
+                            .is_ok();
                         let _ = bridge.raw_tx.send(RawSignal::MouseUp {
                             x,
                             y,
                             now_ms,
-                            swallowed: was_swallowing,
+                            swallowed: was_left,
+                            button: PenButton::Left,
                         });
-                        if was_swallowing {
+                        if was_left {
+                            return LRESULT(1);
+                        }
+                    }
+                    WM_RBUTTONUP => {
+                        let was_right = bridge
+                            .swallowing_button
+                            .compare_exchange(
+                                SWALLOW_RIGHT,
+                                SWALLOW_NONE,
+                                Ordering::AcqRel,
+                                Ordering::Acquire,
+                            )
+                            .is_ok();
+                        let pen_still_on = bridge.shared.pen_overlay_active.load(Ordering::Acquire);
+                        if was_right {
+                            let _ = bridge.raw_tx.send(RawSignal::MouseUp {
+                                x,
+                                y,
+                                now_ms,
+                                swallowed: true,
+                                button: PenButton::Right,
+                            });
+                            return LRESULT(1);
+                        }
+                        // Even if a stray WM_RBUTTONUP arrives while selection mode is active,
+                        // swallow it so DefWindowProc never synthesizes WM_CONTEXTMENU.
+                        if pen_still_on {
                             return LRESULT(1);
                         }
                     }
@@ -759,7 +865,7 @@ pub fn start_input_hooks(shared: Arc<HookSharedConfig>, event_tx: mpsc::Sender<H
         shared: shared.clone(),
         raw_tx,
         epoch,
-        swallowing_drag: AtomicBool::new(false),
+        swallowing_button: AtomicU8::new(SWALLOW_NONE),
         ctrl_down_fast: AtomicBool::new(false),
         first_ctrl_tainted: AtomicBool::new(false),
         second_ctrl_fast: AtomicBool::new(false),
@@ -810,6 +916,7 @@ pub fn start_input_hooks(shared: Arc<HookSharedConfig>, event_tx: mpsc::Sender<H
             let mut picked_in_session = false;
 
             let mut stroke_points: Vec<(i32, i32)> = Vec::new();
+            let mut active_button: Option<PenButton> = None;
             let mut down_at_ms: Option<u64> = None;
             let mut max_drag_dist_sq: i64 = 0;
             let mut ctrl_physically_down = false;
@@ -817,6 +924,7 @@ pub fn start_input_hooks(shared: Arc<HookSharedConfig>, event_tx: mpsc::Sender<H
             let handle_ctrl_event = |ev: CtrlEvent,
                                      picked: &mut bool,
                                      strokes: &mut Vec<(i32, i32)>,
+                                     act_btn: &mut Option<PenButton>,
                                      down_ms: &mut Option<u64>,
                                      drag_dist_sq: &mut i64,
                                      fg_hwnd: isize| {
@@ -843,21 +951,30 @@ pub fn start_input_hooks(shared: Arc<HookSharedConfig>, event_tx: mpsc::Sender<H
                         cancelled_by_other_key,
                     } => {
                         shared.pen_overlay_active.store(false, Ordering::Release);
-                        // If user released Ctrl slightly before releasing mouse button during a click-pick,
+                        // If user released Ctrl slightly before releasing mouse button during a click-pick/drag,
                         // commit the in-progress tap/stroke instead of silently discarding it!
                         if !cancelled_by_other_key && !strokes.is_empty() {
+                            let btn = act_btn.unwrap_or(PenButton::Left);
                             let is_tap = classify_tap_or_stroke(*drag_dist_sq, 0);
-                            *picked = true;
                             if is_tap {
-                                if let Some(&(sx, sy)) = strokes.first() {
-                                    let _ = event_tx.send(HookEvent::PenTap { x: sx, y: sy });
+                                // Only Left tap performs tap-pick; Right short-click stays suppressed no-op
+                                if btn == PenButton::Left {
+                                    *picked = true;
+                                    if let Some(&(sx, sy)) = strokes.first() {
+                                        let _ = event_tx.send(HookEvent::PenTap { x: sx, y: sy });
+                                    }
                                 }
                             } else {
+                                *picked = true;
                                 let pts = std::mem::take(strokes);
-                                let _ = event_tx.send(HookEvent::PenStroke { points: pts });
+                                let _ = event_tx.send(HookEvent::PenStroke {
+                                    points: pts,
+                                    button: btn,
+                                });
                             }
                         }
                         strokes.clear();
+                        *act_btn = None;
                         *down_ms = None;
                         *drag_dist_sq = 0;
                         let _ = event_tx.send(HookEvent::PenEnd {
@@ -910,6 +1027,7 @@ pub fn start_input_hooks(shared: Arc<HookSharedConfig>, event_tx: mpsc::Sender<H
                                     ctrl_ev,
                                     &mut picked_in_session,
                                     &mut stroke_points,
+                                    &mut active_button,
                                     &mut down_at_ms,
                                     &mut max_drag_dist_sq,
                                     last_double_fg,
@@ -927,6 +1045,7 @@ pub fn start_input_hooks(shared: Arc<HookSharedConfig>, event_tx: mpsc::Sender<H
                                     ctrl_ev,
                                     &mut picked_in_session,
                                     &mut stroke_points,
+                                    &mut active_button,
                                     &mut down_at_ms,
                                     &mut max_drag_dist_sq,
                                     last_double_fg,
@@ -946,6 +1065,7 @@ pub fn start_input_hooks(shared: Arc<HookSharedConfig>, event_tx: mpsc::Sender<H
                             y,
                             now_ms,
                             swallowed,
+                            button,
                         } => {
                             if swallowed {
                                 let bar_summoned = shared.is_bar_summoned();
@@ -957,11 +1077,12 @@ pub fn start_input_hooks(shared: Arc<HookSharedConfig>, event_tx: mpsc::Sender<H
                                     });
                                 }
                                 if ctrl.is_pen_open() {
+                                    active_button = Some(button);
                                     down_at_ms = Some(now_ms);
                                     stroke_points.clear();
                                     stroke_points.push((x, y));
                                     max_drag_dist_sq = 0;
-                                    let _ = event_tx.send(HookEvent::PenMouseDown { x, y });
+                                    let _ = event_tx.send(HookEvent::PenMouseDown { x, y, button });
                                 }
                             } else {
                                 ctrl.on_non_pen_mouse_button();
@@ -980,6 +1101,7 @@ pub fn start_input_hooks(shared: Arc<HookSharedConfig>, event_tx: mpsc::Sender<H
                                 if max_drag_dist_sq > 64 {
                                     let _ = event_tx.send(HookEvent::PenDrag {
                                         points: stroke_points.clone(),
+                                        button: active_button.unwrap_or(PenButton::Left),
                                     });
                                 }
                             } else {
@@ -992,21 +1114,31 @@ pub fn start_input_hooks(shared: Arc<HookSharedConfig>, event_tx: mpsc::Sender<H
                             y,
                             now_ms,
                             swallowed,
+                            button,
                         } => {
                             if swallowed && !stroke_points.is_empty() {
+                                let btn = active_button.unwrap_or(button);
                                 let dur =
                                     down_at_ms.map(|t0| now_ms.saturating_sub(t0)).unwrap_or(0);
                                 let is_tap = classify_tap_or_stroke(max_drag_dist_sq, dur);
-                                picked_in_session = true;
                                 if is_tap {
-                                    let _ = event_tx.send(HookEvent::PenTap { x, y });
+                                    // Left tap -> single-element pick; Right short tap -> suppressed no-op (no context menu!)
+                                    if btn == PenButton::Left {
+                                        picked_in_session = true;
+                                        let _ = event_tx.send(HookEvent::PenTap { x, y });
+                                    }
                                 } else {
+                                    picked_in_session = true;
                                     let mut pts = std::mem::take(&mut stroke_points);
                                     pts.push((x, y));
-                                    let _ = event_tx.send(HookEvent::PenStroke { points: pts });
+                                    let _ = event_tx.send(HookEvent::PenStroke {
+                                        points: pts,
+                                        button: btn,
+                                    });
                                 }
                             }
                             stroke_points.clear();
+                            active_button = None;
                             down_at_ms = None;
                             max_drag_dist_sq = 0;
                         }
@@ -1043,6 +1175,7 @@ pub fn start_input_hooks(shared: Arc<HookSharedConfig>, event_tx: mpsc::Sender<H
                             ctrl_ev,
                             &mut picked_in_session,
                             &mut stroke_points,
+                            &mut active_button,
                             &mut down_at_ms,
                             &mut max_drag_dist_sq,
                             last_double_fg,
@@ -1071,6 +1204,7 @@ pub fn start_input_hooks(shared: Arc<HookSharedConfig>, event_tx: mpsc::Sender<H
                             ctrl_ev,
                             &mut picked_in_session,
                             &mut stroke_points,
+                            &mut active_button,
                             &mut down_at_ms,
                             &mut max_drag_dist_sq,
                             last_double_fg,
@@ -1093,6 +1227,7 @@ pub fn start_input_hooks(shared: Arc<HookSharedConfig>, event_tx: mpsc::Sender<H
                         ctrl_ev,
                         &mut picked_in_session,
                         &mut stroke_points,
+                        &mut active_button,
                         &mut down_at_ms,
                         &mut max_drag_dist_sq,
                         last_double_fg,

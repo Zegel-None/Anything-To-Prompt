@@ -693,6 +693,24 @@ pub fn save_annotated_capture(
     Ok(out_path)
 }
 
+/// Saves an unannotated, clean reference screenshot (no red stroke / badge occlusion)
+/// alongside a red-doodle capture so vision models can read occluded details accurately.
+pub fn save_clean_capture(
+    raw: &RawScreenCapture,
+    number: usize,
+    cfg: &AppConfig,
+) -> Result<PathBuf> {
+    let captures_dir = AppConfig::captures_dir();
+    fs::create_dir_all(&captures_dir).context("failed to create captures dir")?;
+    let filename = format!("pick-{}-{}-clean.png", now_unix_millis(), number);
+    let out_path = captures_dir.join(filename);
+    raw.image
+        .save_with_format(&out_path, ImageFormat::Png)
+        .context("failed to save clean reference PNG")?;
+    register_saved_capture(&out_path, cfg);
+    Ok(out_path)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

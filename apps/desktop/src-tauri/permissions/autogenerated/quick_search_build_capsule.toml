@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-quick-search-build-capsule"
+description = "Enables the quick_search_build_capsule command without any pre-configured scope."
+commands.allow = ["quick_search_build_capsule"]
+
+[[permission]]
+identifier = "deny-quick-search-build-capsule"
+description = "Denies the quick_search_build_capsule command without any pre-configured scope."
+commands.deny = ["quick_search_build_capsule"]

@@ -2,6 +2,7 @@ pub mod browser;
 pub mod explorer;
 pub mod ide;
 pub mod office;
+pub mod solidworks;
 pub mod terminal;
 pub mod wave_b;
 
@@ -71,6 +72,11 @@ pub fn collect_deep_adapter_outputs(ctx: AdapterContext, timeout_ms: u64) -> Vec
             }
             if office::matches(&ctx) {
                 if let Some(o) = office::run(&ctx) {
+                    list.push(o);
+                }
+            }
+            if solidworks::matches(&ctx) {
+                if let Some(o) = solidworks::run(&ctx) {
                     list.push(o);
                 }
             }

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-harness-load-messages"
+description = "Enables the harness_load_messages command without any pre-configured scope."
+commands.allow = ["harness_load_messages"]
+
+[[permission]]
+identifier = "deny-harness-load-messages"
+description = "Denies the harness_load_messages command without any pre-configured scope."
+commands.deny = ["harness_load_messages"]

@@ -15,6 +15,18 @@
     "core:default",
     "core:event:default",
     "allow-bar-report",
-    "allow-bar-reconnect"
+    "allow-bar-reconnect",
+    "allow-harness-get-active",
+    "allow-harness-set-active",
+    "allow-harness-list-available",
+    "allow-harness-load-catalog",
+    "allow-harness-load-messages",
+    "allow-harness-send-message",
+    "allow-harness-cancel-turn",
+    "allow-quick-search-query",
+    "allow-quick-search-status",
+    "allow-quick-search-build-capsule",
+    "allow-quick-search-open-path",
+    "allow-quick-search-refresh"
   ]
 }

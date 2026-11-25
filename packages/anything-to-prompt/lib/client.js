@@ -46,6 +46,65 @@ window.__ModuleLoader__.load({
     const STORAGE_KEY_AGENT_NAME = 'dsh_card_dock:agent_name';
     const STORAGE_KEY_BAR_WIDTH = 'dsh_card_dock:bar_width';
     const STORAGE_KEY_LAST_SESSION = 'dsh_card_dock:bar_last_session';
+    const STORAGE_KEY_ACTIVE_HARNESS = 'dsh_card_dock:active_harness';
+
+    const HARNESS_ORDER = ['dsh', 'antigravity', 'codex'];
+    const HARNESS_META = {
+      dsh: {
+        id: 'dsh',
+        label: 'DeepSeek',
+        fullLabel: 'DeepSeek Harness',
+        badge: 'DS',
+        syncHint: '双向实时同步',
+        accent: '#60a5fa',
+        accentBg: 'rgba(59, 130, 246, 0.16)',
+        accentBorder: 'rgba(96, 165, 250, 0.42)',
+        surface: 'var(--dsw-alias-bg-layer-2, #27272a)',
+        border: 'var(--dsw-alias-border-l2, rgba(128,128,128,0.22))',
+      },
+      antigravity: {
+        id: 'antigravity',
+        label: 'Antigravity',
+        fullLabel: 'Antigravity',
+        badge: 'AG',
+        syncHint: 'CLI Project 原生同步',
+        placeholder: '提问任何问题，使用 @ 提及，/ 执行操作',
+        accent: '#38bdf8',
+        accentBg: 'rgba(56, 189, 248, 0.12)',
+        accentBorder: 'rgba(255, 255, 255, 0.14)',
+        surface: '#16171a',
+        border: 'rgba(255, 255, 255, 0.11)',
+      },
+      codex: {
+        id: 'codex',
+        label: 'Codex',
+        fullLabel: 'Codex',
+        badge: 'CX',
+        syncHint: 'app-server 共享历史',
+        placeholder: '随心输入',
+        accent: '#3b82f6',
+        accentBg: 'rgba(59, 130, 246, 0.16)',
+        accentBorder: 'rgba(255, 255, 255, 0.14)',
+        surface: '#262628',
+        border: 'rgba(255, 255, 255, 0.13)',
+      },
+    };
+
+    function normalizeHarnessId(raw) {
+      const s = String(raw || '').trim().toLowerCase();
+      if (s === 'antigravity' || s === 'agy') return 'antigravity';
+      if (s === 'codex') return 'codex';
+      return 'dsh';
+    }
+
+    function tauriInvoke(cmd, args) {
+      if (typeof window === 'undefined') return Promise.reject(new Error('no window'));
+      const core = window.__TAURI__ && window.__TAURI__.core;
+      if (!core || typeof core.invoke !== 'function') {
+        return Promise.reject(new Error('no tauri core'));
+      }
+      return core.invoke(cmd, args || {});
+    }
 
     const SELF_CLIENT_ID = 'dsh-twin-' + Math.random().toString(36).slice(2, 10);
     const IS_BAR =
@@ -103,6 +162,8 @@ window.__ModuleLoader__.load({
       barWidth: readStoredNumber(STORAGE_KEY_BAR_WIDTH, DEFAULT_BAR_WIDTH_PX, MIN_BAR_WIDTH_PX, MAX_BAR_WIDTH_PX),
       modalOpen: false,
       popupOpen: false,
+      quickSearchOpen: false,
+      quickSearchSelectedIdx: -1,
       hovered: false,
       pinned: readStoredBool(STORAGE_KEY_PINNED, false),
       expandedHeight: readStoredNumber(STORAGE_KEY_HEIGHT, DEFAULT_EXPANDED_PX, MIN_EXPANDED_PX, MAX_EXPANDED_PX),
@@ -115,7 +176,284 @@ window.__ModuleLoader__.load({
       scheduleLayoutReport: null,
       lastReportKeys: new Map(),
       listeners: new Set(),
+      // Multi-harness state (DSH + Antigravity + Codex)
+      activeHarness: normalizeHarnessId(readStoredString(STORAGE_KEY_ACTIVE_HARNESS, 'dsh')),
+      harnessAvailability: [],
+      externalCatalogs: { antigravity: null, codex: null },
+      externalSelection: {
+        antigravity: { workspaceId: 'default-cli-project', workspacePath: '', sessionId: '', title: 'CLI Project · 新对话' },
+        codex: { workspaceId: '', workspacePath: '', sessionId: '', title: 'Codex · 新对话' },
+      },
+      externalMessages: { antigravity: [], codex: [] },
+      externalActiveTurn: null,
+      externalLoading: { antigravity: false, codex: false },
+      extDraftText: '',
+      extCapsules: [],
+      toggleHarnessMenu: null,
     };
+
+    function applyHarnessThemeAttribute(harnessId) {
+      const norm = normalizeHarnessId(harnessId);
+      if (typeof document !== 'undefined' && document.documentElement) {
+        document.documentElement.setAttribute('data-dsb-harness', norm);
+      }
+    }
+
+    function refreshHarnessAvailability() {
+      if (!IS_BAR) return Promise.resolve([]);
+      return tauriInvoke('harness_list_available')
+        .then((list) => {
+          if (Array.isArray(list)) {
+            dsbRuntime.harnessAvailability = list;
+            notifyBarRuntime();
+          }
+          return list;
+        })
+        .catch(() => []);
+    }
+
+    function loadExternalConversationMessages(harnessId, sessionId) {
+      const hId = normalizeHarnessId(harnessId);
+      if (hId === 'dsh') return Promise.resolve([]);
+      if (!sessionId) {
+        dsbRuntime.externalMessages[hId] = [];
+        notifyBarRuntime();
+        return Promise.resolve([]);
+      }
+      return tauriInvoke('harness_load_messages', { harness: hId, sessionId })
+        .then((msgs) => {
+          if (Array.isArray(msgs)) {
+            dsbRuntime.externalMessages[hId] = msgs;
+            notifyBarRuntime();
+          }
+          return msgs;
+        })
+        .catch(() => []);
+    }
+
+    function refreshExternalCatalog(harnessId, autoSelectIfEmpty = true) {
+      const hId = normalizeHarnessId(harnessId);
+      if (hId === 'dsh' || !IS_BAR) return Promise.resolve(null);
+      dsbRuntime.externalLoading[hId] = true;
+      notifyBarRuntime();
+      return tauriInvoke('harness_load_catalog', { harness: hId })
+        .then((catalog) => {
+          dsbRuntime.externalLoading[hId] = false;
+          if (catalog && typeof catalog === 'object') {
+            dsbRuntime.externalCatalogs[hId] = catalog;
+            const groups = Array.isArray(catalog.groups) ? catalog.groups : [];
+            const cur = dsbRuntime.externalSelection[hId] || {};
+            if (autoSelectIfEmpty && !cur.sessionId && groups.length > 0) {
+              const firstWs = groups[0];
+              const firstConv = Array.isArray(firstWs.convs) && firstWs.convs.length > 0 ? firstWs.convs[0] : null;
+              if (firstConv) {
+                dsbRuntime.externalSelection[hId] = {
+                  workspaceId: firstWs.workspaceId || '',
+                  workspacePath: firstWs.path || firstConv.cwd || '',
+                  sessionId: firstConv.id,
+                  title: firstConv.title || firstWs.label || '新对话',
+                };
+                loadExternalConversationMessages(hId, firstConv.id);
+              } else {
+                dsbRuntime.externalSelection[hId] = {
+                  workspaceId: firstWs.workspaceId || '',
+                  workspacePath: firstWs.path || '',
+                  sessionId: '',
+                  title: (firstWs.label || HARNESS_META[hId].label) + ' · 新对话',
+                };
+              }
+            }
+            notifyBarRuntime();
+          }
+          return catalog;
+        })
+        .catch(() => {
+          dsbRuntime.externalLoading[hId] = false;
+          notifyBarRuntime();
+          return null;
+        });
+    }
+
+    function setActiveHarness(harnessId, persist = true) {
+      const norm = normalizeHarnessId(harnessId);
+      dsbRuntime.activeHarness = norm;
+      applyHarnessThemeAttribute(norm);
+      if (persist) {
+        writeStoredString(STORAGE_KEY_ACTIVE_HARNESS, norm);
+        tauriInvoke('harness_set_active', { harness: norm }).catch(() => {});
+      }
+      if (norm !== 'dsh') {
+        refreshExternalCatalog(norm, true);
+      }
+      notifyBarRuntime();
+      if (typeof dsbRuntime.scheduleLayoutReport === 'function') {
+        dsbRuntime.scheduleLayoutReport(280);
+      }
+    }
+
+    function selectExternalConversation(harnessId, group, conv) {
+      const hId = normalizeHarnessId(harnessId);
+      if (hId === 'dsh' || !conv) return;
+      dsbRuntime.externalSelection[hId] = {
+        workspaceId: group ? group.workspaceId || '' : '',
+        workspacePath: (group && group.path) || conv.cwd || '',
+        sessionId: conv.id,
+        title: conv.title || '新对话',
+      };
+      notifyBarRuntime();
+      loadExternalConversationMessages(hId, conv.id);
+    }
+
+    function startNewExternalConversation(harnessId, group) {
+      const hId = normalizeHarnessId(harnessId);
+      if (hId === 'dsh') return;
+      const wsId = group ? group.workspaceId || '' : (hId === 'antigravity' ? 'default-cli-project' : '');
+      const wsPath = group ? group.path || '' : '';
+      const wsLabel = group ? group.label || HARNESS_META[hId].label : HARNESS_META[hId].label;
+      dsbRuntime.externalSelection[hId] = {
+        workspaceId: wsId,
+        workspacePath: wsPath,
+        sessionId: '',
+        title: wsLabel + ' · 新对话',
+      };
+      dsbRuntime.externalMessages[hId] = [];
+      notifyBarRuntime();
+    }
+
+    function cancelActiveExternalTurn() {
+      const turn = dsbRuntime.externalActiveTurn;
+      if (!turn || !turn.turnId) return;
+      tauriInvoke('harness_cancel_turn', { turnId: turn.turnId }).catch(() => {});
+      const list = dsbRuntime.externalMessages[turn.harness];
+      if (Array.isArray(list)) {
+        const idx = list.findIndex((m) => m.id === turn.assistantMsgId);
+        if (idx >= 0) {
+          list[idx] = {
+            ...list[idx],
+            text: (list[idx].text || '') + (list[idx].text ? '\n[已停止]' : '[已停止]'),
+            streaming: false,
+          };
+        }
+      }
+      dsbRuntime.externalActiveTurn = null;
+      notifyBarRuntime();
+    }
+
+    function submitExternalHarnessPrompt(rawText) {
+      const hId = dsbRuntime.activeHarness;
+      if (hId === 'dsh') return false;
+      const prompt = String(rawText || '').trim();
+      if (!prompt) return false;
+      if (dsbRuntime.externalActiveTurn && dsbRuntime.externalActiveTurn.harness === hId) {
+        cancelActiveExternalTurn();
+      }
+      const turnId = 'turn-' + Date.now() + '-' + Math.random().toString(36).slice(2, 7);
+      const userMsgId = 'ext-u-' + turnId;
+      const asstMsgId = 'ext-a-' + turnId;
+      const sel = dsbRuntime.externalSelection[hId] || {};
+      const prevList = Array.isArray(dsbRuntime.externalMessages[hId]) ? dsbRuntime.externalMessages[hId] : [];
+      dsbRuntime.externalMessages[hId] = prevList.concat([
+        { id: userMsgId, role: 'user', text: prompt, streaming: false },
+        { id: asstMsgId, role: 'assistant', text: '', streaming: true },
+      ]);
+      dsbRuntime.externalActiveTurn = {
+        turnId,
+        harness: hId,
+        assistantMsgId: asstMsgId,
+        toolNote: '',
+      };
+      if (!sel.sessionId) {
+        const snippet = prompt.replace(/\s+/g, ' ').slice(0, 22);
+        dsbRuntime.externalSelection[hId] = {
+          ...sel,
+          title: snippet + (prompt.length > 22 ? '…' : ''),
+        };
+      }
+      notifyBarRuntime();
+      sendBarReport({ kind: 'submitted', sessionId: sel.sessionId || turnId });
+
+      tauriInvoke('harness_send_message', {
+        payload: {
+          harness: hId,
+          turnId,
+          cwd: sel.workspacePath || null,
+          projectId: hId === 'antigravity' ? (sel.workspaceId || 'default-cli-project') : null,
+          sessionId: sel.sessionId || null,
+          prompt,
+        },
+      }).catch((err) => {
+        const msg = err instanceof Error ? err.message : String(err || '发送失败');
+        const list = dsbRuntime.externalMessages[hId] || [];
+        const idx = list.findIndex((m) => m.id === asstMsgId);
+        if (idx >= 0) {
+          list[idx] = { ...list[idx], text: '错误：' + msg, streaming: false };
+          dsbRuntime.externalMessages[hId] = list.slice();
+        }
+        if (dsbRuntime.externalActiveTurn && dsbRuntime.externalActiveTurn.turnId === turnId) {
+          dsbRuntime.externalActiveTurn = null;
+        }
+        notifyBarRuntime();
+      });
+      return true;
+    }
+
+    function handleIncomingHarnessEvent(evt) {
+      if (!evt || typeof evt !== 'object') return;
+      const hId = normalizeHarnessId(evt.harness);
+      if (hId === 'dsh') return;
+      const turn = dsbRuntime.externalActiveTurn;
+      const list = Array.isArray(dsbRuntime.externalMessages[hId])
+        ? dsbRuntime.externalMessages[hId].slice()
+        : [];
+      const targetId = turn && turn.turnId === evt.turnId ? turn.assistantMsgId : '';
+      const idx = targetId ? list.findIndex((m) => m.id === targetId) : list.length - 1;
+
+      if (evt.sessionId) {
+        const curSel = dsbRuntime.externalSelection[hId] || {};
+        if (curSel.sessionId !== evt.sessionId) {
+          dsbRuntime.externalSelection[hId] = { ...curSel, sessionId: evt.sessionId };
+        }
+      }
+
+      if (evt.kind === 'delta' && typeof evt.text === 'string' && idx >= 0) {
+        list[idx] = { ...list[idx], text: (list[idx].text || '') + evt.text, streaming: true };
+        dsbRuntime.externalMessages[hId] = list;
+        if (turn && turn.turnId === evt.turnId) turn.toolNote = '';
+      } else if (evt.kind === 'replace' && typeof evt.text === 'string' && idx >= 0) {
+        list[idx] = { ...list[idx], text: evt.text, streaming: true };
+        dsbRuntime.externalMessages[hId] = list;
+      } else if (evt.kind === 'tool' && typeof evt.toolName === 'string') {
+        if (turn && turn.turnId === evt.turnId) {
+          turn.toolNote = evt.toolName;
+        }
+      } else if (evt.kind === 'completed') {
+        if (idx >= 0) {
+          const fallbackText =
+            !list[idx].text && typeof evt.text === 'string' && evt.text ? evt.text : list[idx].text;
+          list[idx] = { ...list[idx], text: fallbackText || '（已完成）', streaming: false };
+          dsbRuntime.externalMessages[hId] = list;
+        }
+        if (turn && turn.turnId === evt.turnId) {
+          dsbRuntime.externalActiveTurn = null;
+        }
+        setTimeout(() => refreshExternalCatalog(hId, false), 450);
+      } else if (evt.kind === 'error') {
+        if (idx >= 0) {
+          const prefix = list[idx].text ? list[idx].text + '\n\n' : '';
+          list[idx] = {
+            ...list[idx],
+            text: prefix + '⚠️ ' + (evt.error || '执行出错'),
+            streaming: false,
+          };
+          dsbRuntime.externalMessages[hId] = list;
+        }
+        if (turn && turn.turnId === evt.turnId) {
+          dsbRuntime.externalActiveTurn = null;
+        }
+      }
+
+      notifyBarRuntime();
+    }
 
     function notifyBarRuntime() {
       for (const fn of dsbRuntime.listeners) {
@@ -183,6 +521,9 @@ window.__ModuleLoader__.load({
     function focusComposerElement() {
       if (typeof document === 'undefined') return false;
       const el =
+        (dsbRuntime.activeHarness !== 'dsh'
+          ? document.querySelector('[data-dsb-ext-input="1"]')
+          : null) ||
         document.querySelector('[data-composer-card] [data-lexical-editor="true"]') ||
         document.querySelector('[data-composer-card] [contenteditable="true"]') ||
         document.querySelector('[data-composer-card] textarea');
@@ -233,16 +574,35 @@ window.__ModuleLoader__.load({
       if (!document.documentElement.getAttribute('data-dsb-mode')) {
         document.documentElement.setAttribute('data-dsb-mode', dsbRuntime.barMode);
       }
+      applyHarnessThemeAttribute(dsbRuntime.activeHarness);
+      window.__DSB_HARNESS_EVENT__ = handleIncomingHarnessEvent;
       window.__DSB_BRIDGE__ = {
         setMode(mode) {
           setBarMode(mode);
           return dsbRuntime.barMode;
+        },
+        setHarness(harnessId) {
+          setActiveHarness(harnessId, false);
+          return dsbRuntime.activeHarness;
         },
         focusComposer() {
           return focusComposerElement();
         },
         setDraft(text) {
           const val = String(text || '');
+          if (dsbRuntime.activeHarness !== 'dsh') {
+            dsbRuntime.extDraftText = val;
+            if (val === '') {
+              dsbRuntime.extCapsules = [];
+              sendBarReport({ kind: 'capsules', capsuleCount: 0, afterInsert: false });
+            }
+            notifyBarRuntime();
+            focusComposerElement();
+            if (typeof dsbRuntime.scheduleLayoutReport === 'function') {
+              dsbRuntime.scheduleLayoutReport(220);
+            }
+            return true;
+          }
           const actions = dsbRuntime.inputActions;
           let ok = false;
           if (actions && typeof actions.setDraft === 'function') {
@@ -275,6 +635,27 @@ window.__ModuleLoader__.load({
         },
         insertCapsule(capsule) {
           if (!capsule || typeof capsule.text !== 'string') return false;
+          if (dsbRuntime.activeHarness !== 'dsh') {
+            dsbRuntime.extCapsules = [
+              ...dsbRuntime.extCapsules,
+              {
+                id: 'cap-' + Date.now() + '-' + Math.random().toString(36).slice(2, 6),
+                summary: capsule.summary || { label: '•', title: '引用', detail: '', body: '' },
+                text: capsule.text,
+              },
+            ];
+            notifyBarRuntime();
+            focusComposerElement();
+            sendBarReport({
+              kind: 'capsules',
+              capsuleCount: dsbRuntime.extCapsules.length,
+              afterInsert: true,
+            });
+            if (typeof dsbRuntime.scheduleLayoutReport === 'function') {
+              dsbRuntime.scheduleLayoutReport(260);
+            }
+            return true;
+          }
           dsbRuntime.localDraftProtectUntil = Date.now() + 1800;
           const beforeCount = countComposerCapsules(dsbRuntime.liveDraft);
           const reportNow = (afterInsert) => {
@@ -325,7 +706,12 @@ window.__ModuleLoader__.load({
         },
         getState() {
           const activeEl = typeof document !== 'undefined' ? document.activeElement : null;
-          const composerEl = typeof document !== 'undefined' ? document.querySelector('[data-composer-card]') : null;
+          const composerEl =
+            typeof document !== 'undefined'
+              ? dsbRuntime.activeHarness !== 'dsh'
+                ? document.querySelector('[data-dsb-external-composer]')
+                : document.querySelector('[data-composer-card]')
+              : null;
           return {
             mode: dsbRuntime.barMode,
             sessionId: dsbRuntime.sessionId,
@@ -334,7 +720,10 @@ window.__ModuleLoader__.load({
             popupOpen: dsbRuntime.popupOpen,
             modal: dsbRuntime.modalOpen,
             composerFocused: Boolean(composerEl && activeEl && composerEl.contains(activeEl)),
-            capsuleCount: countComposerCapsules(dsbRuntime.liveDraft),
+            capsuleCount:
+              dsbRuntime.activeHarness !== 'dsh'
+                ? dsbRuntime.extCapsules.length
+                : countComposerCapsules(dsbRuntime.liveDraft),
             expandedHeight: dsbRuntime.expandedHeight,
             barWidth: dsbRuntime.barWidth,
           };
@@ -485,7 +874,7 @@ window.__ModuleLoader__.load({
         '  transform: none !important;',
         '  left: 0 !important;',
         '}',
-        'html[data-dsh-bar-clone="1"] [data-composer-seat] *:has([data-composer-card]) > *:not([data-composer-card]):not(:has([data-composer-card])):not([data-donegate-dock-wrap]):not(:has([data-donegate-dock-wrap])):not([data-queue-dock]):not(:has([data-queue-dock])):not([data-slot="conversation.input.dock"]):not(:has([data-slot="conversation.input.dock"])) {',
+        'html[data-dsh-bar-clone="1"] [data-composer-seat] *:has([data-composer-card]) > *:not([data-composer-card]):not(:has([data-composer-card])):not([data-donegate-dock-wrap]):not(:has([data-donegate-dock-wrap])):not([data-dsb-external-composer]):not(:has([data-dsb-external-composer])):not([data-dsb-stack]):not(:has([data-dsb-stack])):not([data-queue-dock]):not(:has([data-queue-dock])):not([data-slot="conversation.input.dock"]):not(:has([data-slot="conversation.input.dock"])) {',
         '  display: none !important;',
         '}',
         'html[data-dsh-bar-clone="1"] [data-composer-seat] [data-slot="conversation.input.dock"],',
@@ -518,6 +907,47 @@ window.__ModuleLoader__.load({
         '}',
         'html[data-dsh-bar-clone="1"] [data-dsb-menu-scroll]::-webkit-scrollbar { width: 4px; }',
         'html[data-dsh-bar-clone="1"] [data-dsb-menu-scroll]::-webkit-scrollbar-thumb { background: rgba(128,128,128,0.28); border-radius: 999px; }',
+        // =====================================================================
+        // Multi-Harness 1:1 Native Composer Replicas (Antigravity & Codex)
+        // When targeting Antigravity or Codex, hide DSH's native [data-composer-card]
+        // and display the 1:1 replicated desktop composer ([data-dsb-external-composer]).
+        // =====================================================================
+        'html[data-dsh-bar-clone="1"][data-dsb-harness="antigravity"] [data-composer-card],',
+        'html[data-dsh-bar-clone="1"][data-dsb-harness="codex"] [data-composer-card] {',
+        '  display: none !important;',
+        '}',
+        'html[data-dsh-bar-clone="1"][data-dsb-mode="lip"] [data-dsb-external-composer] {',
+        '  display: none !important;',
+        '}',
+        'html[data-dsh-bar-clone="1"][data-dsb-harness="antigravity"] [data-dsb-card] {',
+        '  background: #121213 !important;',
+        '  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.06) inset !important;',
+        '  border-radius: 16px 16px 0 0 !important;',
+        '  color: #eceef2 !important;',
+        '}',
+        'html[data-dsh-bar-clone="1"][data-dsb-harness="antigravity"][data-dsb-mode="lip"] [data-dsb-card] {',
+        '  border-radius: 16px !important;',
+        '}',
+        'html[data-dsh-bar-clone="1"][data-dsb-harness="antigravity"] [data-dsb-divider] {',
+        '  display: none !important;',
+        '}',
+        'html[data-dsh-bar-clone="1"][data-dsb-harness="codex"] [data-dsb-card] {',
+        '  background: #1f1f1f !important;',
+        '  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.06) inset !important;',
+        '  border-radius: 14px 14px 0 0 !important;',
+        '  width: calc(100% - 28px) !important;',
+        '  margin: 0 14px !important;',
+        '  color: #f4f4f5 !important;',
+        '}',
+        'html[data-dsh-bar-clone="1"][data-dsb-harness="codex"][data-dsb-mode="lip"] [data-dsb-card] {',
+        '  border-radius: 14px !important;',
+        '}',
+        'html[data-dsh-bar-clone="1"][data-dsb-harness="codex"] [data-dsb-divider] {',
+        '  display: none !important;',
+        '}',
+        '[data-dsb-ext-input="1"]::placeholder {',
+        '  color: rgba(255, 255, 255, 0.36);',
+        '}',
       ].join('\n');
       document.head.appendChild(styleEl);
     }
@@ -824,6 +1254,62 @@ window.__ModuleLoader__.load({
         const [nameDraft, setNameDraft] = useState(agentName);
         const [matchedCardWidth, setMatchedCardWidth] = useState(null);
         const [lipOverflow, setLipOverflow] = useState(false);
+        const [, setHarnessTick] = useState(0);
+        const [quickHits, setQuickHits] = useState([]);
+        const [quickSelectedIdx, setQuickSelectedIdx] = useState(-1);
+        const [quickStatus, setQuickStatus] = useState(null);
+        const quickHitsRef = useRef([]);
+        const quickSelectedRef = useRef(-1);
+        const quickReqSeqRef = useRef(0);
+        const quickDismissedQueryRef = useRef('');
+        const quickQueryRef = useRef('');
+
+        useEffect(() => {
+          const bump = () => setHarnessTick((n) => n + 1);
+          dsbRuntime.listeners.add(bump);
+          if (IS_BAR) {
+            refreshHarnessAvailability();
+            tauriInvoke('harness_get_active')
+              .then((saved) => {
+                if (typeof saved === 'string' && saved.trim()) {
+                  setActiveHarness(saved, false);
+                }
+              })
+              .catch(() => {});
+          }
+          return () => {
+            dsbRuntime.listeners.delete(bump);
+          };
+        }, []);
+
+        // Sync authentic placeholder text when switching between DSH / Antigravity / Codex
+        useEffect(() => {
+          if (!IS_BAR || typeof document === 'undefined') return undefined;
+          const applyPlaceholder = () => {
+            const card = document.querySelector('[data-composer-card]');
+            if (!card) return;
+            const meta = HARNESS_META[dsbRuntime.activeHarness] || HARNESS_META.dsh;
+            const customPh = meta.placeholder || '';
+            const ta = card.querySelector('textarea');
+            if (ta) {
+              if (!ta.dataset.dsbOrigPlaceholder) {
+                ta.dataset.dsbOrigPlaceholder = ta.getAttribute('placeholder') || '';
+              }
+              ta.setAttribute('placeholder', customPh || ta.dataset.dsbOrigPlaceholder);
+            }
+            const phNodes = card.querySelectorAll('[data-placeholder]');
+            for (const node of phNodes) {
+              if (!(node instanceof HTMLElement)) continue;
+              if (!node.dataset.dsbOrigPlaceholder) {
+                node.dataset.dsbOrigPlaceholder = node.getAttribute('data-placeholder') || '';
+              }
+              node.setAttribute('data-placeholder', customPh || node.dataset.dsbOrigPlaceholder);
+            }
+          };
+          applyPlaceholder();
+          const t = setTimeout(applyPlaceholder, 260);
+          return () => clearTimeout(t);
+        }, [dsbRuntime.activeHarness, liveDraft]);
 
         const wrapRef = useRef(null);
         const scrollRef = useRef(null);
@@ -914,7 +1400,20 @@ window.__ModuleLoader__.load({
           };
         }, []);
 
-        const entries = extractMessagesFromDshProps(props);
+        const activeHarness = IS_BAR ? dsbRuntime.activeHarness : 'dsh';
+        const dshEntries = extractMessagesFromDshProps(props);
+        const entries =
+          activeHarness === 'dsh'
+            ? dshEntries
+            : Array.isArray(dsbRuntime.externalMessages[activeHarness])
+              ? dsbRuntime.externalMessages[activeHarness]
+              : [];
+        const effectiveSessionId =
+          activeHarness === 'dsh'
+            ? sessionId
+            : (dsbRuntime.externalSelection[activeHarness] &&
+                dsbRuntime.externalSelection[activeHarness].sessionId) ||
+              activeHarness + ':new';
         const assistantEntriesDesc = useMemo(() => {
           const list = [];
           for (let i = entries.length - 1; i >= 0; i -= 1) {
@@ -988,12 +1487,54 @@ window.__ModuleLoader__.load({
         const isExpanded = pinned || hovered || previewExpanded;
 
         // Track explicit user submit intent inside [data-composer-card] (prevents async session hydration from misfiring 'submitted')
+        // Also intercepts Enter / Send clicks when targeting Antigravity or Codex so messages never leak to DSH!
         useEffect(() => {
           if (!IS_BAR || typeof document === 'undefined') return undefined;
+          const extractCurrentComposerText = () => {
+            if (typeof dsbRuntime.liveDraft === 'string' && dsbRuntime.liveDraft.trim()) {
+              return dsbRuntime.liveDraft;
+            }
+            const ed =
+              document.querySelector('[data-composer-card] [data-lexical-editor="true"]') ||
+              document.querySelector('[data-composer-card] [contenteditable="true"]') ||
+              document.querySelector('[data-composer-card] textarea');
+            return ed ? String(ed.value || ed.textContent || '') : '';
+          };
+          const dispatchExternalSubmit = (e) => {
+            const text = extractCurrentComposerText().trim();
+            if (!text) return false;
+            e.preventDefault();
+            e.stopPropagation();
+            if (typeof e.stopImmediatePropagation === 'function') {
+              e.stopImmediatePropagation();
+            }
+            if (window.__DSB_BRIDGE__ && typeof window.__DSB_BRIDGE__.setDraft === 'function') {
+              window.__DSB_BRIDGE__.setDraft('');
+            }
+            submitExternalHarnessPrompt(text);
+            return true;
+          };
+          const isComposerSendButton = (btn, comp) => {
+            if (!btn || btn.hasAttribute('data-dsb-session-chip')) return false;
+            if (btn.type === 'submit') return true;
+            const aria = String(btn.getAttribute('aria-label') || btn.getAttribute('title') || '');
+            if (/send|submit|发送|提交/i.test(aria)) return true;
+            const allBtns = Array.from(comp.querySelectorAll('button')).filter(
+              (b) => !b.hasAttribute('data-dsb-session-chip') && b.offsetParent !== null,
+            );
+            return allBtns.length > 0 && allBtns[allBtns.length - 1] === btn;
+          };
           const onKeyDown = (e) => {
             if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
+              if (dsbRuntime.quickSearchOpen && dsbRuntime.quickSearchSelectedIdx >= 0) {
+                return;
+              }
               const comp = document.querySelector('[data-composer-card]');
               if (comp && e.target instanceof Node && comp.contains(e.target)) {
+                if (dsbRuntime.activeHarness !== 'dsh') {
+                  dispatchExternalSubmit(e);
+                  return;
+                }
                 submitIntentUntilRef.current = Date.now() + 1800;
               }
             }
@@ -1003,6 +1544,10 @@ window.__ModuleLoader__.load({
             if (comp && e.target instanceof Element && comp.contains(e.target)) {
               const btn = e.target.closest('button');
               if (btn && !btn.hasAttribute('data-dsb-session-chip')) {
+                if (dsbRuntime.activeHarness !== 'dsh' && isComposerSendButton(btn, comp)) {
+                  dispatchExternalSubmit(e);
+                  return;
+                }
                 submitIntentUntilRef.current = Date.now() + 1800;
               }
             }
@@ -1020,11 +1565,12 @@ window.__ModuleLoader__.load({
           if (!IS_BAR) return;
           sendBarReport({
             kind: 'activity',
-            sessionId,
+            sessionId: effectiveSessionId,
             latestAssistantId: latestAssistant ? String(latestAssistant.id) : '',
             streaming: Boolean(latestAssistant && latestAssistant.streaming),
             userMessageCount,
           });
+          if (activeHarness !== 'dsh') return;
           const prev = sessionSubBaselineRef.current;
           if (prev.sessionId !== sessionId) {
             sessionSubBaselineRef.current = { sessionId, userCount: userMessageCount };
@@ -1037,7 +1583,7 @@ window.__ModuleLoader__.load({
           } else if (userMessageCount < prev.userCount) {
             sessionSubBaselineRef.current = { sessionId, userCount: userMessageCount };
           }
-        }, [sessionId, latestAssistant ? latestAssistant.id : '', Boolean(latestAssistant && latestAssistant.streaming), userMessageCount]);
+        }, [activeHarness, effectiveSessionId, sessionId, latestAssistant ? latestAssistant.id : '', Boolean(latestAssistant && latestAssistant.streaming), userMessageCount]);
 
         // Also detect queued message submission while streaming in Bar mode
         useEffect(() => {
@@ -1077,7 +1623,7 @@ window.__ModuleLoader__.load({
               kind: 'ui',
               hovered,
               pinned,
-              popupOpen: dsbRuntime.popupOpen,
+              popupOpen: dsbRuntime.popupOpen || dsbRuntime.quickSearchOpen,
               modal: dsbRuntime.modalOpen,
               composerFocused: Boolean(composerEl && activeEl && composerEl.contains(activeEl)),
             });
@@ -1101,13 +1647,16 @@ window.__ModuleLoader__.load({
             const hasNativeMenu = Boolean(
               document.querySelector('[role="menu"], [role="listbox"], [role="dialog"], [data-radix-popper-content-wrapper], [data-floating-ui-portal]'),
             );
-            if (dsbRuntime.popupOpen || dsbRuntime.modalOpen || hasNativeMenu) return;
+            if (dsbRuntime.popupOpen || dsbRuntime.quickSearchOpen || dsbRuntime.modalOpen || hasNativeMenu) return;
             e.preventDefault();
             e.stopPropagation();
             sendBarReport({ kind: 'step_down' });
           };
           const onPointerDownCapture = (e) => {
-            const composerEl = document.querySelector('[data-composer-card]');
+            const composerEl =
+              dsbRuntime.activeHarness !== 'dsh'
+                ? document.querySelector('[data-dsb-external-composer]')
+                : document.querySelector('[data-composer-card]');
             if (composerEl && e.target instanceof Node && composerEl.contains(e.target)) {
               sendBarReport({ kind: 'composer_pointerdown' });
             }
@@ -1124,7 +1673,12 @@ window.__ModuleLoader__.load({
         const measureAndReportLayout = useCallback(() => {
           if (!IS_BAR || typeof document === 'undefined') return;
           const cardEl = document.querySelector('[data-dsb-card]');
-          const composerEl = barMode === 'lip' ? null : document.querySelector('[data-composer-card]');
+          const composerEl =
+            barMode === 'lip'
+              ? null
+              : dsbRuntime.activeHarness !== 'dsh'
+                ? document.querySelector('[data-dsb-external-composer]')
+                : document.querySelector('[data-composer-card]');
           const cr = cardEl ? cardEl.getBoundingClientRect() : null;
           const ir = composerEl ? composerEl.getBoundingClientRect() : null;
 
@@ -1157,13 +1711,19 @@ window.__ModuleLoader__.load({
           }
 
           const shapes = [];
+          const cornerRadius =
+            dsbRuntime.activeHarness === 'antigravity'
+              ? 16
+              : dsbRuntime.activeHarness === 'codex'
+                ? 20
+                : CARD_RADIUS_PX;
           if (hasSlab) {
             shapes.push({
               x: Math.round(slabLeft),
               y: Math.round(slabTop),
               w: Math.round(slabRight - slabLeft),
               h: Math.round(slabBottom - slabTop),
-              r: CARD_RADIUS_PX,
+              r: cornerRadius,
             });
           }
 
@@ -1275,11 +1835,14 @@ window.__ModuleLoader__.load({
           setLipOverflow((prev) => (prev === isOverflowing ? prev : isOverflowing));
         }, [latestSingleLine, isExpanded, matchedCardWidth, barMode, barWidth]);
 
-        // Match upper card width/position/surface 1:1 with [data-composer-card] (or 100vw in Bar mode)
+        // Match upper card width/position/surface 1:1 with active composer (DSH or 1:1 Antigravity/Codex replica)
         useLayoutEffect(() => {
           const dockEl = wrapRef.current;
           if (!dockEl || typeof ResizeObserver === 'undefined') return;
-          const findComposer = () => document.querySelector('[data-composer-card]');
+          const findComposer = () =>
+            (dsbRuntime.activeHarness !== 'dsh'
+              ? document.querySelector('[data-dsb-external-composer]')
+              : null) || document.querySelector('[data-composer-card]');
 
           const applyDividerTheme = (cardEl, bgColor) => {
             if (!cardEl) return;
@@ -1359,14 +1922,16 @@ window.__ModuleLoader__.load({
               }
               if (composerCard && cardEl) {
                 const cs = getComputedStyle(composerCard);
-                if (cs.backgroundColor && cs.backgroundColor !== 'rgba(0, 0, 0, 0)') {
-                  cardEl.style.background = cs.backgroundColor;
+                if (dsbRuntime.activeHarness === 'dsh') {
+                  if (cs.backgroundColor && cs.backgroundColor !== 'rgba(0, 0, 0, 0)') {
+                    cardEl.style.background = cs.backgroundColor;
+                  }
+                  cardEl.style.color = cs.color;
+                  cardEl.style.fontSize = cs.fontSize;
+                  cardEl.style.fontWeight = cs.fontWeight;
+                  cardEl.style.fontFamily = cs.fontFamily;
+                  applyDividerTheme(cardEl, cs.backgroundColor);
                 }
-                cardEl.style.color = cs.color;
-                cardEl.style.fontSize = cs.fontSize;
-                cardEl.style.fontWeight = cs.fontWeight;
-                cardEl.style.fontFamily = cs.fontFamily;
-                applyDividerTheme(cardEl, cs.backgroundColor);
 
                 if (barMode !== 'lip') {
                   const rect = composerCard.getBoundingClientRect();
@@ -1430,7 +1995,7 @@ window.__ModuleLoader__.load({
             ro.disconnect();
             window.removeEventListener('resize', syncWidth);
           };
-        }, [barMode, barWidth]);
+        }, [barMode, barWidth, activeHarness]);
 
         useEffect(() => {
           if (isExpanded && scrollRef.current) {
@@ -1814,40 +2379,1112 @@ window.__ModuleLoader__.load({
             ),
           );
 
+        // Listary-style instant pure-text file & app quick search (Option B: Tab selects, Enter inserts blue capsule, Ctrl+Enter opens)
+        const insertQuickSearchHitAsCapsule = useCallback((hit) => {
+          if (!hit || !hit.path) return;
+          setQuickHits([]);
+          setQuickSelectedIdx(-1);
+          quickHitsRef.current = [];
+          quickSelectedRef.current = -1;
+          dsbRuntime.quickSearchOpen = false;
+          dsbRuntime.quickSearchSelectedIdx = -1;
+          notifyBarRuntime();
+          tauriInvoke('quick_search_build_capsule', {
+            path: hit.path,
+            name: hit.name || '',
+            kind: hit.kind || 'file',
+          })
+            .then((cap) => {
+              if (!cap || !cap.text) return;
+              const bridge = window.__DSB_BRIDGE__;
+              if (bridge && typeof bridge.setDraft === 'function') {
+                bridge.setDraft('');
+              }
+              setTimeout(() => {
+                if (bridge && typeof bridge.insertCapsule === 'function') {
+                  bridge.insertCapsule({
+                    summary: {
+                      label: cap.summaryLabel,
+                      title: cap.summaryTitle,
+                      detail: cap.summaryDetail,
+                      body: cap.summaryBody,
+                    },
+                    text: cap.text,
+                  });
+                }
+              }, 35);
+            })
+            .catch(() => {});
+        }, []);
+
+        const openQuickSearchHitDirectly = useCallback((hit) => {
+          if (!hit || !hit.path) return;
+          setQuickHits([]);
+          setQuickSelectedIdx(-1);
+          quickHitsRef.current = [];
+          quickSelectedRef.current = -1;
+          dsbRuntime.quickSearchOpen = false;
+          dsbRuntime.quickSearchSelectedIdx = -1;
+          if (window.__DSB_BRIDGE__ && typeof window.__DSB_BRIDGE__.setDraft === 'function') {
+            window.__DSB_BRIDGE__.setDraft('');
+          }
+          notifyBarRuntime();
+          tauriInvoke('quick_search_open_path', { path: hit.path }).catch(() => {});
+        }, []);
+
+        useEffect(() => {
+          quickHitsRef.current = quickHits;
+          quickSelectedRef.current = quickSelectedIdx;
+          dsbRuntime.quickSearchOpen = quickHits.length > 0;
+          dsbRuntime.quickSearchSelectedIdx = quickSelectedIdx;
+          notifyBarRuntime();
+          if (typeof dsbRuntime.scheduleLayoutReport === 'function') {
+            dsbRuntime.scheduleLayoutReport(240);
+          }
+        }, [quickHits, quickSelectedIdx]);
+
+        const effectiveQuickDraft =
+          dsbRuntime.activeHarness !== 'dsh' ? dsbRuntime.extDraftText || '' : liveDraft;
+        const effectiveQuickHasCapsules =
+          dsbRuntime.activeHarness !== 'dsh'
+            ? (dsbRuntime.extCapsules || []).length > 0
+            : countComposerCapsules(liveDraft) > 0;
+
+        useEffect(() => {
+          if (!IS_BAR || barMode === 'lip' || dsbRuntime.popupOpen) {
+            if (quickHitsRef.current.length > 0) {
+              setQuickHits([]);
+              setQuickSelectedIdx(-1);
+            }
+            return undefined;
+          }
+          const raw = typeof effectiveQuickDraft === 'string' ? effectiveQuickDraft : '';
+          const trimmed = raw.trim();
+          const hasCapsules = effectiveQuickHasCapsules;
+          const isPureQuery =
+            !hasCapsules &&
+            trimmed.length >= 1 &&
+            trimmed.length <= 60 &&
+            !raw.includes('\n') &&
+            !raw.includes('\r') &&
+            !trimmed.startsWith('/');
+
+          if (!isPureQuery) {
+            quickQueryRef.current = '';
+            quickDismissedQueryRef.current = '';
+            if (quickHitsRef.current.length > 0) {
+              setQuickHits([]);
+              setQuickSelectedIdx(-1);
+            }
+            return undefined;
+          }
+
+          if (quickDismissedQueryRef.current && quickDismissedQueryRef.current === trimmed) {
+            return undefined;
+          }
+          if (quickDismissedQueryRef.current && quickDismissedQueryRef.current !== trimmed) {
+            quickDismissedQueryRef.current = '';
+          }
+
+          quickQueryRef.current = trimmed;
+          const seq = ++quickReqSeqRef.current;
+          const timer = setTimeout(() => {
+            tauriInvoke('quick_search_query', { query: trimmed, limit: 8 })
+              .then((hits) => {
+                if (quickReqSeqRef.current !== seq) return;
+                const list = Array.isArray(hits) ? hits : [];
+                setQuickHits(list);
+                setQuickSelectedIdx(-1);
+                if (list.length > 0) {
+                  tauriInvoke('quick_search_status')
+                    .then((st) => {
+                      if (st && typeof st === 'object') setQuickStatus(st);
+                    })
+                    .catch(() => {});
+                }
+              })
+              .catch(() => {
+                if (quickReqSeqRef.current !== seq) return;
+                setQuickHits([]);
+                setQuickSelectedIdx(-1);
+              });
+          }, 22);
+          return () => clearTimeout(timer);
+        }, [effectiveQuickDraft, effectiveQuickHasCapsules, barMode, dsbRuntime.popupOpen]);
+
+        useEffect(() => {
+          if (!IS_BAR || typeof document === 'undefined') return undefined;
+          const onQuickKeyDown = (e) => {
+            const hits = quickHitsRef.current;
+            if (!hits || hits.length === 0) return;
+            if (e.isComposing) return;
+
+            if (e.key === 'Tab' && !e.ctrlKey && !e.altKey && !e.metaKey) {
+              e.preventDefault();
+              e.stopPropagation();
+              if (typeof e.stopImmediatePropagation === 'function') e.stopImmediatePropagation();
+              setQuickSelectedIdx((prev) => {
+                if (prev < 0) return e.shiftKey ? hits.length - 1 : 0;
+                return (prev + (e.shiftKey ? -1 : 1) + hits.length) % hits.length;
+              });
+              return;
+            }
+
+            const sel = quickSelectedRef.current;
+            if (sel >= 0 && (e.key === 'ArrowDown' || e.key === 'ArrowUp')) {
+              e.preventDefault();
+              e.stopPropagation();
+              if (typeof e.stopImmediatePropagation === 'function') e.stopImmediatePropagation();
+              setQuickSelectedIdx((prev) => {
+                const delta = e.key === 'ArrowDown' ? 1 : -1;
+                return (prev + delta + hits.length) % hits.length;
+              });
+              return;
+            }
+
+            if (sel >= 0 && e.key === 'Enter' && !e.shiftKey) {
+              const target = hits[sel];
+              if (target) {
+                e.preventDefault();
+                e.stopPropagation();
+                if (typeof e.stopImmediatePropagation === 'function') e.stopImmediatePropagation();
+                if (e.ctrlKey || e.metaKey) {
+                  openQuickSearchHitDirectly(target);
+                } else {
+                  insertQuickSearchHitAsCapsule(target);
+                }
+              }
+              return;
+            }
+
+            if (e.key === 'Escape') {
+              e.preventDefault();
+              e.stopPropagation();
+              if (typeof e.stopImmediatePropagation === 'function') e.stopImmediatePropagation();
+              if (sel >= 0) {
+                setQuickSelectedIdx(-1);
+              } else {
+                quickDismissedQueryRef.current = quickQueryRef.current;
+                setQuickHits([]);
+                setQuickSelectedIdx(-1);
+              }
+            }
+          };
+          window.addEventListener('keydown', onQuickKeyDown, true);
+          return () => window.removeEventListener('keydown', onQuickKeyDown, true);
+        }, [insertQuickSearchHitAsCapsule, openQuickSearchHitDirectly]);
+
+        const renderQuickSearchPopup = () => {
+          if (!IS_BAR || barMode === 'lip' || quickHits.length === 0) return null;
+          const cardEl = typeof document !== 'undefined' ? document.querySelector('[data-dsb-card]') : null;
+          const cr = cardEl ? cardEl.getBoundingClientRect() : null;
+          const bottomPx = cr ? Math.max(120, Math.round(window.innerHeight - cr.top + 6)) : 158;
+          const theme = HARNESS_META[activeHarness] || HARNESS_META.dsh;
+
+          const badgeMetaForHit = (hit) => {
+            if (hit.kind === 'app') return { label: 'APP', bg: 'rgba(59,130,246,0.20)', color: '#93c5fd' };
+            if (hit.kind === 'dir') return { label: 'DIR', bg: 'rgba(245,158,11,0.20)', color: '#fcd34d' };
+            const ext = String(hit.ext || '').toUpperCase().slice(0, 5);
+            if (ext === 'SLDPRT' || ext === 'SLDASM' || ext === 'SLDDRW') {
+              return { label: 'CAD', bg: 'rgba(16,185,129,0.22)', color: '#6ee7b7' };
+            }
+            return { label: ext || 'FILE', bg: 'rgba(148,163,184,0.18)', color: '#cbd5e1' };
+          };
+
+          const panel = h(
+            'div',
+            {
+              'data-dsb-popup': '1',
+              'data-dsb-quick-search': '1',
+              onMouseDown: (ev) => ev.preventDefault(),
+              style: {
+                position: 'fixed',
+                left: '2px',
+                right: '2px',
+                bottom: bottomPx + 'px',
+                borderRadius: '16px',
+                padding: '6px',
+                background: theme.surface,
+                border: '1px solid ' + theme.border,
+                boxShadow: '0 10px 28px rgba(0,0,0,0.42)',
+                display: 'flex',
+                flexDirection: 'column',
+                gap: '2px',
+                zIndex: 9998,
+                pointerEvents: 'auto',
+                color: 'var(--dsw-alias-label-primary, #f3f4f6)',
+                fontFamily: 'system-ui, -apple-system, "Segoe UI", Roboto, "PingFang SC", sans-serif',
+                boxSizing: 'border-box',
+              },
+            },
+            quickHits.map((hit, idx) => {
+              const isSel = idx === quickSelectedIdx;
+              const bm = badgeMetaForHit(hit);
+              return h(
+                'div',
+                {
+                  key: hit.path,
+                  onMouseEnter: () => setQuickSelectedIdx(idx),
+                  onClick: () => insertQuickSearchHitAsCapsule(hit),
+                  onDoubleClick: (ev) => {
+                    ev.stopPropagation();
+                    openQuickSearchHitDirectly(hit);
+                  },
+                  style: {
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    gap: '8px',
+                    padding: '6px 10px',
+                    borderRadius: '10px',
+                    cursor: 'pointer',
+                    background: isSel ? theme.accentBg : 'transparent',
+                    border: isSel ? '1px solid ' + theme.accentBorder : '1px solid transparent',
+                    transition: 'background 0.1s ease',
+                  },
+                },
+                h(
+                  'div',
+                  {
+                    style: {
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: '8px',
+                      minWidth: 0,
+                      flex: 1,
+                    },
+                  },
+                  h(
+                    'span',
+                    {
+                      style: {
+                        fontSize: '10px',
+                        fontWeight: 700,
+                        padding: '2px 5px',
+                        borderRadius: '6px',
+                        background: bm.bg,
+                        color: bm.color,
+                        flexShrink: 0,
+                        minWidth: '30px',
+                        textAlign: 'center',
+                      },
+                    },
+                    bm.label,
+                  ),
+                  h(
+                    'span',
+                    {
+                      style: {
+                        fontSize: '12.5px',
+                        fontWeight: isSel ? 600 : 500,
+                        overflow: 'hidden',
+                        textOverflow: 'ellipsis',
+                        whiteSpace: 'nowrap',
+                        flexShrink: 0,
+                        maxWidth: '50%',
+                      },
+                    },
+                    hit.name,
+                  ),
+                  hit.parentDisplay
+                    ? h(
+                        'span',
+                        {
+                          style: {
+                            fontSize: '11px',
+                            opacity: 0.52,
+                            overflow: 'hidden',
+                            textOverflow: 'ellipsis',
+                            whiteSpace: 'nowrap',
+                            flex: '1 1 0',
+                            minWidth: 0,
+                          },
+                        },
+                        hit.parentDisplay,
+                      )
+                    : null,
+                ),
+                h(
+                  'div',
+                  {
+                    style: {
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: '5px',
+                      flexShrink: 0,
+                    },
+                  },
+                  isSel
+                    ? h(
+                        'span',
+                        {
+                          style: {
+                            fontSize: '10.5px',
+                            padding: '1px 6px',
+                            borderRadius: '6px',
+                            background: 'rgba(255,255,255,0.09)',
+                            color: theme.accent,
+                            fontWeight: 600,
+                          },
+                        },
+                        'Enter 引用',
+                      )
+                    : null,
+                  h(
+                    'button',
+                    {
+                      type: 'button',
+                      title: '直接打开 (Ctrl+Enter)',
+                      onClick: (ev) => {
+                        ev.stopPropagation();
+                        openQuickSearchHitDirectly(hit);
+                      },
+                      style: {
+                        fontSize: '11px',
+                        padding: '2px 7px',
+                        borderRadius: '6px',
+                        border: '1px solid rgba(255,255,255,0.14)',
+                        background: 'rgba(255,255,255,0.06)',
+                        color: 'rgba(229,231,235,0.82)',
+                        cursor: 'pointer',
+                      },
+                    },
+                    '打开',
+                  ),
+                ),
+              );
+            }),
+            h(
+              'div',
+              {
+                style: {
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  padding: '3px 10px 1px',
+                  fontSize: '10.5px',
+                  opacity: 0.52,
+                  borderTop: '1px solid rgba(128,128,128,0.14)',
+                  marginTop: '2px',
+                },
+              },
+              h('span', null, 'Tab 选中 · Enter 插入蓝色胶囊 · Ctrl+Enter 直接打开 · Esc 隐藏'),
+              h(
+                'span',
+                null,
+                (quickStatus && quickStatus.engineMode === 'everything_ipc'
+                  ? 'Everything 实时 · '
+                  : quickStatus && quickStatus.engineMode === 'ntfs_hybrid'
+                    ? 'NTFS 全盘(' + (Array.isArray(quickStatus.drives) ? quickStatus.drives.join('/') : '') + ') · '
+                    : '高价值索引 · ') +
+                  quickHits.length +
+                  ' 项匹配',
+              ),
+            ),
+          );
+
+          if (ReactDOM && typeof ReactDOM.createPortal === 'function' && typeof document !== 'undefined' && document.body) {
+            return ReactDOM.createPortal(panel, document.body);
+          }
+          return panel;
+        };
+
         const cardBorderRadius =
           IS_BAR && barMode === 'lip'
             ? CARD_RADIUS_PX + 'px'
             : CARD_RADIUS_PX + 'px ' + CARD_RADIUS_PX + 'px 0 0';
 
+        const extCapsules = dsbRuntime.extCapsules || [];
+        const extDraft = dsbRuntime.extDraftText || '';
+        const activeTurn = dsbRuntime.externalActiveTurn;
+        const isExtStreaming = Boolean(activeTurn && activeTurn.harness === activeHarness);
+        const activeAvail =
+          (dsbRuntime.harnessAvailability || []).find((a) => a && a.id === activeHarness) || null;
+        const extSel = dsbRuntime.externalSelection[activeHarness] || {};
+
+        const submitExternalComposer = () => {
+          if (isExtStreaming) {
+            cancelExternalTurn();
+            return;
+          }
+          const parts = [];
+          for (const c of extCapsules) {
+            if (c && c.text) parts.push(c.text);
+          }
+          if (extDraft.trim()) parts.push(extDraft.trim());
+          const fullText = parts.join('\n').trim();
+          if (!fullText) return;
+          dsbRuntime.extDraftText = '';
+          dsbRuntime.extCapsules = [];
+          sendBarReport({ kind: 'capsules', capsuleCount: 0, afterInsert: false });
+          notifyBarRuntime();
+          sendExternalMessage(activeHarness, fullText);
+          sendBarReport({ kind: 'submitted' });
+        };
+
+        const removeExtCapsule = (capId) => {
+          dsbRuntime.extCapsules = (dsbRuntime.extCapsules || []).filter((c) => c.id !== capId);
+          sendBarReport({
+            kind: 'capsules',
+            capsuleCount: dsbRuntime.extCapsules.length,
+            afterInsert: false,
+          });
+          notifyBarRuntime();
+          if (typeof dsbRuntime.scheduleLayoutReport === 'function') {
+            dsbRuntime.scheduleLayoutReport(220);
+          }
+        };
+
+        const renderExtCapsulesRow = () => {
+          if (extCapsules.length === 0) return null;
+          return h(
+            'div',
+            {
+              style: {
+                display: 'flex',
+                flexWrap: 'wrap',
+                gap: '6px',
+                marginBottom: '8px',
+              },
+            },
+            extCapsules.map((cap) =>
+              h(
+                'span',
+                {
+                  key: cap.id,
+                  title: (cap.summary && cap.summary.body) || cap.text.slice(0, 120),
+                  style: {
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: '5px',
+                    padding: '2px 8px',
+                    borderRadius: '999px',
+                    fontSize: '12px',
+                    fontWeight: 500,
+                    background: 'rgba(56, 189, 248, 0.14)',
+                    border: '1px solid rgba(56, 189, 248, 0.36)',
+                    color: '#bae6fd',
+                    maxWidth: '240px',
+                  },
+                },
+                h(
+                  'span',
+                  {
+                    style: {
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis',
+                      whiteSpace: 'nowrap',
+                    },
+                  },
+                  (cap.summary && cap.summary.title) || '引用胶囊',
+                ),
+                h(
+                  'button',
+                  {
+                    type: 'button',
+                    onClick: (ev) => {
+                      ev.stopPropagation();
+                      removeExtCapsule(cap.id);
+                    },
+                    style: {
+                      border: 'none',
+                      background: 'transparent',
+                      color: 'rgba(186, 230, 253, 0.72)',
+                      cursor: 'pointer',
+                      padding: '0 2px',
+                      fontSize: '12px',
+                      lineHeight: 1,
+                    },
+                  },
+                  '×',
+                ),
+              ),
+            ),
+          );
+        };
+
+        const handleExtInputKeyDown = (ev) => {
+          if (ev.key === 'Enter' && !ev.shiftKey && !ev.isComposing) {
+            if (dsbRuntime.quickSearchOpen && dsbRuntime.quickSearchSelectedIdx >= 0) {
+              return;
+            }
+            ev.preventDefault();
+            ev.stopPropagation();
+            submitExternalComposer();
+          }
+        };
+
+        const handleExtInputChange = (ev) => {
+          dsbRuntime.extDraftText = ev.target.value;
+          notifyBarRuntime();
+          try {
+            ev.target.style.height = 'auto';
+            ev.target.style.height = Math.min(140, Math.max(24, ev.target.scrollHeight)) + 'px';
+          } catch {}
+          if (typeof dsbRuntime.scheduleLayoutReport === 'function') {
+            dsbRuntime.scheduleLayoutReport(200);
+          }
+        };
+
+        const renderPlusSvg = (sz = 16, col = '#a1a1aa') =>
+          h(
+            'svg',
+            { width: sz, height: sz, viewBox: '0 0 24 24', fill: 'none', stroke: col, strokeWidth: 2, strokeLinecap: 'round' },
+            h('path', { d: 'M12 5v14M5 12h14' }),
+          );
+
+        const renderChevronDownSvg = (col = 'rgba(255,255,255,0.45)') =>
+          h(
+            'svg',
+            { width: 11, height: 11, viewBox: '0 0 24 24', fill: 'none', stroke: col, strokeWidth: 2.2, strokeLinecap: 'round', strokeLinejoin: 'round' },
+            h('path', { d: 'M6 9l6 6 6-6' }),
+          );
+
+        const renderShieldSvg = (col = '#a1a1aa') =>
+          h(
+            'svg',
+            { width: 13, height: 13, viewBox: '0 0 24 24', fill: 'none', stroke: col, strokeWidth: 1.9, strokeLinecap: 'round', strokeLinejoin: 'round' },
+            h('path', { d: 'M12 3l7 3v5c0 5-3.2 8.8-7 10-3.8-1.2-7-5-7-10V6l7-3z' }),
+            h('path', { d: 'M12 8v4M12 16h.01' }),
+          );
+
+        const renderLaptopSvg = (col = '#d4d4d8') =>
+          h(
+            'svg',
+            { width: 14, height: 14, viewBox: '0 0 24 24', fill: 'none', stroke: col, strokeWidth: 1.8, strokeLinecap: 'round', strokeLinejoin: 'round' },
+            h('rect', { x: 4, y: 5, width: 16, height: 11, rx: 1.8 }),
+            h('path', { d: 'M2 19h20' }),
+          );
+
+        const renderFolderOutlineSvg = (col = '#d4d4d8') =>
+          h(
+            'svg',
+            { width: 14, height: 14, viewBox: '0 0 24 24', fill: 'none', stroke: col, strokeWidth: 1.8, strokeLinecap: 'round', strokeLinejoin: 'round' },
+            h('path', { d: 'M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7z' }),
+          );
+
+        const renderArrowUpSvg = (col = '#111214') =>
+          h(
+            'svg',
+            { width: 14, height: 14, viewBox: '0 0 24 24', fill: 'none', stroke: col, strokeWidth: 2.3, strokeLinecap: 'round', strokeLinejoin: 'round' },
+            h('path', { d: 'M12 19V5M6 11l6-6 6 6' }),
+          );
+
+        const renderExternalNativeComposer = () => {
+          if (!IS_BAR || barMode === 'lip' || activeHarness === 'dsh') return null;
+
+          const hasPayload = Boolean(extDraft.trim() || extCapsules.length > 0);
+          const openSwitcher = (ev) => {
+            ev.stopPropagation();
+            if (typeof dsbRuntime.toggleHarnessMenu === 'function') {
+              dsbRuntime.toggleHarnessMenu(ev.currentTarget);
+            }
+          };
+
+          if (activeHarness === 'antigravity') {
+            const modelName = (activeAvail && activeAvail.modelLabel) || 'Gemini 4 Neon';
+            const effortName = (activeAvail && activeAvail.effortLabel) || 'High';
+            const accessName = (activeAvail && activeAvail.accessLabel) || '极速';
+            const sessionLabel = extSel.title || 'CLI Project';
+
+            return h(
+              'div',
+              {
+                'data-dsb-external-composer': 'antigravity',
+                style: {
+                  width: '100vw',
+                  padding: '4px 5px 5px',
+                  background: '#111113',
+                  borderRadius: '0 0 18px 18px',
+                  borderLeft: '1px solid rgba(255, 255, 255, 0.06)',
+                  borderRight: '1px solid rgba(255, 255, 255, 0.06)',
+                  borderBottom: '1px solid rgba(255, 255, 255, 0.06)',
+                  boxSizing: 'border-box',
+                  pointerEvents: 'auto',
+                  fontFamily: '"Segoe UI", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif',
+                },
+              },
+              h(
+                'div',
+                {
+                  style: {
+                    background: '#17171a',
+                    borderRadius: '14px',
+                    border: '1px solid rgba(255, 255, 255, 0.08)',
+                    padding: '11px 13px 9px 14px',
+                    display: 'flex',
+                    flexDirection: 'column',
+                    boxSizing: 'border-box',
+                  },
+                },
+                renderExtCapsulesRow(),
+                h('textarea', {
+                  'data-dsb-ext-input': '1',
+                  rows: 1,
+                  value: extDraft,
+                  onChange: handleExtInputChange,
+                  onKeyDown: handleExtInputKeyDown,
+                  placeholder: '提问任何问题，使用 @ 提及，/ 执行操作',
+                  style: {
+                    width: '100%',
+                    minHeight: '24px',
+                    maxHeight: '140px',
+                    border: 'none',
+                    outline: 'none',
+                    resize: 'none',
+                    background: 'transparent',
+                    color: '#eceef2',
+                    fontSize: '13.5px',
+                    lineHeight: '21px',
+                    fontFamily: 'inherit',
+                    padding: 0,
+                    margin: 0,
+                    boxSizing: 'border-box',
+                  },
+                }),
+                h(
+                  'div',
+                  {
+                    style: {
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'space-between',
+                      marginTop: '10px',
+                      height: '30px',
+                      gap: '8px',
+                    },
+                  },
+                  h(
+                    'div',
+                    { style: { display: 'flex', alignItems: 'center', gap: '12px', minWidth: 0 } },
+                    h(
+                      'button',
+                      {
+                        type: 'button',
+                        title: '切换 Harness / 工作区 / 对话',
+                        onClick: openSwitcher,
+                        style: {
+                          border: 'none',
+                          background: 'transparent',
+                          padding: '2px',
+                          cursor: 'pointer',
+                          display: 'inline-flex',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          color: '#a1a1aa',
+                        },
+                      },
+                      renderPlusSvg(15, '#a1a1aa'),
+                    ),
+                    h(
+                      'span',
+                      {
+                        style: {
+                          display: 'inline-flex',
+                          alignItems: 'center',
+                          gap: '5px',
+                          fontSize: '12.5px',
+                          whiteSpace: 'nowrap',
+                          userSelect: 'none',
+                        },
+                      },
+                      h('span', { style: { color: '#d4d4d8', fontWeight: 500 } }, modelName),
+                      h('span', { style: { color: '#71717a' } }, effortName),
+                      renderChevronDownSvg('#71717a'),
+                    ),
+                    h(
+                      'button',
+                      {
+                        type: 'button',
+                        'data-dsb-session-chip': '1',
+                        title: '点击切换 Harness / 工作区 / 对话',
+                        onClick: openSwitcher,
+                        style: {
+                          border: 'none',
+                          background: 'transparent',
+                          padding: '2px 4px',
+                          borderRadius: '6px',
+                          cursor: 'pointer',
+                          display: 'inline-flex',
+                          alignItems: 'center',
+                          gap: '5px',
+                          fontSize: '12px',
+                          color: '#38bdf8',
+                          maxWidth: '210px',
+                        },
+                      },
+                      h('span', {
+                        style: {
+                          width: '5.5px',
+                          height: '5.5px',
+                          borderRadius: '999px',
+                          background: '#38bdf8',
+                          flexShrink: 0,
+                        },
+                      }),
+                      h(
+                        'span',
+                        {
+                          style: {
+                            overflow: 'hidden',
+                            textOverflow: 'ellipsis',
+                            whiteSpace: 'nowrap',
+                          },
+                        },
+                        sessionLabel,
+                      ),
+                    ),
+                  ),
+                  h(
+                    'div',
+                    { style: { display: 'flex', alignItems: 'center', gap: '12px', flexShrink: 0 } },
+                    h(
+                      'span',
+                      {
+                        style: {
+                          display: 'inline-flex',
+                          alignItems: 'center',
+                          gap: '5px',
+                          fontSize: '12.5px',
+                          color: '#d4d4d8',
+                          userSelect: 'none',
+                        },
+                      },
+                      renderShieldSvg('#9ca3af'),
+                      accessName,
+                      renderChevronDownSvg('#71717a'),
+                    ),
+                    h(
+                      'button',
+                      {
+                        type: 'button',
+                        title: isExtStreaming ? '停止生成' : '发送到 Antigravity',
+                        onClick: submitExternalComposer,
+                        style: isExtStreaming
+                          ? {
+                              width: '28px',
+                              height: '28px',
+                              borderRadius: '999px',
+                              border: '1px solid rgba(255,255,255,0.08)',
+                              background: '#232327',
+                              cursor: 'pointer',
+                              display: 'inline-flex',
+                              alignItems: 'center',
+                              justifyContent: 'center',
+                              padding: 0,
+                            }
+                          : {
+                              width: '28px',
+                              height: '28px',
+                              borderRadius: '999px',
+                              border: 'none',
+                              background: hasPayload ? '#f4f4f5' : '#d4d4d8',
+                              cursor: 'pointer',
+                              display: 'inline-flex',
+                              alignItems: 'center',
+                              justifyContent: 'center',
+                              padding: 0,
+                              opacity: hasPayload ? 1 : 0.88,
+                            },
+                      },
+                      isExtStreaming
+                        ? h('span', {
+                            style: {
+                              width: '10px',
+                              height: '10px',
+                              borderRadius: '2px',
+                              background: '#c94a4a',
+                            },
+                          })
+                        : renderArrowUpSvg('#111214'),
+                    ),
+                  ),
+                ),
+              ),
+            );
+          }
+
+          // Codex Desktop 1:1 Replica (inset #1f1f1f top shelf + 20px #303032 graphite card + coral-orange 完全访问 + cobalt #2b6be6 button)
+          const codexModel = (activeAvail && activeAvail.modelLabel) || 'GPT-6.1 Terra';
+          const codexEffort = (activeAvail && activeAvail.effortLabel) || '高';
+          const codexAccess = (activeAvail && activeAvail.accessLabel) || '完全访问';
+          const codexWsLabel =
+            (extSel.workspacePath ? workspaceBasename(extSel.workspacePath) : '') ||
+            extSel.title ||
+            'Codex';
+
+          return h(
+            'div',
+            {
+              'data-dsb-external-composer': 'codex',
+              style: {
+                width: '100vw',
+                display: 'flex',
+                flexDirection: 'column',
+                background: 'transparent',
+                boxSizing: 'border-box',
+                pointerEvents: 'auto',
+                fontFamily: '"Segoe UI", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif',
+              },
+            },
+            // Inset top shelf matching Codex Desktop (`💻 此计算机  📁 <workspace>`)
+            h(
+              'div',
+              {
+                style: {
+                  margin: '0 14px',
+                  height: '34px',
+                  padding: '0 14px',
+                  background: '#1f1f1f',
+                  borderLeft: '1px solid rgba(255, 255, 255, 0.06)',
+                  borderRight: '1px solid rgba(255, 255, 255, 0.06)',
+                  borderTop: '1px solid rgba(255, 255, 255, 0.05)',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '16px',
+                  boxSizing: 'border-box',
+                },
+              },
+              h(
+                'span',
+                {
+                  style: {
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: '6px',
+                    fontSize: '12.5px',
+                    color: '#e4e4e7',
+                    fontWeight: 500,
+                    flexShrink: 0,
+                    userSelect: 'none',
+                  },
+                },
+                renderLaptopSvg('#d4d4d8'),
+                '此计算机',
+              ),
+              h(
+                'button',
+                {
+                  type: 'button',
+                  'data-dsb-session-chip': '1',
+                  title: '点击切换 Harness / 工作区 / 对话',
+                  onClick: openSwitcher,
+                  style: {
+                    border: 'none',
+                    background: 'transparent',
+                    padding: '2px 4px',
+                    borderRadius: '6px',
+                    cursor: 'pointer',
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: '6px',
+                    fontSize: '12.5px',
+                    color: '#f4f4f5',
+                    fontWeight: 500,
+                    maxWidth: '340px',
+                  },
+                },
+                renderFolderOutlineSvg('#d4d4d8'),
+                h(
+                  'span',
+                  {
+                    style: {
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis',
+                      whiteSpace: 'nowrap',
+                    },
+                  },
+                  codexWsLabel,
+                ),
+              ),
+            ),
+            // Main 20px-radius Codex graphite composer card
+            h(
+              'div',
+              {
+                style: {
+                  width: '100%',
+                  background: '#303032',
+                  borderRadius: '20px',
+                  border: '1px solid rgba(255, 255, 255, 0.08)',
+                  padding: '13px 16px 11px 16px',
+                  display: 'flex',
+                  flexDirection: 'column',
+                  boxSizing: 'border-box',
+                  boxShadow: '0 8px 26px rgba(0, 0, 0, 0.36)',
+                },
+              },
+              renderExtCapsulesRow(),
+              h('textarea', {
+                'data-dsb-ext-input': '1',
+                rows: 1,
+                value: extDraft,
+                onChange: handleExtInputChange,
+                onKeyDown: handleExtInputKeyDown,
+                placeholder: '随心输入',
+                style: {
+                  width: '100%',
+                  minHeight: '26px',
+                  maxHeight: '140px',
+                  border: 'none',
+                  outline: 'none',
+                  resize: 'none',
+                  background: 'transparent',
+                  color: '#f4f4f5',
+                  fontSize: '14px',
+                  lineHeight: '22px',
+                  fontFamily: 'inherit',
+                  padding: 0,
+                  margin: 0,
+                  boxSizing: 'border-box',
+                },
+              }),
+              h(
+                'div',
+                {
+                  style: {
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    marginTop: '14px',
+                    height: '30px',
+                    gap: '8px',
+                  },
+                },
+                h(
+                  'div',
+                  { style: { display: 'flex', alignItems: 'center', gap: '12px' } },
+                  h(
+                    'button',
+                    {
+                      type: 'button',
+                      title: '切换 Harness / 工作区 / 对话',
+                      onClick: openSwitcher,
+                      style: {
+                        border: 'none',
+                        background: 'transparent',
+                        padding: '2px',
+                        cursor: 'pointer',
+                        display: 'inline-flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                      },
+                    },
+                    renderPlusSvg(17, '#e4e4e7'),
+                  ),
+                  h(
+                    'span',
+                    {
+                      title: '来自 ~/.codex/config.toml',
+                      style: {
+                        fontSize: '13px',
+                        fontWeight: 500,
+                        color: '#ef6c35',
+                        userSelect: 'none',
+                      },
+                    },
+                    codexAccess,
+                  ),
+                ),
+                h(
+                  'div',
+                  { style: { display: 'flex', alignItems: 'center', gap: '12px' } },
+                  h(
+                    'span',
+                    {
+                      style: {
+                        display: 'inline-flex',
+                        alignItems: 'center',
+                        gap: '6px',
+                        fontSize: '13px',
+                        userSelect: 'none',
+                      },
+                    },
+                    h('span', { style: { color: '#f4f4f5', fontWeight: 500 } }, codexModel),
+                    codexEffort
+                      ? h('span', { style: { color: '#9ca3af' } }, codexEffort)
+                      : null,
+                  ),
+                  h(
+                    'button',
+                    {
+                      type: 'button',
+                      title: isExtStreaming ? '停止生成' : '发送到 Codex',
+                      onClick: submitExternalComposer,
+                      style: {
+                        width: '30px',
+                        height: '30px',
+                        borderRadius: '999px',
+                        border: 'none',
+                        background: '#2b6be6',
+                        color: '#ffffff',
+                        cursor: 'pointer',
+                        display: 'inline-flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        padding: 0,
+                      },
+                    },
+                    isExtStreaming
+                      ? h('span', {
+                          style: {
+                            width: '10px',
+                            height: '10px',
+                            borderRadius: '2px',
+                            background: '#ffffff',
+                          },
+                        })
+                      : renderArrowUpSvg('#ffffff'),
+                  ),
+                ),
+              ),
+            ),
+          );
+        };
+
         return h(
           'div',
           {
-            ref: wrapRef,
-            'data-donegate-dock-wrap': '',
-            onMouseEnter: handleMouseEnter,
-            onMouseLeave: handleMouseLeave,
+            'data-dsb-stack': '1',
             style: {
-              position: 'relative',
-              width: IS_BAR
-                ? '100vw'
-                : matchedCardWidth
-                  ? matchedCardWidth + 'px'
-                  : '100%',
-              maxWidth: IS_BAR
-                ? '100vw'
-                : matchedCardWidth
-                  ? matchedCardWidth + 'px'
-                  : '100%',
-              marginInline: 'auto',
-              flexShrink: 0,
-              alignSelf: 'center',
-              height: COLLAPSED_LIP_PX + 'px',
-              zIndex: 1,
+              display: 'flex',
+              flexDirection: 'column',
+              alignItems: 'stretch',
+              width: IS_BAR ? '100vw' : '100%',
+              margin: 0,
+              padding: 0,
               boxSizing: 'border-box',
-              pointerEvents: 'auto',
-              fontFamily: 'system-ui, -apple-system, "Segoe UI", Roboto, "PingFang SC", sans-serif',
             },
           },
+          h(
+            'div',
+            {
+              ref: wrapRef,
+              'data-donegate-dock-wrap': '',
+              onMouseEnter: handleMouseEnter,
+              onMouseLeave: handleMouseLeave,
+              style: {
+                position: 'relative',
+                width: IS_BAR
+                  ? '100vw'
+                  : matchedCardWidth
+                    ? matchedCardWidth + 'px'
+                    : '100%',
+                maxWidth: IS_BAR
+                  ? '100vw'
+                  : matchedCardWidth
+                    ? matchedCardWidth + 'px'
+                    : '100%',
+                marginInline: 'auto',
+                flexShrink: 0,
+                alignSelf: 'center',
+                height: COLLAPSED_LIP_PX + 'px',
+                zIndex: 1,
+                boxSizing: 'border-box',
+                pointerEvents: 'auto',
+                fontFamily: 'system-ui, -apple-system, "Segoe UI", Roboto, "PingFang SC", sans-serif',
+              },
+            },
           // Left & right 8px invisible width drag edges inside slab in Bar mode
           IS_BAR && barMode !== 'lip'
             ? [
@@ -2013,6 +3650,49 @@ window.__ModuleLoader__.load({
                         style: { display: 'flex', alignItems: 'center', gap: '6px' },
                         onMouseDown: (ev) => ev.stopPropagation(),
                       },
+                      activeHarness !== 'dsh'
+                        ? h(
+                            'span',
+                            {
+                              style: {
+                                fontSize: '11px',
+                                fontWeight: 600,
+                                padding: '2px 7px',
+                                borderRadius: '999px',
+                                background: HARNESS_META[activeHarness].accentBg,
+                                border: '1px solid ' + HARNESS_META[activeHarness].accentBorder,
+                                color: HARNESS_META[activeHarness].accent,
+                                letterSpacing: '0.01em',
+                              },
+                            },
+                            HARNESS_META[activeHarness].label + ' · ' + HARNESS_META[activeHarness].syncHint,
+                          )
+                        : null,
+                      activeHarness !== 'dsh' &&
+                        dsbRuntime.externalActiveTurn &&
+                        dsbRuntime.externalActiveTurn.harness === activeHarness
+                        ? h(
+                            'button',
+                            {
+                              type: 'button',
+                              onClick: (ev) => {
+                                ev.stopPropagation();
+                                cancelActiveExternalTurn();
+                              },
+                              title: '停止当前生成',
+                              style: {
+                                fontSize: '11px',
+                                padding: '2px 7px',
+                                borderRadius: '999px',
+                                border: '1px solid rgba(248, 113, 113, 0.45)',
+                                background: 'rgba(248, 113, 113, 0.14)',
+                                color: '#fca5a5',
+                                cursor: 'pointer',
+                              },
+                            },
+                            '停止',
+                          )
+                        : null,
                       renderPinButton(),
                     ),
                   ),
@@ -2040,13 +3720,17 @@ window.__ModuleLoader__.load({
                           'div',
                           {
                             style: {
-                              opacity: 0.6,
+                              opacity: 0.65,
                               fontSize: '12.5px',
                               textAlign: 'center',
                               padding: '28px 12px',
                             },
                           },
-                          '暂无历史消息 — 在下方输入框发消息后，对话流将在此实时展开',
+                          activeHarness === 'antigravity'
+                            ? 'Antigravity 已就绪 — 发消息后自动同步到桌面端 CLI Project'
+                            : activeHarness === 'codex'
+                              ? 'Codex (app-server) 已就绪 — 发消息后写入 ~/.codex 共享历史'
+                              : '暂无历史消息 — 在下方输入框发消息后，对话流将在此实时展开',
                         )
                       : entries.map((item, idx) => {
                           const isUser = item.role === 'user';
@@ -2113,19 +3797,23 @@ window.__ModuleLoader__.load({
                                       },
                                     },
                                     item.text,
-                                    item.streaming
-                                      ? h(
-                                          'span',
-                                          {
-                                            style: {
-                                              marginLeft: '6px',
-                                              color: '#6ea8fe',
-                                              fontSize: '11.5px',
+                                      item.streaming
+                                        ? h(
+                                            'span',
+                                            {
+                                              style: {
+                                                marginLeft: '6px',
+                                                color: HARNESS_META[activeHarness].accent,
+                                                fontSize: '11.5px',
+                                              },
                                             },
-                                          },
-                                          '● 生成中…',
-                                        )
-                                      : null,
+                                            dsbRuntime.externalActiveTurn &&
+                                              dsbRuntime.externalActiveTurn.harness === activeHarness &&
+                                              dsbRuntime.externalActiveTurn.toolNote
+                                              ? '● ' + dsbRuntime.externalActiveTurn.toolNote + '…'
+                                              : '● 生成中…',
+                                          )
+                                        : null,
                                   ),
                             ),
                           );
@@ -2173,7 +3861,12 @@ window.__ModuleLoader__.load({
                         opacity: latestSingleLine ? 0.92 : 0.62,
                       },
                     },
-                    latestSingleLine || '暂无消息 · 双击 Ctrl 唤出输入框',
+                    latestSingleLine ||
+                      (activeHarness === 'antigravity'
+                        ? 'Antigravity · CLI Project 已就绪 · 双击 Ctrl 唤出输入框'
+                        : activeHarness === 'codex'
+                          ? 'Codex · app-server 已就绪 · 双击 Ctrl 唤出输入框'
+                          : '暂无消息 · 双击 Ctrl 唤出输入框'),
                   ),
                 ),
             !(IS_BAR && barMode === 'lip')
@@ -2194,7 +3887,10 @@ window.__ModuleLoader__.load({
                   },
                 })
               : null,
+            ),
           ),
+          renderExternalNativeComposer(),
+          renderQuickSearchPopup(),
         );
       };
     }
@@ -2214,7 +3910,18 @@ window.__ModuleLoader__.load({
         const [pillMetrics, setPillMetrics] = useState(null);
 
         const btnRef = useRef(null);
+        const extAnchorRef = useRef(null);
         const menuRef = useRef(null);
+
+        useEffect(() => {
+          dsbRuntime.toggleHarnessMenu = (anchorEl) => {
+            extAnchorRef.current = anchorEl || null;
+            setMenuOpen((prev) => !prev);
+          };
+          return () => {
+            if (dsbRuntime.toggleHarnessMenu) dsbRuntime.toggleHarnessMenu = null;
+          };
+        }, []);
 
         // Subscribe to workspaces.list, sessions.list, and dsbRuntime updates
         useEffect(() => {
@@ -2265,22 +3972,45 @@ window.__ModuleLoader__.load({
           }
         }, []);
 
+        const activeHarness = dsbRuntime.activeHarness || 'dsh';
+        const harnessTheme = HARNESS_META[activeHarness] || HARNESS_META.dsh;
+
         const wsSnap = workspaces && workspaces.list ? workspaces.list.getSnapshot() : { items: [], archivedSessionIds: [] };
         const sessSnap = sessions && sessions.list ? sessions.list.getSnapshot() : { ids: [], byId: {} };
         const archivedSet = new Set(Array.isArray(wsSnap.archivedSessionIds) ? wsSnap.archivedSessionIds : []);
         const wsItems = Array.isArray(wsSnap.items) ? wsSnap.items : [];
         const byId = sessSnap.byId || {};
 
-        const activeSessionId =
+        const dshActiveSessionId =
           (props && props.sessionId ? String(props.sessionId) : '') ||
           dsbRuntime.sessionId ||
           mainSessionIdOfList(sessSnap);
 
-        const activeSession = activeSessionId ? byId[activeSessionId] : null;
-        const activeTitle = sessionDisplayTitle(activeSession);
+        const activeSession = dshActiveSessionId ? byId[dshActiveSessionId] : null;
+        const extSel = activeHarness !== 'dsh' ? dsbRuntime.externalSelection[activeHarness] || {} : null;
+        const activeSessionId = activeHarness === 'dsh' ? dshActiveSessionId : String((extSel && extSel.sessionId) || '');
+        const activeTitle =
+          activeHarness === 'dsh'
+            ? sessionDisplayTitle(activeSession)
+            : (extSel && extSel.title) || harnessTheme.label + ' · 新对话';
 
-        // Compute grouped workspaces and conversations
+        // Compute grouped workspaces and conversations for the active Harness
         const { groups, activeWsId } = useMemo(() => {
+          if (activeHarness !== 'dsh') {
+            const catalog = dsbRuntime.externalCatalogs[activeHarness];
+            const extGroups = catalog && Array.isArray(catalog.groups) ? catalog.groups : [];
+            const selWsId = (extSel && extSel.workspaceId) || '';
+            const found = extGroups.some((g) => g.workspaceId === selWsId)
+              ? selWsId
+              : extGroups[0]
+                ? extGroups[0].workspaceId
+                : '';
+            return {
+              groups: extGroups,
+              activeWsId: found,
+            };
+          }
+
           const accounted = new Set();
           let foundWsId = '';
           const result = [];
@@ -2291,10 +4021,10 @@ window.__ModuleLoader__.load({
             const ids = Array.isArray(ws.sessionIds) ? ws.sessionIds : [];
             for (const id of ids) {
               accounted.add(id);
-              if (archivedSet.has(id) && id !== activeSessionId) continue;
+              if (archivedSet.has(id) && id !== dshActiveSessionId) continue;
               const s = byId[id];
               if (!s) continue;
-              if (id === activeSessionId) foundWsId = ws.workspaceId;
+              if (id === dshActiveSessionId) foundWsId = ws.workspaceId;
               convs.push({
                 id,
                 title: sessionDisplayTitle(s),
@@ -2313,10 +4043,10 @@ window.__ModuleLoader__.load({
           const stray = [];
           for (const id of (Array.isArray(sessSnap.ids) ? sessSnap.ids : [])) {
             if (accounted.has(id)) continue;
-            if (archivedSet.has(id) && id !== activeSessionId) continue;
+            if (archivedSet.has(id) && id !== dshActiveSessionId) continue;
             const s = byId[id];
             if (!s) continue;
-            if (id === activeSessionId) foundWsId = '__ungrouped__';
+            if (id === dshActiveSessionId) foundWsId = '__ungrouped__';
             stray.push({
               id,
               title: sessionDisplayTitle(s),
@@ -2337,15 +4067,19 @@ window.__ModuleLoader__.load({
             groups: result,
             activeWsId: foundWsId || (result[0] ? result[0].workspaceId : ''),
           };
-        }, [wsItems, sessSnap, activeSessionId]);
+        }, [activeHarness, wsItems, sessSnap, dshActiveSessionId, extSel && extSel.workspaceId, dsbRuntime.externalCatalogs[activeHarness]]);
 
         useEffect(() => {
           if (menuOpen) {
+            refreshHarnessAvailability();
+            if (activeHarness !== 'dsh') {
+              refreshExternalCatalog(activeHarness, false);
+            }
             setHoveredWsId(activeWsId || (groups[0] ? groups[0].workspaceId : ''));
             setManualPathMode(false);
             setPickerError('');
           }
-        }, [menuOpen, activeWsId]);
+        }, [menuOpen, activeHarness, activeWsId]);
 
         // Outside click / Esc handling for popup
         useEffect(() => {
@@ -2371,8 +4105,13 @@ window.__ModuleLoader__.load({
           };
         }, [menuOpen]);
 
-        const handleOpenSession = (id) => {
+        const handleOpenSession = (conv, group) => {
           setMenuOpen(false);
+          if (activeHarness !== 'dsh') {
+            selectExternalConversation(activeHarness, group, conv);
+            return;
+          }
+          const id = typeof conv === 'string' ? conv : conv.id;
           writeStoredString(STORAGE_KEY_LAST_SESSION, id);
           if (uiWorkspace && typeof uiWorkspace.openSession === 'function') {
             try {
@@ -2383,8 +4122,13 @@ window.__ModuleLoader__.load({
           window.location.replace('/sessions/' + encodeURIComponent(id) + '?dsh_bar_clone=1');
         };
 
-        const handleNewConversation = async (wsId) => {
+        const handleNewConversation = async (group) => {
           setMenuOpen(false);
+          if (activeHarness !== 'dsh') {
+            startNewExternalConversation(activeHarness, group);
+            return;
+          }
+          const wsId = typeof group === 'string' ? group : group.workspaceId;
           try {
             if (uiWorkspace && typeof uiWorkspace.startSession === 'function') {
               await uiWorkspace.startSession(wsId);
@@ -2400,7 +4144,18 @@ window.__ModuleLoader__.load({
         };
 
         const createWorkspaceAtPath = async (pickedPath) => {
-          if (!pickedPath || !workspaces || typeof workspaces.create !== 'function') return;
+          if (!pickedPath) return;
+          if (activeHarness !== 'dsh') {
+            const label = workspaceBasename(pickedPath);
+            startNewExternalConversation(activeHarness, {
+              workspaceId: activeHarness === 'codex' ? pickedPath : 'default-cli-project',
+              label,
+              path: pickedPath,
+            });
+            setMenuOpen(false);
+            return;
+          }
+          if (!workspaces || typeof workspaces.create !== 'function') return;
           const ws = await workspaces.create({ path: pickedPath });
           const wsId = ws && ws.workspaceId ? ws.workspaceId : '';
           setMenuOpen(false);
@@ -2411,6 +4166,10 @@ window.__ModuleLoader__.load({
 
         const handleCreateWorkspace = async () => {
           setPickerError('');
+          if (activeHarness !== 'dsh') {
+            setManualPathMode(true);
+            return;
+          }
           dsbRuntime.modalOpen = true;
           notifyBarRuntime();
           try {
@@ -2438,14 +4197,29 @@ window.__ModuleLoader__.load({
         const hoveredGroup =
           groups.find((g) => g.workspaceId === hoveredWsId) || groups[0] || null;
 
+        const availById = useMemo(() => {
+          const map = {};
+          for (const item of dsbRuntime.harnessAvailability || []) {
+            if (item && item.id) map[item.id] = item;
+          }
+          return map;
+        }, [dsbRuntime.harnessAvailability]);
+
         const renderMenu = () => {
           if (!menuOpen) return null;
-          const btnRect = btnRef.current ? btnRef.current.getBoundingClientRect() : null;
+          const anchorEl =
+            dsbRuntime.activeHarness !== 'dsh' && extAnchorRef.current
+              ? extAnchorRef.current
+              : btnRef.current;
+          const btnRect = anchorEl ? anchorEl.getBoundingClientRect() : null;
           const bottomPx = btnRect ? Math.max(44, Math.round(window.innerHeight - btnRect.top + 8)) : 52;
           const menuMaxW = 452;
           const leftPx = btnRect
             ? Math.max(8, Math.min(Math.round(btnRect.left), Math.max(8, window.innerWidth - menuMaxW - 8)))
             : 12;
+
+          const panelBg = harnessTheme.surface;
+          const panelBorder = harnessTheme.border;
 
           const menuNode = h(
             'div',
@@ -2457,7 +4231,8 @@ window.__ModuleLoader__.load({
                 bottom: bottomPx + 'px',
                 left: leftPx + 'px',
                 display: 'flex',
-                alignItems: 'flex-end',
+                flexDirection: 'column',
+                alignItems: 'stretch',
                 gap: '6px',
                 zIndex: 9999,
                 pointerEvents: 'auto',
@@ -2465,17 +4240,117 @@ window.__ModuleLoader__.load({
                 fontFamily: 'system-ui, -apple-system, "Segoe UI", Roboto, "PingFang SC", sans-serif',
               },
             },
+            // Level 0 (Top): Harness Switcher (DeepSeek / Antigravity / Codex)
+            h(
+              'div',
+              {
+                'data-dsb-harness-bar': '1',
+                style: {
+                  width: '450px',
+                  borderRadius: '14px',
+                  padding: '5px 6px',
+                  background: panelBg,
+                  border: '1px solid ' + panelBorder,
+                  boxShadow: '0 8px 24px rgba(0,0,0,0.38)',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '4px',
+                  boxSizing: 'border-box',
+                },
+              },
+              HARNESS_ORDER.map((hid) => {
+                const meta = HARNESS_META[hid];
+                const isSelected = activeHarness === hid;
+                const avail = availById[hid];
+                const isReady = avail ? Boolean(avail.available) : true;
+                return h(
+                  'button',
+                  {
+                    key: hid,
+                    type: 'button',
+                    'data-dsb-harness-opt': hid,
+                    title: meta.fullLabel + ' · ' + meta.syncHint,
+                    onClick: () => {
+                      setPickerError('');
+                      setManualPathMode(false);
+                      setActiveHarness(hid, true);
+                    },
+                    style: {
+                      flex: 1,
+                      padding: '6px 8px',
+                      borderRadius: '10px',
+                      border: isSelected ? '1px solid ' + meta.accentBorder : '1px solid transparent',
+                      background: isSelected ? meta.accentBg : 'transparent',
+                      color: isSelected ? '#ffffff' : 'rgba(229, 231, 235, 0.78)',
+                      fontSize: '12px',
+                      fontWeight: isSelected ? 650 : 500,
+                      cursor: 'pointer',
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      gap: '6px',
+                      opacity: isReady ? 1 : 0.55,
+                      transition: 'background 0.14s ease, border-color 0.14s ease',
+                    },
+                  },
+                  h('span', {
+                    style: {
+                      width: '7px',
+                      height: '7px',
+                      borderRadius: '999px',
+                      background: isReady ? meta.accent : '#6b7280',
+                      boxShadow: isSelected ? '0 0 8px ' + meta.accent : 'none',
+                      flexShrink: 0,
+                    },
+                  }),
+                  h('span', null, meta.label),
+                );
+              }),
+              activeHarness !== 'dsh'
+                ? h(
+                    'button',
+                    {
+                      type: 'button',
+                      title: '刷新工作区与历史会话',
+                      onClick: () => refreshExternalCatalog(activeHarness, false),
+                      style: {
+                        width: '26px',
+                        height: '26px',
+                        borderRadius: '8px',
+                        border: 'none',
+                        background: 'rgba(255,255,255,0.06)',
+                        color: 'rgba(229,231,235,0.85)',
+                        fontSize: '13px',
+                        cursor: 'pointer',
+                        flexShrink: 0,
+                      },
+                    },
+                    '↻',
+                  )
+                : null,
+            ),
+
+            // Levels 1 & 2: Workspaces | Conversations
+            h(
+              'div',
+              {
+                style: {
+                  display: 'flex',
+                  alignItems: 'flex-end',
+                  gap: '6px',
+                },
+              },
             // Level 1: Workspaces
             h(
               'div',
               {
                 style: {
                   width: '196px',
-                  maxHeight: '300px',
+                  maxHeight: '286px',
                   borderRadius: '14px',
                   padding: '6px',
-                  background: 'var(--dsw-alias-bg-layer-2, #27272a)',
-                  border: '1px solid var(--dsw-alias-border-l2, rgba(128,128,128,0.22))',
+                  background: panelBg,
+                  border: '1px solid ' + panelBorder,
                   boxShadow: '0 8px 24px rgba(0,0,0,0.35)',
                   display: 'flex',
                   flexDirection: 'column',
@@ -2510,7 +4385,7 @@ window.__ModuleLoader__.load({
                         borderRadius: '8px',
                         fontSize: '12px',
                         background: 'rgba(128,128,128,0.14)',
-                        border: '1px solid rgba(96,165,250,0.5)',
+                        border: '1px solid ' + harnessTheme.accentBorder,
                         color: 'inherit',
                         outline: 'none',
                       },
@@ -2538,9 +4413,9 @@ window.__ModuleLoader__.load({
                               });
                             }
                           },
-                          style: { fontSize: '11.5px', padding: '2px 8px', borderRadius: '6px', background: 'rgba(59,130,246,0.25)', color: '#60a5fa', border: '1px solid rgba(59,130,246,0.45)', cursor: 'pointer' },
+                          style: { fontSize: '11.5px', padding: '2px 8px', borderRadius: '6px', background: harnessTheme.accentBg, color: harnessTheme.accent, border: '1px solid ' + harnessTheme.accentBorder, cursor: 'pointer' },
                         },
-                        '创建',
+                        '确定',
                       ),
                     ),
                   )
@@ -2556,8 +4431,8 @@ window.__ModuleLoader__.load({
                         borderRadius: '10px',
                         fontSize: '12px',
                         fontWeight: 500,
-                        color: '#60a5fa',
-                        background: 'rgba(59,130,246,0.12)',
+                        color: harnessTheme.accent,
+                        background: harnessTheme.accentBg,
                         border: 'none',
                         cursor: 'pointer',
                         display: 'flex',
@@ -2566,19 +4441,23 @@ window.__ModuleLoader__.load({
                       },
                     },
                     h('span', null, '＋'),
-                    h('span', null, '新建工作区…'),
+                    h('span', null, activeHarness === 'dsh' ? '新建工作区…' : '指定目录新开…'),
                   ),
               pickerError
                 ? h('div', { style: { fontSize: '11px', color: '#f87171', padding: '2px 8px' } }, pickerError)
                 : null,
-              h('div', { style: { height: '1px', margin: '4px 2px', background: 'var(--dsw-alias-border-l2, rgba(128,128,128,0.16))' } }),
+              h('div', { style: { height: '1px', margin: '4px 2px', background: panelBorder } }),
               h(
                 'div',
                 {
                   'data-dsb-menu-scroll': '1',
-                  style: { overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '2px', maxHeight: '220px' },
+                  style: { overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '2px', maxHeight: '206px' },
                 },
-                groups.map((g) => {
+                activeHarness !== 'dsh' && dsbRuntime.externalLoading[activeHarness] && groups.length === 0
+                  ? h('div', { style: { padding: '12px 10px', fontSize: '12px', opacity: 0.65, textAlign: 'center' } }, '正在读取工作区…')
+                  : groups.length === 0
+                    ? h('div', { style: { padding: '12px 10px', fontSize: '12px', opacity: 0.65, textAlign: 'center' } }, '暂无工作区')
+                    : groups.map((g) => {
                   const isHover = hoveredGroup && g.workspaceId === hoveredGroup.workspaceId;
                   const isActiveWs = g.workspaceId === activeWsId;
                   return h(
@@ -2624,11 +4503,11 @@ window.__ModuleLoader__.load({
                   {
                     style: {
                       width: '248px',
-                      maxHeight: '300px',
+                      maxHeight: '286px',
                       borderRadius: '14px',
                       padding: '6px',
-                      background: 'var(--dsw-alias-bg-layer-2, #27272a)',
-                      border: '1px solid var(--dsw-alias-border-l2, rgba(128,128,128,0.22))',
+                      background: panelBg,
+                      border: '1px solid ' + panelBorder,
                       boxShadow: '0 8px 24px rgba(0,0,0,0.35)',
                       display: 'flex',
                       flexDirection: 'column',
@@ -2641,7 +4520,7 @@ window.__ModuleLoader__.load({
                         'button',
                         {
                           type: 'button',
-                          onClick: () => handleNewConversation(hoveredGroup.workspaceId),
+                          onClick: () => handleNewConversation(hoveredGroup),
                           style: {
                             width: '100%',
                             textAlign: 'left',
@@ -2649,8 +4528,8 @@ window.__ModuleLoader__.load({
                             borderRadius: '10px',
                             fontSize: '12px',
                             fontWeight: 500,
-                            color: '#60a5fa',
-                            background: 'rgba(59,130,246,0.12)',
+                            color: harnessTheme.accent,
+                            background: harnessTheme.accentBg,
                             border: 'none',
                             cursor: 'pointer',
                             display: 'flex',
@@ -2663,13 +4542,13 @@ window.__ModuleLoader__.load({
                       )
                     : null,
                   hoveredGroup.workspaceId !== '__ungrouped__'
-                    ? h('div', { style: { height: '1px', margin: '4px 2px', background: 'var(--dsw-alias-border-l2, rgba(128,128,128,0.16))' } })
+                    ? h('div', { style: { height: '1px', margin: '4px 2px', background: panelBorder } })
                     : null,
                   h(
                     'div',
                     {
                       'data-dsb-menu-scroll': '1',
-                      style: { overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '2px', maxHeight: '236px' },
+                      style: { overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '2px', maxHeight: '220px' },
                     },
                     hoveredGroup.convs.length === 0
                       ? h('div', { style: { padding: '12px 10px', fontSize: '12px', opacity: 0.6, textAlign: 'center' } }, '暂无对话')
@@ -2680,14 +4559,14 @@ window.__ModuleLoader__.load({
                             {
                               key: c.id,
                               type: 'button',
-                              onClick: () => handleOpenSession(c.id),
+                              onClick: () => handleOpenSession(c, hoveredGroup),
                               style: {
                                 width: '100%',
                                 textAlign: 'left',
                                 padding: '6px 10px',
                                 borderRadius: '10px',
                                 fontSize: '12px',
-                                background: isSel ? 'rgba(59,130,246,0.18)' : 'transparent',
+                                background: isSel ? harnessTheme.accentBg : 'transparent',
                                 color: 'inherit',
                                 border: 'none',
                                 cursor: 'pointer',
@@ -2700,7 +4579,7 @@ window.__ModuleLoader__.load({
                             h(
                               'span',
                               { style: { display: 'inline-flex', alignItems: 'center', gap: '6px', minWidth: 0, flex: 1 } },
-                              h('span', { style: { width: '12px', textAlign: 'center', color: '#60a5fa', flexShrink: 0 } }, isSel ? '✓' : ''),
+                              h('span', { style: { width: '12px', textAlign: 'center', color: harnessTheme.accent, flexShrink: 0 } }, isSel ? '✓' : ''),
                               h('span', { style: { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, c.title),
                             ),
                             h('span', { style: { fontSize: '11.5px', opacity: 0.55, flexShrink: 0 } }, formatRelativeTime(c.updatedAt)),
@@ -2709,6 +4588,7 @@ window.__ModuleLoader__.load({
                   ),
                 )
               : null,
+            ),
           );
 
           if (ReactDOM && typeof ReactDOM.createPortal === 'function' && typeof document !== 'undefined' && document.body) {
@@ -2717,16 +4597,38 @@ window.__ModuleLoader__.load({
           return menuNode;
         };
 
+        const activeAvail = availById[activeHarness] || null;
+
         return h(
           React.Fragment,
           null,
+          activeHarness === 'codex'
+            ? h(
+                'span',
+                {
+                  title: 'Codex 沙箱权限（来自 ~/.codex/config.toml）',
+                  style: {
+                    fontSize: '12px',
+                    fontWeight: 500,
+                    color: '#fb6a33',
+                    padding: '0 6px 0 2px',
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: '4px',
+                    flexShrink: 0,
+                    userSelect: 'none',
+                  },
+                },
+                (activeAvail && activeAvail.accessLabel) || '完全访问',
+              )
+            : null,
           h(
             'button',
             {
               ref: btnRef,
               type: 'button',
               'data-dsb-session-chip': '1',
-              title: '切换绑定对话或工作区',
+              title: '切换 Harness / 工作区 / 对话（当前：' + harnessTheme.fullLabel + '）',
               onClick: (e) => {
                 e.stopPropagation();
                 setMenuOpen((prev) => !prev);
@@ -2735,20 +4637,40 @@ window.__ModuleLoader__.load({
                 height: (pillMetrics && pillMetrics.height) || '28px',
                 borderRadius: (pillMetrics && pillMetrics.borderRadius) || '9999px',
                 fontSize: (pillMetrics && pillMetrics.fontSize) || '12px',
-                background: (pillMetrics && pillMetrics.background) || 'var(--dsw-alias-bg-layer-3, rgba(128,128,128,0.12))',
-                color: (pillMetrics && pillMetrics.color) || 'var(--dsw-alias-label-primary, inherit)',
-                border: (pillMetrics && pillMetrics.border) || '1px solid var(--dsw-alias-border-l2, rgba(128,128,128,0.22))',
+                background:
+                  activeHarness === 'dsh'
+                    ? (pillMetrics && pillMetrics.background) || 'var(--dsw-alias-bg-layer-3, rgba(128,128,128,0.12))'
+                    : 'rgba(255, 255, 255, 0.05)',
+                color:
+                  activeHarness === 'dsh'
+                    ? (pillMetrics && pillMetrics.color) || 'var(--dsw-alias-label-primary, inherit)'
+                    : 'rgba(243, 244, 246, 0.90)',
+                border:
+                  activeHarness === 'dsh'
+                    ? (pillMetrics && pillMetrics.border) || '1px solid var(--dsw-alias-border-l2, rgba(128,128,128,0.22))'
+                    : '1px solid rgba(255, 255, 255, 0.11)',
                 padding: '0 10px',
                 display: 'inline-flex',
                 alignItems: 'center',
-                gap: '5px',
-                maxWidth: '220px',
+                gap: '6px',
+                maxWidth: '240px',
                 cursor: 'pointer',
                 flexShrink: 0,
                 boxSizing: 'border-box',
               },
             },
-            renderFolderIcon(14),
+            activeHarness === 'dsh' || activeHarness === 'codex'
+              ? renderFolderIcon(14)
+              : h('span', {
+                  style: {
+                    width: '7px',
+                    height: '7px',
+                    borderRadius: '999px',
+                    background: harnessTheme.accent,
+                    boxShadow: '0 0 6px ' + harnessTheme.accent,
+                    flexShrink: 0,
+                  },
+                }),
             h(
               'span',
               {
@@ -2760,10 +4682,99 @@ window.__ModuleLoader__.load({
               },
               activeTitle,
             ),
-            h('span', { style: { opacity: 0.65, flexShrink: 0 } }, '▾'),
+            h('span', { style: { opacity: 0.6, flexShrink: 0 } }, '▾'),
           ),
           renderMenu(),
         );
+      };
+    }
+
+    function makeHarnessRightControls() {
+      return function HarnessRightControls() {
+        const [, setTick] = useState(0);
+        useEffect(() => {
+          const bump = () => setTick((n) => n + 1);
+          dsbRuntime.listeners.add(bump);
+          return () => dsbRuntime.listeners.delete(bump);
+        }, []);
+
+        const hId = dsbRuntime.activeHarness;
+        if (!IS_BAR || hId === 'dsh') return null;
+        const avail = (dsbRuntime.harnessAvailability || []).find((a) => a && a.id === hId) || null;
+
+        if (hId === 'antigravity') {
+          const modelText = (avail && avail.modelLabel) || 'Gemini';
+          const effortText = (avail && avail.effortLabel) || 'High';
+          const accessText = (avail && avail.accessLabel) || '极速';
+          return h(
+            'div',
+            {
+              'data-dsb-harness-right': 'antigravity',
+              style: {
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: '10px',
+                fontSize: '12px',
+                color: 'rgba(229, 231, 235, 0.78)',
+                paddingRight: '4px',
+                userSelect: 'none',
+                flexShrink: 0,
+              },
+            },
+            h(
+              'span',
+              { style: { display: 'inline-flex', alignItems: 'center', gap: '4px' } },
+              h('span', { style: { color: 'rgba(243, 244, 246, 0.88)' } }, modelText),
+              h('span', { style: { opacity: 0.55 } }, effortText),
+            ),
+            h(
+              'span',
+              {
+                style: {
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: '4px',
+                  color: 'rgba(209, 213, 219, 0.82)',
+                },
+              },
+              h('span', {
+                style: {
+                  width: '6px',
+                  height: '6px',
+                  borderRadius: '999px',
+                  background: '#38bdf8',
+                },
+              }),
+              accessText,
+            ),
+          );
+        }
+
+        if (hId === 'codex') {
+          const modelText = (avail && avail.modelLabel) || 'GPT-6.1 Terra';
+          const effortText = (avail && avail.effortLabel) || '高';
+          return h(
+            'div',
+            {
+              'data-dsb-harness-right': 'codex',
+              style: {
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: '6px',
+                fontSize: '12px',
+                paddingRight: '4px',
+                userSelect: 'none',
+                flexShrink: 0,
+              },
+            },
+            h('span', { style: { color: 'rgba(244, 244, 245, 0.90)', fontWeight: 500 } }, modelText),
+            effortText
+              ? h('span', { style: { color: 'rgba(212, 212, 216, 0.58)' } }, effortText)
+              : null,
+          );
+        }
+
+        return null;
       };
     }
 
@@ -2827,6 +4838,7 @@ window.__ModuleLoader__.load({
         const services = { sessions, workspaces, uiWorkspace, directoryPicker };
         const CardholderSlipDock = makeCardDockComponent(services);
         const ConversationPickerChip = makeConversationPickerChip(services);
+        const HarnessRightControls = makeHarnessRightControls();
 
         slots.inject('conversation.input.dock', () =>
           slots.register(
@@ -2847,6 +4859,17 @@ window.__ModuleLoader__.load({
               order: 100,
             },
             ConversationPickerChip,
+          ),
+        );
+
+        slots.inject('conversation.input.right', () =>
+          slots.register(
+            {
+              name: 'conversation.input.right',
+              id: 'dsb-harness-right',
+              order: 10,
+            },
+            HarnessRightControls,
           ),
         );
       },

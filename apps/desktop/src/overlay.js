@@ -22,11 +22,68 @@
     hover: null,
     dwell: null, // { key, originX, originY, startTs, unlocked }
     liveStroke: [],
+    liveStrokeColor: 'blue', // 'blue' (left-drag box/lasso) | 'red' (right-drag doodle screenshot)
+    blueMorph: {
+      lockedLasso: false,
+      morphStartTs: 0,
+      lastBox: null, // { x, y, w, h } in CSS coords for smooth 160ms box -> lasso morph
+    },
     liveDrag: null, // { mode: 'word_text' | 'excel_box', start: {x,y}, end: {x,y} }
     pickedItems: [],
     toastTimer: null,
     rafId: 0,
   };
+
+  // Mirrors Rust `classify_blue_gesture`: monotonic diagonal drag -> 'box';
+  // curving, reversing, or looping trajectory -> 'lasso'.
+  function classifyBlueGesture(points) {
+    if (!Array.isArray(points) || points.length < 3) return 'box';
+    const start = points[0];
+    const end = points[points.length - 1];
+    const dxTotal = end.x - start.x;
+    const dyTotal = end.y - start.y;
+    const chord = Math.hypot(dxTotal, dyTotal);
+
+    let arcLen = 0;
+    let minX = start.x;
+    let maxX = start.x;
+    let minY = start.y;
+    let maxY = start.y;
+    for (let i = 1; i < points.length; i += 1) {
+      const a = points[i - 1];
+      const b = points[i];
+      arcLen += Math.hypot(b.x - a.x, b.y - a.y);
+      if (b.x < minX) minX = b.x;
+      if (b.x > maxX) maxX = b.x;
+      if (b.y < minY) minY = b.y;
+      if (b.y > maxY) maxY = b.y;
+    }
+
+    if (arcLen < 36) return 'box';
+    if (chord < 24) return 'lasso';
+
+    const maxOvershoot = Math.max(
+      maxX - Math.max(start.x, end.x),
+      Math.min(start.x, end.x) - minX,
+      maxY - Math.max(start.y, end.y),
+      Math.min(start.y, end.y) - minY,
+    );
+    if (maxOvershoot > 26) return 'lasso';
+
+    const straightness = chord / Math.max(arcLen, 1);
+    if (straightness < 0.80) return 'lasso';
+
+    let maxPerp = 0;
+    for (let i = 1; i < points.length - 1; i += 1) {
+      const p = points[i];
+      const cross = Math.abs((p.x - start.x) * dyTotal - (p.y - start.y) * dxTotal);
+      const perp = cross / chord;
+      if (perp > maxPerp) maxPerp = perp;
+    }
+    if (maxPerp > 34 && maxPerp / chord > 0.24) return 'lasso';
+
+    return 'box';
+  }
 
   function syncCanvasSize() {
     const dpr = window.devicePixelRatio || 1;
@@ -203,7 +260,66 @@
 
     // 1. Picked items during current selection session
     for (const item of state.pickedItems) {
-      if (item.strokes && item.strokes.length > 1) {
+      const isBlueStroke =
+        item.color === 'blue' ||
+        item.mode === 'blue_lasso' ||
+        item.mode === 'blue_box' ||
+        item.mode === 'blue_text';
+
+      if (isBlueStroke) {
+        // Highlight every selected foreground element in the group with crisp blue frames
+        if (Array.isArray(item.itemRects) && item.itemRects.length > 0) {
+          ctx.save();
+          ctx.fillStyle = 'rgba(56, 189, 248, 0.11)';
+          ctx.strokeStyle = 'rgba(125, 211, 252, 0.92)';
+          ctx.shadowColor = 'rgba(0, 136, 255, 0.72)';
+          ctx.shadowBlur = 8;
+          ctx.lineWidth = 1.6;
+          for (const rawIr of item.itemRects) {
+            const ir = toCssRect(rawIr);
+            if (!ir || ir.w <= 2 || ir.h <= 2) continue;
+            ctx.beginPath();
+            ctx.roundRect(ir.x, ir.y, ir.w, ir.h, 5);
+            ctx.fill();
+            ctx.stroke();
+          }
+          ctx.restore();
+        }
+
+        if (item.mode === 'blue_lasso' && item.strokes && item.strokes.length > 1) {
+          ctx.save();
+          ctx.strokeStyle = '#38bdf8';
+          ctx.shadowColor = 'rgba(0, 136, 255, 0.78)';
+          ctx.shadowBlur = 9;
+          ctx.lineWidth = 2.4;
+          ctx.lineCap = 'round';
+          ctx.lineJoin = 'round';
+          ctx.beginPath();
+          const p0 = toCssPt(item.strokes[0].x, item.strokes[0].y);
+          ctx.moveTo(p0.x, p0.y);
+          for (let i = 1; i < item.strokes.length; i += 1) {
+            const p = toCssPt(item.strokes[i].x, item.strokes[i].y);
+            ctx.lineTo(p.x, p.y);
+          }
+          ctx.stroke();
+          ctx.restore();
+          drawNumberBadge(p0.x + 12, Math.max(14, p0.y - 12), item.n, '#0084ff');
+        } else if (item.rect) {
+          const r = toCssRect(item.rect);
+          ctx.save();
+          ctx.fillStyle = 'rgba(56, 189, 248, 0.08)';
+          ctx.strokeStyle = '#38bdf8';
+          ctx.shadowColor = 'rgba(0, 136, 255, 0.78)';
+          ctx.shadowBlur = 10;
+          ctx.lineWidth = 1.8;
+          ctx.beginPath();
+          ctx.roundRect(r.x, r.y, Math.max(4, r.w), Math.max(4, r.h), 6);
+          ctx.fill();
+          ctx.stroke();
+          ctx.restore();
+          drawNumberBadge(Math.min(window.innerWidth - 14, r.x + r.w + 8), Math.max(14, r.y - 6), item.n, '#0084ff');
+        }
+      } else if (item.strokes && item.strokes.length > 1) {
         ctx.save();
         ctx.strokeStyle = '#ef4444';
         ctx.shadowColor = 'rgba(239, 68, 68, 0.55)';
@@ -326,22 +442,116 @@
         ctx.restore();
       }
     } else if (state.liveStroke.length > 1) {
-      ctx.save();
-      ctx.strokeStyle = '#ef4444';
-      ctx.shadowColor = 'rgba(239, 68, 68, 0.6)';
-      ctx.shadowBlur = 8;
-      ctx.lineWidth = 2.6;
-      ctx.lineCap = 'round';
-      ctx.lineJoin = 'round';
-      ctx.beginPath();
-      const first = toCssPt(state.liveStroke[0].x, state.liveStroke[0].y);
-      ctx.moveTo(first.x, first.y);
-      for (let i = 1; i < state.liveStroke.length; i += 1) {
-        const pt = toCssPt(state.liveStroke[i].x, state.liveStroke[i].y);
-        ctx.lineTo(pt.x, pt.y);
+      if (state.liveStrokeColor === 'red') {
+        // Right-button RED freehand doodle (produces annotated + clean dual screenshot capsule)
+        ctx.save();
+        ctx.strokeStyle = '#ef4444';
+        ctx.shadowColor = 'rgba(239, 68, 68, 0.65)';
+        ctx.shadowBlur = 8;
+        ctx.lineWidth = 2.8;
+        ctx.lineCap = 'round';
+        ctx.lineJoin = 'round';
+        ctx.beginPath();
+        const first = toCssPt(state.liveStroke[0].x, state.liveStroke[0].y);
+        ctx.moveTo(first.x, first.y);
+        for (let i = 1; i < state.liveStroke.length; i += 1) {
+          const pt = toCssPt(state.liveStroke[i].x, state.liveStroke[i].y);
+          ctx.lineTo(pt.x, pt.y);
+        }
+        ctx.stroke();
+        ctx.restore();
+        const last = toCssPt(
+          state.liveStroke[state.liveStroke.length - 1].x,
+          state.liveStroke[state.liveStroke.length - 1].y,
+        );
+        drawRoundedTag(last.x + 14, last.y + 14, '红线涂鸦截图', false);
+      } else {
+        // Left-button BLUE CAD Auto-Switch: monotonic diagonal -> Box; curving/reversing -> seamless 160ms morph to Freehand Lasso
+        const first = toCssPt(state.liveStroke[0].x, state.liveStroke[0].y);
+        const last = toCssPt(
+          state.liveStroke[state.liveStroke.length - 1].x,
+          state.liveStroke[state.liveStroke.length - 1].y,
+        );
+        if (!state.blueMorph.lockedLasso) {
+          const rx = Math.min(first.x, last.x);
+          const ry = Math.min(first.y, last.y);
+          const rw = Math.max(4, Math.abs(last.x - first.x));
+          const rh = Math.max(4, Math.abs(last.y - first.y));
+          state.blueMorph.lastBox = { x: rx, y: ry, w: rw, h: rh };
+
+          ctx.save();
+          ctx.fillStyle = 'rgba(56, 189, 248, 0.10)';
+          ctx.strokeStyle = '#38bdf8';
+          ctx.shadowColor = 'rgba(0, 136, 255, 0.72)';
+          ctx.shadowBlur = 10;
+          ctx.lineWidth = 1.8;
+          ctx.beginPath();
+          ctx.roundRect(rx, ry, rw, rh, 5);
+          ctx.fill();
+          ctx.stroke();
+          ctx.restore();
+          drawRoundedTag(last.x + 14, last.y + 14, '蓝线框选 / 划字', true);
+        } else {
+          const MORPH_MS = 160;
+          const t = Math.max(0, Math.min(1, (now - state.blueMorph.morphStartTs) / MORPH_MS));
+          const eased = 1 - Math.pow(1 - t, 3);
+
+          // 1) Fade out the previous blue selection box seamlessly during the first 160ms
+          if (t < 1 && state.blueMorph.lastBox) {
+            const lb = state.blueMorph.lastBox;
+            const expand = eased * 4;
+            ctx.save();
+            ctx.globalAlpha = 1 - eased;
+            ctx.fillStyle = 'rgba(56, 189, 248, 0.09)';
+            ctx.strokeStyle = '#38bdf8';
+            ctx.setLineDash([5, 4]);
+            ctx.lineWidth = 1.5;
+            ctx.beginPath();
+            ctx.roundRect(lb.x - expand, lb.y - expand, lb.w + expand * 2, lb.h + expand * 2, 8);
+            ctx.fill();
+            ctx.stroke();
+            ctx.restore();
+          }
+
+          // 2) Bloom in the glowing blue freehand lasso with soft translucent enclosed fill
+          ctx.save();
+          ctx.globalAlpha = Math.max(0.3, eased);
+          ctx.beginPath();
+          ctx.moveTo(first.x, first.y);
+          for (let i = 1; i < state.liveStroke.length; i += 1) {
+            const pt = toCssPt(state.liveStroke[i].x, state.liveStroke[i].y);
+            ctx.lineTo(pt.x, pt.y);
+          }
+          if (state.liveStroke.length >= 6) {
+            ctx.save();
+            ctx.closePath();
+            ctx.fillStyle = 'rgba(56, 189, 248, 0.085)';
+            ctx.fill();
+            ctx.restore();
+          }
+          ctx.strokeStyle = '#38bdf8';
+          ctx.shadowColor = 'rgba(0, 136, 255, 0.85)';
+          ctx.shadowBlur = 9;
+          ctx.lineWidth = 2.6 + (1 - eased) * 1.1;
+          ctx.lineCap = 'round';
+          ctx.lineJoin = 'round';
+          ctx.stroke();
+
+          // Subtle dashed closing chord so the user sees the enclosed lasso region
+          if (state.liveStroke.length >= 6) {
+            ctx.shadowBlur = 0;
+            ctx.strokeStyle = 'rgba(125, 211, 252, 0.42)';
+            ctx.lineWidth = 1.2;
+            ctx.setLineDash([4, 4]);
+            ctx.beginPath();
+            ctx.moveTo(last.x, last.y);
+            ctx.lineTo(first.x, first.y);
+            ctx.stroke();
+          }
+          ctx.restore();
+          drawRoundedTag(last.x + 14, last.y + 14, '蓝线圈选 · 元素组', true);
+        }
       }
-      ctx.stroke();
-      ctx.restore();
     }
 
     // 4. Short, restrained electric-blue light trail
@@ -351,6 +561,14 @@
   function needsAnimationLoop() {
     if (!state.active) return false;
     if (state.trail.length > 0) return true;
+    if (
+      state.liveStroke.length > 1 &&
+      state.liveStrokeColor === 'blue' &&
+      state.blueMorph.lockedLasso &&
+      performance.now() - state.blueMorph.morphStartTs < 170
+    ) {
+      return true;
+    }
     if (state.dwell && !state.dwell.unlocked && state.liveStroke.length === 0 && !state.liveDrag) return true;
     return false;
   }
@@ -526,7 +744,23 @@
         state.liveDrag = { mode: p.mode, start: p.start, end: p.end };
       } else {
         state.liveDrag = null;
-        state.liveStroke = Array.isArray(p.points) ? p.points : [];
+        const pts = Array.isArray(p.points) ? p.points : [];
+        const nextColor = p.color === 'red' || p.mode === 'red_doodle' ? 'red' : 'blue';
+        const isFresh =
+          pts.length <= 2 ||
+          state.liveStroke.length === 0 ||
+          state.liveStrokeColor !== nextColor ||
+          pts.length < state.liveStroke.length;
+        if (isFresh) {
+          state.blueMorph = { lockedLasso: false, morphStartTs: 0, lastBox: null };
+        }
+        state.liveStrokeColor = nextColor;
+        state.liveStroke = pts;
+        if (nextColor === 'blue' && !state.blueMorph.lockedLasso && classifyBlueGesture(pts) === 'lasso') {
+          state.blueMorph.lockedLasso = true;
+          state.blueMorph.morphStartTs = performance.now();
+          scheduleAnimTick();
+        }
       }
       state.trail = [];
       state.dwell = null;
@@ -536,6 +770,7 @@
     evApi.listen('pen:picked', (ev) => {
       const p = ev.payload || {};
       state.liveStroke = [];
+      state.blueMorph = { lockedLasso: false, morphStartTs: 0, lastBox: null };
       state.liveDrag = null;
       state.pickedItems.push(p);
       redraw();

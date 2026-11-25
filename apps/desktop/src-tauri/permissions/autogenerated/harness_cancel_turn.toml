@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-harness-cancel-turn"
+description = "Enables the harness_cancel_turn command without any pre-configured scope."
+commands.allow = ["harness_cancel_turn"]
+
+[[permission]]
+identifier = "deny-harness-cancel-turn"
+description = "Denies the harness_cancel_turn command without any pre-configured scope."
+commands.deny = ["harness_cancel_turn"]

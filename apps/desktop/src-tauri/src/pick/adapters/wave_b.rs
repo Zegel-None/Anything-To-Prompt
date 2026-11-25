@@ -333,22 +333,11 @@ pub fn parse_obsidian_vault_json(raw_json: &str, vault_name: &str) -> Option<Pat
 
 fn try_cad_adapter(ctx: &AdapterContext) -> Option<AdapterOutput> {
     let exe = ctx.proc_meta.exe_name.as_str();
-    if exe != "sldworks.exe" && exe != "acad.exe" {
+    if exe != "acad.exe" {
         return None;
     }
 
-    let script = if exe == "sldworks.exe" {
-        r#"
-try {
-  $sw = [Runtime.InteropServices.Marshal]::GetActiveObject('SldWorks.Application')
-  $doc = $sw.ActiveDoc
-  if ($null -ne $doc) {
-    @{ path = [string]$doc.GetPathName(); title = [string]$doc.GetTitle() } | ConvertTo-Json -Compress
-  }
-} catch {}
-"#
-    } else {
-        r#"
+    let script = r#"
 try {
   $ac = [Runtime.InteropServices.Marshal]::GetActiveObject('AutoCAD.Application')
   $doc = $ac.ActiveDocument
@@ -356,8 +345,7 @@ try {
     @{ path = [string]$doc.FullName; title = [string]$doc.Name } | ConvertTo-Json -Compress
   }
 } catch {}
-"#
-    };
+"#;
 
     let mut out = AdapterOutput::new("cad");
     let resp = ctx.broker.call(BrokerRequest::RunPs51 {
