@@ -2546,7 +2546,13 @@ fn try_execute_office_tap_pick(
 
     match hit.kind {
         OfficeAppKind::Excel => {
-            let Some(ex) = office::pick_excel_cell_com(&shared.broker, x, y, hit.dpi_scale) else {
+            let Some(ex) = office::pick_excel_cell_com(
+                &shared.broker,
+                hit.root_hwnd,
+                x,
+                y,
+                hit.dpi_scale,
+            ) else {
                 return false;
             };
             let cfg = shared.config.lock().map(|c| c.clone()).unwrap_or_default();
@@ -2674,8 +2680,13 @@ fn try_execute_office_tap_pick(
             true
         }
         OfficeAppKind::PowerPoint => {
-            let Some(ppt) = office::pick_ppt_element_com(&shared.broker, x, y, hit.dpi_scale)
-            else {
+            let Some(ppt) = office::pick_ppt_element_com(
+                &shared.broker,
+                hit.root_hwnd,
+                x,
+                y,
+                hit.dpi_scale,
+            ) else {
                 return false;
             };
             let cfg = shared.config.lock().map(|c| c.clone()).unwrap_or_default();
@@ -3047,6 +3058,7 @@ fn try_execute_office_drag_pick(
         OfficeAppKind::Excel => {
             let Some(ex) = office::pick_excel_range_com(
                 &shared.broker,
+                hit.root_hwnd,
                 start.0,
                 start.1,
                 end.0,

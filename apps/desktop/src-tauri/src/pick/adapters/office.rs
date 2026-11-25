@@ -12,6 +12,9 @@ use windows::Win32::Foundation::{HWND, POINT, RECT};
 use windows::Win32::System::Threading::{
     OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_FORMAT, PROCESS_QUERY_LIMITED_INFORMATION,
 };
+use windows::Win32::UI::HiDpi::{
+    LogicalToPhysicalPointForPerMonitorDPI, PhysicalToLogicalPointForPerMonitorDPI,
+};
 use windows::Win32::UI::WindowsAndMessaging::{GetWindowRect, WindowFromPoint};
 
 /// Concise, suite-aware MCP routing guidance for the AI agent when an Office/WPS document is open.
@@ -135,6 +138,10 @@ pub struct ExcelPickResult {
     pub formulas_preview: String,
     #[serde(default)]
     pub screen_rect: Option<ScreenRect>,
+    #[serde(default)]
+    pub coord_space: String,
+    #[serde(default)]
+    pub rect_method: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -168,6 +175,8 @@ pub struct PptElementPickResult {
     pub style: String,
     #[serde(default)]
     pub screen_rect: Option<ScreenRect>,
+    #[serde(default)]
+    pub coord_space: String,
 }
 
 pub fn matches(ctx: &AdapterContext) -> bool {
@@ -528,20 +537,338 @@ if ($paraText.Length -gt 400) {{ $paraText = $paraText.Substring(0, 400) }}
     serde_json::from_str::<WordTextPickResult>(resp.text.trim()).ok()
 }
 
+fn physical_to_window_logical(hwnd: HWND, x: i32, y: i32, dpi_scale: f64) -> (i32, i32) {
+    if !hwnd.0.is_null() {
+        let mut pt = POINT { x, y };
+        let ok = unsafe { PhysicalToLogicalPointForPerMonitorDPI(Some(hwnd), &mut pt).as_bool() };
+        if ok {
+            return (pt.x, pt.y);
+        }
+    }
+    let scale = dpi_scale.max(0.5);
+    (
+        ((x as f64) / scale).round() as i32,
+        ((y as f64) / scale).round() as i32,
+    )
+}
+
+fn scale_screen_rect(rect: ScreenRect, scale: f64) -> ScreenRect {
+    ScreenRect {
+        x: ((rect.x as f64) * scale).round() as i32,
+        y: ((rect.y as f64) * scale).round() as i32,
+        w: (((rect.w as f64) * scale).round() as i32).max(8),
+        h: (((rect.h as f64) * scale).round() as i32).max(8),
+    }
+}
+
+fn window_logical_rect_to_physical(hwnd: HWND, rect: ScreenRect, dpi_scale: f64) -> ScreenRect {
+    if !hwnd.0.is_null() {
+        let mut tl = POINT {
+            x: rect.x,
+            y: rect.y,
+        };
+        let mut br = POINT {
+            x: rect.x + rect.w,
+            y: rect.y + rect.h,
+        };
+        let ok1 = unsafe { LogicalToPhysicalPointForPerMonitorDPI(Some(hwnd), &mut tl).as_bool() };
+        let ok2 = unsafe { LogicalToPhysicalPointForPerMonitorDPI(Some(hwnd), &mut br).as_bool() };
+        if ok1 && ok2 && br.x > tl.x && br.y > tl.y {
+            return ScreenRect {
+                x: tl.x,
+                y: tl.y,
+                w: (br.x - tl.x).max(8),
+                h: (br.y - tl.y).max(8),
+            };
+        }
+    }
+    scale_screen_rect(rect, dpi_scale.max(0.5))
+}
+
+pub fn map_office_rect_to_physical(
+    hwnd: HWND,
+    rect: ScreenRect,
+    coord_space: &str,
+    dpi_scale: f64,
+) -> ScreenRect {
+    match coord_space {
+        "hwnd" => window_logical_rect_to_physical(hwnd, rect, dpi_scale),
+        "div_dpi" => scale_screen_rect(rect, dpi_scale.max(0.5)),
+        _ => rect,
+    }
+}
+
+/// Final Rust-side sanity guard: rejects any COM-reported bounding rect that does not
+/// even contain the physical user click/drag anchor points (e.g. broken DPI / raw-pt rects).
+pub fn validate_office_rect_against_anchors(
+    rect: ScreenRect,
+    anchors: &[(i32, i32)],
+    tolerance_px: i32,
+) -> Option<ScreenRect> {
+    if rect.w < 6 || rect.h < 6 || rect.w > 4800 || rect.h > 3000 {
+        return None;
+    }
+    let rx2 = rect.x + rect.w;
+    let ry2 = rect.y + rect.h;
+    for &(ax, ay) in anchors {
+        if ax < rect.x - tolerance_px
+            || ax > rx2 + tolerance_px
+            || ay < rect.y - tolerance_px
+            || ay > ry2 + tolerance_px
+        {
+            return None;
+        }
+    }
+    Some(rect)
+}
+
+fn query_window_bounds_tuple(hwnd: HWND) -> (i32, i32, i32, i32) {
+    let mut rc = RECT::default();
+    if !hwnd.0.is_null() && unsafe { GetWindowRect(hwnd, &mut rc).is_ok() } && rc.right > rc.left {
+        (rc.left, rc.top, rc.right, rc.bottom)
+    } else {
+        (-32000, -32000, 32000, 32000)
+    }
+}
+
+/// Shared PowerShell helper for MS Excel (2016–365) & WPS Spreadsheets:
+/// 1) Resolves `RangeFromPoint` in the target window's exact DPI coordinate space.
+/// 2) Tests analytic `PointsToScreenPixelsX/Y` candidates (Excel 365 Per-Monitor DPI,
+///    Excel 2016 96-DPI, WPS raw-points bug, Zoom variations), proving every candidate
+///    against all 4 edges via `RangeFromPoint` inside/outside checks.
+/// 3) If no analytic candidate passes (e.g. Freeze Panes, Split Windows, scrolled WPS,
+///    mixed-DPI multi-monitor, RTL sheets), locks all 4 edges to ±1px directly via
+///    exponential bracket + binary search on `RangeFromPoint`.
+const EXCEL_RECT_SOLVER_PS: &str = r#"
+function Try-ExcelCellAt($w, $cx, $cy) {
+  try {
+    $c = $w.RangeFromPoint([int]$cx, [int]$cy)
+    if ($null -ne $c) {
+      $a = [string]$c.Address($false, $false)
+      if (-not [string]::IsNullOrWhiteSpace($a)) { return $c }
+    }
+  } catch {}
+  return $null
+}
+
+function Try-ExcelCellWithSpace($w, $hx, $hy, $px, $py, $lx, $ly, $prefSpace) {
+  $order = @()
+  if ($prefSpace -eq 'hwnd') {
+    $order = @(@($hx, $hy, 'hwnd'), @($px, $py, 'physical'), @($lx, $ly, 'div_dpi'))
+  } elseif ($prefSpace -eq 'physical') {
+    $order = @(@($px, $py, 'physical'), @($hx, $hy, 'hwnd'), @($lx, $ly, 'div_dpi'))
+  } elseif ($prefSpace -eq 'div_dpi') {
+    $order = @(@($lx, $ly, 'div_dpi'), @($hx, $hy, 'hwnd'), @($px, $py, 'physical'))
+  } else {
+    $order = @(@($hx, $hy, 'hwnd'), @($px, $py, 'physical'), @($lx, $ly, 'div_dpi'))
+  }
+  $seen = @{}
+  foreach ($item in $order) {
+    $cx = [int]$item[0]; $cy = [int]$item[1]; $sp = [string]$item[2]
+    $key = "$cx,$cy"
+    if ($seen.ContainsKey($key)) { continue }
+    $seen[$key] = $true
+    $c = Try-ExcelCellAt $w $cx $cy
+    if ($null -ne $c) {
+      return @{ cell = $c; x = $cx; y = $cy; space = $sp }
+    }
+  }
+  return $null
+}
+
+function Test-InExcelRange($w, $px, $py, $rMin, $rMax, $cMin, $cMax) {
+  try {
+    $hc = $w.RangeFromPoint([int]$px, [int]$py)
+    if ($null -eq $hc) { return $false }
+    $hr = [int]$hc.Row
+    $hcol = [int]$hc.Column
+    return ($hr -ge $rMin -and $hr -le $rMax -and $hcol -ge $cMin -and $hcol -le $cMax)
+  } catch { return $false }
+}
+
+function Verify-ExcelRect($w, $x1, $y1, $x2, $y2, $rMin, $rMax, $cMin, $cMax, $axL, $ayT, $axR, $ayB, $leftProbeY, $rightProbeY, $topProbeX, $bottomProbeX) {
+  $bw = $x2 - $x1; $bh = $y2 - $y1
+  if ($bw -lt 6 -or $bh -lt 6 -or $bw -gt 4800 -or $bh -gt 3000) { return $false }
+  if ($axL -lt ($x1 - 2) -or $axL -gt ($x2 + 2) -or $axR -lt ($x1 - 2) -or $axR -gt ($x2 + 2)) { return $false }
+  if ($ayT -lt ($y1 - 2) -or $ayT -gt ($y2 + 2) -or $ayB -lt ($y1 - 2) -or $ayB -gt ($y2 + 2)) { return $false }
+  $inL = [Math]::Min($x2 - 1, $x1 + 2)
+  $inR = [Math]::Max($x1 + 1, $x2 - 2)
+  $inT = [Math]::Min($y2 - 1, $y1 + 2)
+  $inB = [Math]::Max($y1 + 1, $y2 - 2)
+  if (-not (Test-InExcelRange $w $inL $leftProbeY $rMin $rMax $cMin $cMax)) { return $false }
+  if (Test-InExcelRange $w ($x1 - 3) $leftProbeY $rMin $rMax $cMin $cMax) { return $false }
+  if (-not (Test-InExcelRange $w $inR $rightProbeY $rMin $rMax $cMin $cMax)) { return $false }
+  if (Test-InExcelRange $w ($x2 + 3) $rightProbeY $rMin $rMax $cMin $cMax) { return $false }
+  if (-not (Test-InExcelRange $w $topProbeX $inT $rMin $rMax $cMin $cMax)) { return $false }
+  if (Test-InExcelRange $w $topProbeX ($y1 - 3) $rMin $rMax $cMin $cMax) { return $false }
+  if (-not (Test-InExcelRange $w $bottomProbeX $inB $rMin $rMax $cMin $cMax)) { return $false }
+  if (Test-InExcelRange $w $bottomProbeX ($y2 + 3) $rMin $rMax $cMin $cMax) { return $false }
+  return $true
+}
+
+function Find-ExcelEdge($w, [int]$fixedCoord, [int]$startIn, [int]$dir, [int]$limit, [bool]$isHorizontal, [int]$rMin, [int]$rMax, [int]$cMin, [int]$cMax) {
+  $inV = [int]$startIn
+  $step = 16
+  $outV = $inV
+  $foundOut = $false
+  for ($k = 0; $k -lt 9; $k++) {
+    $probe = $inV + ($dir * $step)
+    if (($dir -lt 0 -and $probe -lt $limit) -or ($dir -gt 0 -and $probe -gt $limit)) {
+      $probe = $limit
+    }
+    $ok = if ($isHorizontal) {
+      Test-InExcelRange $w $probe $fixedCoord $rMin $rMax $cMin $cMax
+    } else {
+      Test-InExcelRange $w $fixedCoord $probe $rMin $rMax $cMin $cMax
+    }
+    if (-not $ok) {
+      $outV = $probe
+      $foundOut = $true
+      break
+    }
+    $inV = $probe
+    if ($probe -eq $limit) { return $limit }
+    $step = $step * 2
+  }
+  if (-not $foundOut) { return $inV }
+  while ([Math]::Abs($outV - $inV) -gt 1) {
+    $mid = [int][Math]::Floor(($inV + $outV) / 2.0)
+    if ($mid -eq $inV -or $mid -eq $outV) { break }
+    $ok = if ($isHorizontal) {
+      Test-InExcelRange $w $mid $fixedCoord $rMin $rMax $cMin $cMax
+    } else {
+      Test-InExcelRange $w $fixedCoord $mid $rMin $rMax $cMin $cMax
+    }
+    if ($ok) { $inV = $mid } else { $outV = $mid }
+  }
+  return $inV
+}
+
+function Resolve-ExcelRangeRect($w, $rng, $ax1, $ay1, $ax2, $ay2, $dpiScale, $minX, $minY, $maxX, $maxY) {
+  $rMin = [int]$rng.Row
+  $cMin = [int]$rng.Column
+  $rMax = $rMin + [int]$rng.Rows.Count - 1
+  $cMax = $cMin + [int]$rng.Columns.Count - 1
+
+  $axL = [Math]::Min([int]$ax1, [int]$ax2)
+  $axR = [Math]::Max([int]$ax1, [int]$ax2)
+  $ayT = [Math]::Min([int]$ay1, [int]$ay2)
+  $ayB = [Math]::Max([int]$ay1, [int]$ay2)
+
+  $leftProbeY = $ayT; $topProbeX = $axL
+  if (-not (Test-InExcelRange $w $axL $ayT $rMin $rMax $cMin $cMax)) {
+    $leftProbeY = if ($ax1 -le $ax2) { [int]$ay1 } else { [int]$ay2 }
+    $topProbeX = if ($ay1 -le $ay2) { [int]$ax1 } else { [int]$ax2 }
+  }
+  $rightProbeY = $ayB; $bottomProbeX = $axR
+  if (-not (Test-InExcelRange $w $axR $ayB $rMin $rMax $cMin $cMax)) {
+    $rightProbeY = if ($ax2 -ge $ax1) { [int]$ay2 } else { [int]$ay1 }
+    $bottomProbeX = if ($ay2 -ge $ay1) { [int]$ax2 } else { [int]$ax1 }
+  }
+
+  # Stage 1: Fast analytic PointsToScreenPixels candidates (including active Pane for Freeze/Split Panes)
+  # with mandatory 4-edge RangeFromPoint proof.
+  $cands = New-Object System.Collections.ArrayList
+  $p2sTargets = New-Object System.Collections.ArrayList
+  try {
+    $leftPt = [double]$rng.Left
+    $topPt = [double]$rng.Top
+    $rightPt = $leftPt + [double]$rng.Width
+    $bottomPt = $topPt + [double]$rng.Height
+    try {
+      if ($null -ne $w.Panes -and [int]$w.Panes.Count -gt 1) {
+        foreach ($pane in $w.Panes) {
+          try {
+            $vr = $pane.VisibleRange
+            if ($null -ne $vr -and $leftPt -ge [double]$vr.Left -and $leftPt -le ([double]$vr.Left + [double]$vr.Width) -and $topPt -ge [double]$vr.Top -and $topPt -le ([double]$vr.Top + [double]$vr.Height)) {
+              [void]$p2sTargets.Add($pane)
+              break
+            }
+          } catch {}
+        }
+      }
+    } catch {}
+    [void]$p2sTargets.Add($w)
+
+    $zoom = 1.0
+    try { $zv = [double]$w.Zoom; if ($zv -ge 10 -and $zv -le 400) { $zoom = $zv / 100.0 } } catch {}
+    $ptToPx = (96.0 / 72.0) * $dpiScale * $zoom
+    $ptToPx96 = (96.0 / 72.0) * $zoom
+
+    foreach ($t in $p2sTargets) {
+      try {
+        $rx1 = [double]$t.PointsToScreenPixelsX($leftPt)
+        $ry1 = [double]$t.PointsToScreenPixelsY($topPt)
+        $rx2 = [double]$t.PointsToScreenPixelsX($rightPt)
+        $ry2 = [double]$t.PointsToScreenPixelsY($bottomPt)
+        $ox = [double]$t.PointsToScreenPixelsX(0.0)
+        $oy = [double]$t.PointsToScreenPixelsY(0.0)
+        [void]$cands.Add(@($rx1, $ry1, $rx2, $ry2))
+        if ([Math]::Abs([double]$dpiScale - 1.0) -gt 0.01) {
+          [void]$cands.Add(@(($rx1 * $dpiScale), ($ry1 * $dpiScale), ($rx2 * $dpiScale), ($ry2 * $dpiScale)))
+          [void]$cands.Add(@(($ox + ($rx1 - $ox) * $dpiScale), ($oy + ($ry1 - $oy) * $dpiScale), ($ox + ($rx2 - $ox) * $dpiScale), ($oy + ($ry2 - $oy) * $dpiScale)))
+        }
+        [void]$cands.Add(@(($ox + $leftPt * $ptToPx), ($oy + $topPt * $ptToPx), ($ox + $rightPt * $ptToPx), ($oy + $bottomPt * $ptToPx)))
+        [void]$cands.Add(@(($ox + ($rx1 - $ox) * $ptToPx), ($oy + ($ry1 - $oy) * $ptToPx), ($ox + ($rx2 - $ox) * $ptToPx), ($oy + ($ry2 - $oy) * $ptToPx)))
+        if ([Math]::Abs([double]$dpiScale - 1.0) -gt 0.01) {
+          [void]$cands.Add(@(($ox + ($rx1 - $ox) * $ptToPx96), ($oy + ($ry1 - $oy) * $ptToPx96), ($ox + ($rx2 - $ox) * $ptToPx96), ($oy + ($ry2 - $oy) * $ptToPx96)))
+        }
+      } catch {}
+    }
+  } catch {}
+
+  foreach ($cand in $cands) {
+    $cx1 = [int][Math]::Round($cand[0])
+    $cy1 = [int][Math]::Round($cand[1])
+    $cx2 = [int][Math]::Round($cand[2])
+    $cy2 = [int][Math]::Round($cand[3])
+    if (Verify-ExcelRect $w $cx1 $cy1 $cx2 $cy2 $rMin $rMax $cMin $cMax $axL $ayT $axR $ayB $leftProbeY $rightProbeY $topProbeX $bottomProbeX) {
+      return @{ rect = @{ x = $cx1; y = $cy1; w = [Math]::Max(8, $cx2 - $cx1); h = [Math]::Max(8, $cy2 - $cy1) }; method = 'p2s_verified' }
+    }
+  }
+
+  # Stage 2: Universal RangeFromPoint exponential bracket + binary search (±1px across all Excel 2016–365 & WPS)
+  $leftIn = Find-ExcelEdge $w $leftProbeY $axL (-1) $minX $true $rMin $rMax $cMin $cMax
+  $rightIn = Find-ExcelEdge $w $rightProbeY $axR 1 $maxX $true $rMin $rMax $cMin $cMax
+  $topIn = Find-ExcelEdge $w $topProbeX $ayT (-1) $minY $false $rMin $rMax $cMin $cMax
+  $bottomIn = Find-ExcelEdge $w $bottomProbeX $ayB 1 $maxY $false $rMin $rMax $cMin $cMax
+  if ($rightIn -ge $leftIn -and $bottomIn -ge $topIn) {
+    $sw = [Math]::Max(8, $rightIn - $leftIn + 1)
+    $shPx = [Math]::Max(8, $bottomIn - $topIn + 1)
+    if ($sw -lt 4800 -and $shPx -lt 3000) {
+      return @{ rect = @{ x = $leftIn; y = $topIn; w = $sw; h = $shPx }; method = 'rfp_bsearch' }
+    }
+  }
+
+  return $null
+}
+"#;
+
 /// COM-backed Excel / WPS Spreadsheets single-cell hit-test & selection at `(x, y)`.
 /// Returns `None` if `(x, y)` did not hit a worksheet cell (e.g. Ribbon/titlebar), allowing UIA fallback.
 pub fn pick_excel_cell_com(
     broker: &BrokerClient,
+    root_hwnd: HWND,
     x: i32,
     y: i32,
     dpi_scale: f64,
 ) -> Option<ExcelPickResult> {
     let scale = dpi_scale.max(0.5);
+    let (hx, hy) = physical_to_window_logical(root_hwnd, x, y, scale);
     let lx = ((x as f64) / scale).round() as i32;
     let ly = ((y as f64) / scale).round() as i32;
+    let (wl, wt, wr, wb) = query_window_bounds_tuple(root_hwnd);
+    let (hwl, hwt) = physical_to_window_logical(root_hwnd, wl, wt, scale);
+    let (hwr, hwb) = physical_to_window_logical(root_hwnd, wr, wb, scale);
+    let lwl = ((wl as f64) / scale).round() as i32;
+    let lwt = ((wt as f64) / scale).round() as i32;
+    let lwr = ((wr as f64) / scale).round() as i32;
+    let lwb = ((wb as f64) / scale).round() as i32;
+    let solver = EXCEL_RECT_SOLVER_PS;
 
     let script = format!(
         r#"
+{solver}
 $app = $null
 $usedProgId = ''
 foreach ($prog in @('Excel.Application', 'KET.Application', 'Ket.Application')) {{
@@ -552,18 +879,17 @@ $wb = $app.ActiveWorkbook
 $win = $app.ActiveWindow
 $sh = $app.ActiveSheet
 
-$cell = $null
-try {{ $cell = $win.RangeFromPoint([int]{x}, [int]{y}) }} catch {{}}
-if ($null -eq $cell) {{
-  try {{ $cell = $win.RangeFromPoint([int]{lx}, [int]{ly}) }} catch {{}}
-}}
-if ($null -eq $cell) {{ exit 0 }}
+$hit = Try-ExcelCellWithSpace $win {hx} {hy} {x} {y} {lx} {ly} ''
+if ($null -eq $hit) {{ exit 0 }}
+$cell = $hit.cell
+$rng = $cell
+try {{ if ($cell.MergeCells) {{ $rng = $cell.MergeArea }} }} catch {{}}
 
 $addr = ''
-try {{ $addr = [string]$cell.Address($false, $false) }} catch {{ exit 0 }}
+try {{ $addr = [string]$rng.Address($false, $false) }} catch {{ exit 0 }}
 if ([string]::IsNullOrWhiteSpace($addr)) {{ exit 0 }}
 
-try {{ [void]$cell.Select() }} catch {{}}
+try {{ [void]$rng.Select() }} catch {{}}
 $row = [int]$cell.Row
 $col = [int]$cell.Column
 $disp = ''; try {{ $disp = [string]$cell.Text }} catch {{}}
@@ -572,18 +898,14 @@ $formula = ''; try {{ $f = [string]$cell.Formula; if ($f.StartsWith('=')) {{ $fo
 $colHdr = ''; if ($row -gt 1) {{ try {{ $colHdr = ([string]$sh.Cells.Item(1, $col).Text).Trim() }} catch {{}} }}
 $rowHdr = ''; if ($col -gt 1) {{ try {{ $rowHdr = ([string]$sh.Cells.Item($row, 1).Text).Trim() }} catch {{}} }}
 
-$rectObj = $null
-try {{
-  $sx1 = [int]$win.PointsToScreenPixelsX([double]$cell.Left)
-  $sy1 = [int]$win.PointsToScreenPixelsY([double]$cell.Top)
-  $sx2 = [int]$win.PointsToScreenPixelsX([double]($cell.Left + $cell.Width))
-  $sy2 = [int]$win.PointsToScreenPixelsY([double]($cell.Top + $cell.Height))
-  $sw = [Math]::Max(16, $sx2 - $sx1)
-  $shPx = [Math]::Max(14, $sy2 - $sy1)
-  if ($sw -lt 2000 -and $shPx -lt 1200) {{
-    $rectObj = @{{ x = $sx1; y = $sy1; w = $sw; h = $shPx }}
-  }}
-}} catch {{}}
+$minX = if ($hit.space -eq 'hwnd') {{ {hwl} }} elseif ($hit.space -eq 'div_dpi') {{ {lwl} }} else {{ {wl} }}
+$minY = if ($hit.space -eq 'hwnd') {{ {hwt} }} elseif ($hit.space -eq 'div_dpi') {{ {lwt} }} else {{ {wt} }}
+$maxX = if ($hit.space -eq 'hwnd') {{ {hwr} }} elseif ($hit.space -eq 'div_dpi') {{ {lwr} }} else {{ {wr} }}
+$maxY = if ($hit.space -eq 'hwnd') {{ {hwb} }} elseif ($hit.space -eq 'div_dpi') {{ {lwb} }} else {{ {wb} }}
+
+$solved = Resolve-ExcelRangeRect $win $rng $hit.x $hit.y $hit.x $hit.y {scale} ($minX - 4) ($minY - 4) ($maxX + 4) ($maxY + 4)
+$rectObj = if ($null -ne $solved) {{ $solved.rect }} else {{ $null }}
+$rectMethod = if ($null -ne $solved) {{ [string]$solved.method }} else {{ '' }}
 
 @{{
   progId = $usedProgId
@@ -591,37 +913,43 @@ try {{
   workbookName = [string]$wb.Name
   sheet = [string]$sh.Name
   address = $addr
-  isRange = $false
-  rows = 1
-  cols = 1
+  isRange = ($rng.Rows.Count -gt 1 -or $rng.Columns.Count -gt 1)
+  rows = [int]$rng.Rows.Count
+  cols = [int]$rng.Columns.Count
   displayText = $disp
   value = $val
   formula = $formula
   colHeader = $colHdr
   rowHeader = $rowHdr
   screenRect = $rectObj
+  coordSpace = [string]$hit.space
+  rectMethod = $rectMethod
 }} | ConvertTo-Json -Compress -Depth 4
 "#
     );
 
     let resp = broker.call(BrokerRequest::RunPs51 {
         script,
-        timeout_ms: 1600,
+        timeout_ms: 1900,
     });
     if !resp.ok || resp.text.trim().is_empty() {
         return None;
     }
-    let parsed = serde_json::from_str::<ExcelPickResult>(resp.text.trim()).ok()?;
+    let mut parsed = serde_json::from_str::<ExcelPickResult>(resp.text.trim()).ok()?;
     if parsed.address.is_empty() {
-        None
-    } else {
-        Some(parsed)
+        return None;
     }
+    if let Some(raw_rect) = parsed.screen_rect {
+        let phys = map_office_rect_to_physical(root_hwnd, raw_rect, &parsed.coord_space, scale);
+        parsed.screen_rect = validate_office_rect_against_anchors(phys, &[(x, y)], 10);
+    }
+    Some(parsed)
 }
 
 /// COM-backed Excel / WPS Spreadsheets cell-range box selection from `(x1, y1)` to `(x2, y2)`.
 pub fn pick_excel_range_com(
     broker: &BrokerClient,
+    root_hwnd: HWND,
     x1: i32,
     y1: i32,
     x2: i32,
@@ -629,13 +957,24 @@ pub fn pick_excel_range_com(
     dpi_scale: f64,
 ) -> Option<ExcelPickResult> {
     let scale = dpi_scale.max(0.5);
+    let (hx1, hy1) = physical_to_window_logical(root_hwnd, x1, y1, scale);
+    let (hx2, hy2) = physical_to_window_logical(root_hwnd, x2, y2, scale);
     let lx1 = ((x1 as f64) / scale).round() as i32;
     let ly1 = ((y1 as f64) / scale).round() as i32;
     let lx2 = ((x2 as f64) / scale).round() as i32;
     let ly2 = ((y2 as f64) / scale).round() as i32;
+    let (wl, wt, wr, wb) = query_window_bounds_tuple(root_hwnd);
+    let (hwl, hwt) = physical_to_window_logical(root_hwnd, wl, wt, scale);
+    let (hwr, hwb) = physical_to_window_logical(root_hwnd, wr, wb, scale);
+    let lwl = ((wl as f64) / scale).round() as i32;
+    let lwt = ((wt as f64) / scale).round() as i32;
+    let lwr = ((wr as f64) / scale).round() as i32;
+    let lwb = ((wb as f64) / scale).round() as i32;
+    let solver = EXCEL_RECT_SOLVER_PS;
 
     let script = format!(
         r#"
+{solver}
 $app = $null
 $usedProgId = ''
 foreach ($prog in @('Excel.Application', 'KET.Application', 'Ket.Application')) {{
@@ -646,23 +985,15 @@ $wb = $app.ActiveWorkbook
 $win = $app.ActiveWindow
 $sh = $app.ActiveSheet
 
-function Try-ExcelCell($w, $px, $py, $lx, $ly) {{
-  $c = $null
-  try {{ $c = $w.RangeFromPoint([int]$px, [int]$py) }} catch {{}}
-  if ($null -eq $c) {{
-    try {{ $c = $w.RangeFromPoint([int]$lx, [int]$ly) }} catch {{}}
-  }}
-  if ($null -ne $c) {{
-    try {{ $a = [string]$c.Address($false, $false); if (-not [string]::IsNullOrWhiteSpace($a)) {{ return $c }} }} catch {{}}
-  }}
-  return $null
-}}
-
-$c1 = Try-ExcelCell $win {x1} {y1} {lx1} {ly1}
-$c2 = Try-ExcelCell $win {x2} {y2} {lx2} {ly2}
-if ($null -eq $c1 -and $null -eq $c2) {{ exit 0 }}
-if ($null -eq $c1) {{ $c1 = $c2 }}
-if ($null -eq $c2) {{ $c2 = $c1 }}
+$hit1 = Try-ExcelCellWithSpace $win {hx1} {hy1} {x1} {y1} {lx1} {ly1} ''
+$prefSpace = if ($null -ne $hit1) {{ [string]$hit1.space }} else {{ '' }}
+$hit2 = Try-ExcelCellWithSpace $win {hx2} {hy2} {x2} {y2} {lx2} {ly2} $prefSpace
+if ($null -eq $hit1 -and $null -eq $hit2) {{ exit 0 }}
+if ($null -eq $hit1) {{ $hit1 = $hit2 }}
+if ($null -eq $hit2) {{ $hit2 = $hit1 }}
+$c1 = $hit1.cell
+$c2 = $hit2.cell
+$usedSpace = [string]$hit1.space
 
 $rng = $sh.Range($c1, $c2)
 try {{ [void]$rng.Select() }} catch {{}}
@@ -712,16 +1043,14 @@ if ($rowCount -gt $maxR -or $colCount -gt $maxC) {{
   $tableLines.Add("... (truncated: showing ${{maxR}}x${{maxC}} of ${{rowCount}}x${{colCount}})")
 }}
 
-$rectObj = $null
-try {{
-  $sx1 = [int]$win.PointsToScreenPixelsX([double]$rng.Left)
-  $sy1 = [int]$win.PointsToScreenPixelsY([double]$rng.Top)
-  $sx2 = [int]$win.PointsToScreenPixelsX([double]($rng.Left + $rng.Width))
-  $sy2 = [int]$win.PointsToScreenPixelsY([double]($rng.Top + $rng.Height))
-  $sw = [Math]::Max(18, $sx2 - $sx1)
-  $shPx = [Math]::Max(16, $sy2 - $sy1)
-  $rectObj = @{{ x = $sx1; y = $sy1; w = $sw; h = $shPx }}
-}} catch {{}}
+$minX = if ($usedSpace -eq 'hwnd') {{ {hwl} }} elseif ($usedSpace -eq 'div_dpi') {{ {lwl} }} else {{ {wl} }}
+$minY = if ($usedSpace -eq 'hwnd') {{ {hwt} }} elseif ($usedSpace -eq 'div_dpi') {{ {lwt} }} else {{ {wt} }}
+$maxX = if ($usedSpace -eq 'hwnd') {{ {hwr} }} elseif ($usedSpace -eq 'div_dpi') {{ {lwr} }} else {{ {wr} }}
+$maxY = if ($usedSpace -eq 'hwnd') {{ {hwb} }} elseif ($usedSpace -eq 'div_dpi') {{ {lwb} }} else {{ {wb} }}
+
+$solved = Resolve-ExcelRangeRect $win $rng $hit1.x $hit1.y $hit2.x $hit2.y {scale} ($minX - 4) ($minY - 4) ($maxX + 4) ($maxY + 4)
+$rectObj = if ($null -ne $solved) {{ $solved.rect }} else {{ $null }}
+$rectMethod = if ($null -ne $solved) {{ [string]$solved.method }} else {{ '' }}
 
 @{{
   progId = $usedProgId
@@ -736,23 +1065,33 @@ try {{
   tablePreview = ($tableLines -join "`n")
   formulasPreview = ($formulaLines -join "; ")
   screenRect = $rectObj
+  coordSpace = $usedSpace
+  rectMethod = $rectMethod
 }} | ConvertTo-Json -Compress -Depth 4
 "#
     );
 
     let resp = broker.call(BrokerRequest::RunPs51 {
         script,
-        timeout_ms: 1900,
+        timeout_ms: 2200,
     });
     if !resp.ok || resp.text.trim().is_empty() {
         return None;
     }
-    let parsed = serde_json::from_str::<ExcelPickResult>(resp.text.trim()).ok()?;
+    let mut parsed = serde_json::from_str::<ExcelPickResult>(resp.text.trim()).ok()?;
     if parsed.address.is_empty() {
-        None
-    } else {
-        Some(parsed)
+        return None;
     }
+    if let Some(raw_rect) = parsed.screen_rect {
+        let phys = map_office_rect_to_physical(root_hwnd, raw_rect, &parsed.coord_space, scale);
+        // Validate against physical drag points when both endpoints landed inside the grid,
+        // or at least one endpoint if the user dragged slightly outside the sheet viewport.
+        let both_ok = validate_office_rect_against_anchors(phys, &[(x1, y1), (x2, y2)], 12);
+        let one_ok = validate_office_rect_against_anchors(phys, &[(x1, y1)], 12)
+            .or_else(|| validate_office_rect_against_anchors(phys, &[(x2, y2)], 12));
+        parsed.screen_rect = both_ok.or(one_ok);
+    }
+    Some(parsed)
 }
 
 /// COM-backed PowerPoint / WPS Presentation single design-element hit-test at `(x, y)`.
@@ -760,11 +1099,13 @@ try {{
 /// `PointsToScreenPixelsX/Y` hit-testing (with `GroupItems` drill-down) for full WPS compatibility.
 pub fn pick_ppt_element_com(
     broker: &BrokerClient,
+    root_hwnd: HWND,
     x: i32,
     y: i32,
     dpi_scale: f64,
 ) -> Option<PptElementPickResult> {
     let scale = dpi_scale.max(0.5);
+    let (hx, hy) = physical_to_window_logical(root_hwnd, x, y, scale);
     let lx = ((x as f64) / scale).round() as i32;
     let ly = ((y as f64) / scale).round() as i32;
 
@@ -782,24 +1123,56 @@ $slide = $null
 try {{ $slide = $win.View.Slide }} catch {{}}
 if ($null -eq $slide) {{ exit 0 }}
 
-function Get-ShapeRect($w, $sh) {{
+function Get-ShapeRectCandidates($w, $sh, $dpiScale) {{
+  $list = @()
   try {{
-    $x1 = [int]$w.PointsToScreenPixelsX([double]$sh.Left)
-    $y1 = [int]$w.PointsToScreenPixelsY([double]$sh.Top)
-    $x2 = [int]$w.PointsToScreenPixelsX([double]($sh.Left + $sh.Width))
-    $y2 = [int]$w.PointsToScreenPixelsY([double]($sh.Top + $sh.Height))
-    return @{{ x = $x1; y = $y1; w = [Math]::Max(8, $x2 - $x1); h = [Math]::Max(8, $y2 - $y1); x2 = $x2; y2 = $y2 }}
-  }} catch {{ return $null }}
+    $l = [double]$sh.Left; $t = [double]$sh.Top
+    $r = $l + [double]$sh.Width; $b = $t + [double]$sh.Height
+    $x1 = [double]$w.PointsToScreenPixelsX($l)
+    $y1 = [double]$w.PointsToScreenPixelsY($t)
+    $x2 = [double]$w.PointsToScreenPixelsX($r)
+    $y2 = [double]$w.PointsToScreenPixelsY($b)
+    $ox = [double]$w.PointsToScreenPixelsX(0.0)
+    $oy = [double]$w.PointsToScreenPixelsY(0.0)
+    $zoom = 1.0
+    try {{ $zv = [double]$w.View.Zoom; if ($zv -ge 10 -and $zv -le 400) {{ $zoom = $zv / 100.0 }} }} catch {{}}
+    $ptToPx = (96.0 / 72.0) * $dpiScale * $zoom
+    $rawCands = @(
+      @($x1, $y1, $x2, $y2),
+      @(($x1 * $dpiScale), ($y1 * $dpiScale), ($x2 * $dpiScale), ($y2 * $dpiScale)),
+      @(($ox + ($x1 - $ox) * $dpiScale), ($oy + ($y1 - $oy) * $dpiScale), ($ox + ($x2 - $ox) * $dpiScale), ($oy + ($y2 - $oy) * $dpiScale)),
+      @(($ox + ($x1 - $ox) * $ptToPx), ($oy + ($y1 - $oy) * $ptToPx), ($ox + ($x2 - $ox) * $ptToPx), ($oy + ($y2 - $oy) * $ptToPx))
+    )
+    foreach ($c in $rawCands) {{
+      $ix1 = [int][Math]::Round($c[0]); $iy1 = [int][Math]::Round($c[1])
+      $ix2 = [int][Math]::Round($c[2]); $iy2 = [int][Math]::Round($c[3])
+      if (($ix2 - $ix1) -ge 4 -and ($iy2 - $iy1) -ge 4) {{
+        $list += ,@{{ x = $ix1; y = $iy1; w = [Math]::Max(8, $ix2 - $ix1); h = [Math]::Max(8, $iy2 - $iy1); x2 = $ix2; y2 = $iy2 }}
+      }}
+    }}
+  }} catch {{}}
+  return $list
 }}
 
-function Drill-Group($w, $sh, $px, $py) {{
+function Get-ShapeRectForPoint($w, $sh, $px, $py, $dpiScale) {{
+  $cands = Get-ShapeRectCandidates $w $sh $dpiScale
+  foreach ($rc in $cands) {{
+    if ($px -ge ($rc.x - 4) -and $px -le ($rc.x2 + 4) -and $py -ge ($rc.y - 4) -and $py -le ($rc.y2 + 4)) {{
+      return $rc
+    }}
+  }}
+  if ($cands.Count -gt 0) {{ return $cands[0] }}
+  return $null
+}}
+
+function Drill-Group($w, $sh, $px, $py, $dpiScale) {{
   try {{
     if ([int]$sh.Type -eq 6 -and $sh.GroupItems.Count -gt 0) {{
       $bestChild = $null
       $bestArea = [double]::MaxValue
       for ($i = $sh.GroupItems.Count; $i -ge 1; $i--) {{
         $ch = $sh.GroupItems.Item($i)
-        $rc = Get-ShapeRect $w $ch
+        $rc = Get-ShapeRectForPoint $w $ch $px $py $dpiScale
         if ($null -ne $rc -and $px -ge $rc.x -and $px -le $rc.x2 -and $py -ge $rc.y -and $py -le $rc.y2) {{
           $area = [double]$rc.w * [double]$rc.h
           if ($area -lt $bestArea) {{
@@ -815,8 +1188,10 @@ function Drill-Group($w, $sh, $px, $py) {{
 }}
 
 $target = $null
+$hitX = {hx}; $hitY = {hy}; $hitSpace = 'hwnd'
+$ptList = @(@({hx}, {hy}, 'hwnd'), @({x}, {y}, 'physical'), @({lx}, {ly}, 'div_dpi'))
 # 1. Direct COM RangeFromPoint
-foreach ($pt in @(@({x}, {y}), @({lx}, {ly}))) {{
+foreach ($pt in $ptList) {{
   if ($null -ne $target) {{ break }}
   try {{
     $hit = $win.RangeFromPoint([int]$pt[0], [int]$pt[1])
@@ -824,11 +1199,13 @@ foreach ($pt in @(@({x}, {y}), @({lx}, {ly}))) {{
       $hasName = $false
       try {{ $n = [string]$hit.Name; if (-not [string]::IsNullOrWhiteSpace($n)) {{ $hasName = $true }} }} catch {{}}
       if ($hasName) {{
-        $target = Drill-Group $win $hit $pt[0] $pt[1]
+        $hitX = [int]$pt[0]; $hitY = [int]$pt[1]; $hitSpace = [string]$pt[2]
+        $target = Drill-Group $win $hit $hitX $hitY {scale}
       }} else {{
         try {{
           $owner = $hit.Parent.Parent
           if ($null -ne $owner -and -not [string]::IsNullOrWhiteSpace([string]$owner.Name)) {{
+            $hitX = [int]$pt[0]; $hitY = [int]$pt[1]; $hitSpace = [string]$pt[2]
             $target = $owner
           }}
         }} catch {{}}
@@ -842,21 +1219,22 @@ if ($null -eq $target) {{
   $best = $null
   $bestZ = -1
   $bestArea = [double]::MaxValue
-  foreach ($pt in @(@({x}, {y}), @({lx}, {ly}))) {{
+  foreach ($pt in $ptList) {{
     if ($null -ne $best) {{ break }}
     for ($i = $slide.Shapes.Count; $i -ge 1; $i--) {{
       $sh = $slide.Shapes.Item($i)
       try {{ if (-not $sh.Visible) {{ continue }} }} catch {{}}
-      $rc = Get-ShapeRect $win $sh
-      if ($null -ne $rc -and $pt[0] -ge $rc.x -and $pt[0] -le $rc.x2 -and $pt[1] -ge $rc.y -and $pt[1] -le $rc.y2) {{
-        $cand = Drill-Group $win $sh $pt[0] $pt[1]
-        $crc = Get-ShapeRect $win $cand
+      $rc = Get-ShapeRectForPoint $win $sh ([int]$pt[0]) ([int]$pt[1]) {scale}
+      if ($null -ne $rc -and [int]$pt[0] -ge $rc.x -and [int]$pt[0] -le $rc.x2 -and [int]$pt[1] -ge $rc.y -and [int]$pt[1] -le $rc.y2) {{
+        $cand = Drill-Group $win $sh ([int]$pt[0]) ([int]$pt[1]) {scale}
+        $crc = Get-ShapeRectForPoint $win $cand ([int]$pt[0]) ([int]$pt[1]) {scale}
         $z = 0; try {{ $z = [int]$sh.ZOrderPosition }} catch {{}}
         $area = if ($null -ne $crc) {{ [double]$crc.w * [double]$crc.h }} else {{ [double]$rc.w * [double]$rc.h }}
         if ($z -gt $bestZ -or ($z -eq $bestZ -and $area -lt $bestArea)) {{
           $best = $cand
           $bestZ = $z
           $bestArea = $area
+          $hitX = [int]$pt[0]; $hitY = [int]$pt[1]; $hitSpace = [string]$pt[2]
         }}
       }}
     }}
@@ -942,7 +1320,7 @@ try {{
   }}
 }} catch {{}}
 
-$finalRc = Get-ShapeRect $win $target
+$finalRc = Get-ShapeRectForPoint $win $target $hitX $hitY {scale}
 $rectObj = if ($null -ne $finalRc) {{ @{{ x = $finalRc.x; y = $finalRc.y; w = $finalRc.w; h = $finalRc.h }} }} else {{ $null }}
 
 @{{
@@ -960,6 +1338,7 @@ $rectObj = if ($null -ne $finalRc) {{ @{{ x = $finalRc.x; y = $finalRc.y; w = $f
   geometry = $geom
   style = ($styleParts -join ", ")
   screenRect = $rectObj
+  coordSpace = $hitSpace
 }} | ConvertTo-Json -Compress -Depth 4
 "#
     );
@@ -971,12 +1350,15 @@ $rectObj = if ($null -ne $finalRc) {{ @{{ x = $finalRc.x; y = $finalRc.y; w = $f
     if !resp.ok || resp.text.trim().is_empty() {
         return None;
     }
-    let parsed = serde_json::from_str::<PptElementPickResult>(resp.text.trim()).ok()?;
+    let mut parsed = serde_json::from_str::<PptElementPickResult>(resp.text.trim()).ok()?;
     if parsed.shape_name.is_empty() && parsed.text.is_empty() {
-        None
-    } else {
-        Some(parsed)
+        return None;
     }
+    if let Some(raw_rect) = parsed.screen_rect {
+        let phys = map_office_rect_to_physical(root_hwnd, raw_rect, &parsed.coord_space, scale);
+        parsed.screen_rect = validate_office_rect_against_anchors(phys, &[(x, y)], 24);
+    }
+    Some(parsed)
 }
 
 pub fn run(ctx: &AdapterContext) -> Option<AdapterOutput> {
@@ -1225,5 +1607,114 @@ mod tests {
         let wps_guidance =
             format_live_edit_guidance("excel", true, "D:\\work\\q1.xlsx | Sheet1!B2:D4");
         assert!(wps_guidance[0].contains("wps-office"));
+    }
+
+    #[test]
+    fn validates_and_reconciles_office_screen_rects_against_dpi_and_wps_drift() {
+        // Real WPS Spreadsheets raw-point drift case from 125% DPI capture:
+        // drag anchors (1775, 663) -> (1946, 828), broken p2s rect [1676, 591, 144, 116]
+        let broken_wps_rect = ScreenRect {
+            x: 1676,
+            y: 591,
+            w: 144,
+            h: 116,
+        };
+        assert!(
+            validate_office_rect_against_anchors(broken_wps_rect, &[(1775, 663), (1946, 828)], 12)
+                .is_none(),
+            "drifted WPS raw-points rect must be rejected"
+        );
+
+        // True physical C7:E14 rect containing both anchors passes cleanly
+        let true_c7_e14 = ScreenRect {
+            x: 1740,
+            y: 649,
+            w: 240,
+            h: 193,
+        };
+        let checked =
+            validate_office_rect_against_anchors(true_c7_e14, &[(1775, 663), (1946, 828)], 12)
+                .expect("true C7:E14 rect should pass anchor validation");
+        assert_eq!((checked.x, checked.y, checked.w, checked.h), (1740, 649, 240, 193));
+
+        // div_dpi inverse transform restores 96-DPI virtualized rect to physical screen pixels
+        let logical_rect = ScreenRect {
+            x: 1392,
+            y: 519,
+            w: 192,
+            h: 154,
+        };
+        let mapped = map_office_rect_to_physical(HWND::default(), logical_rect, "div_dpi", 1.25);
+        assert_eq!(mapped.x, 1740);
+        assert_eq!(mapped.y, 649);
+        assert_eq!(mapped.w, 240);
+        assert_eq!(mapped.h, 193);
+    }
+
+    #[test]
+    fn excel_rect_solver_ps_runs_mock_wps_raw_points_and_freeze_pane_bsearch() {
+        // End-to-end PowerShell 5.1 verification of EXCEL_RECT_SOLVER_PS with mock Window COM objects:
+        // Case 1: WPS raw-points bug (PointsToScreenPixels adds 1:1 pt at 125% DPI) -> p2s_verified
+        // Case 2: Frozen pane where PointsToScreenPixels is shifted by +200px -> rfp_bsearch locks ±1px!
+        let test_script = format!(
+            r#"
+{solver}
+# Mock Window with true physical cell grid: origin=(1580,504), colW=80px (48pt), rowH=24px (14.4pt) at 125% DPI (100% zoom)
+# Target range C7:E14 => rows 7..14, cols 3..5 => true physical box x=[1740,1980), y=[648,840) (w=240, h=192)
+function New-MockWin($brokenMode) {{
+  $w = [pscustomobject]@{{ Zoom = 100; BrokenMode = $brokenMode }}
+  $w | Add-Member -MemberType ScriptMethod -Name RangeFromPoint -Value {{
+    param([int]$px, [int]$py)
+    if ($px -lt 1580 -or $py -lt 504) {{ return $null }}
+    $c = [int][Math]::Floor(($px - 1580) / 80.0) + 1
+    $r = [int][Math]::Floor(($py - 504) / 24.0) + 1
+    return [pscustomobject]@{{ Row = $r; Column = $c; Address = {{ param($a,$b) "R${{r}}C${{c}}" }} }}
+  }}
+  $w | Add-Member -MemberType ScriptMethod -Name PointsToScreenPixelsX -Value {{
+    param([double]$pt)
+    if ($this.BrokenMode -eq 'wps_raw_pt') {{ return [int][Math]::Round(1580.0 + $pt) }}
+    if ($this.BrokenMode -eq 'freeze_shifted') {{ return [int][Math]::Round(1380.0 + $pt * 1.6666667) }}
+    return [int][Math]::Round(1580.0 + $pt * (96.0 / 72.0) * 1.25)
+  }}
+  $w | Add-Member -MemberType ScriptMethod -Name PointsToScreenPixelsY -Value {{
+    param([double]$pt)
+    if ($this.BrokenMode -eq 'wps_raw_pt') {{ return [int][Math]::Round(504.0 + $pt) }}
+    if ($this.BrokenMode -eq 'freeze_shifted') {{ return [int][Math]::Round(304.0 + $pt * 1.6666667) }}
+    return [int][Math]::Round(504.0 + $pt * (96.0 / 72.0) * 1.25)
+  }}
+  return $w
+}}
+$rng = [pscustomobject]@{{
+  Row = 7; Column = 3;
+  Rows = [pscustomobject]@{{ Count = 8 }};
+  Columns = [pscustomobject]@{{ Count = 3 }};
+  Left = 96.0; Top = 86.4; Width = 144.0; Height = 115.2
+}}
+$r1 = Resolve-ExcelRangeRect (New-MockWin 'excel365') $rng 1775 663 1946 828 1.25 1536 244 2442 1306
+$r2 = Resolve-ExcelRangeRect (New-MockWin 'wps_raw_pt') $rng 1775 663 1946 828 1.25 1536 244 2442 1306
+$r3 = Resolve-ExcelRangeRect (New-MockWin 'freeze_shifted') $rng 1775 663 1946 828 1.25 1536 244 2442 1306
+@{{ excel365 = $r1; wps = $r2; freeze = $r3 }} | ConvertTo-Json -Compress -Depth 5
+"#,
+            solver = EXCEL_RECT_SOLVER_PS
+        );
+        let out = crate::broker::execute_ps51_local(&test_script, 5000)
+            .expect("powershell mock solver test should execute");
+        let v: serde_json::Value = serde_json::from_str(&out).expect("valid JSON");
+        for (label, expected_method) in [
+            ("excel365", "p2s_verified"),
+            ("wps", "p2s_verified"),
+            ("freeze", "rfp_bsearch"),
+        ] {
+            let entry = &v[label];
+            assert_eq!(entry["method"].as_str(), Some(expected_method), "case={label} raw={out}");
+            let rx = entry["rect"]["x"].as_i64().unwrap();
+            let ry = entry["rect"]["y"].as_i64().unwrap();
+            let rw = entry["rect"]["w"].as_i64().unwrap();
+            let rh = entry["rect"]["h"].as_i64().unwrap();
+            assert!((rx - 1740).abs() <= 1, "{label} x={rx}");
+            assert!((ry - 648).abs() <= 1, "{label} y={ry}");
+            assert!((rw - 240).abs() <= 2, "{label} w={rw}");
+            assert!((rh - 192).abs() <= 2, "{label} h={rh}");
+        }
     }
 }
