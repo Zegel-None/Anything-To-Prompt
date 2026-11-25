@@ -28,7 +28,10 @@ pub struct AppConfig {
     pub ctrl_hold_ms: u64,
     pub capture_keep_messages: usize,
     pub capture_orphan_ttl_minutes: u64,
-    pub exclude_from_capture: bool,
+    /// Opt-in privacy flag: when true, applies WDA_EXCLUDEFROMCAPTURE to Bar & Overlay.
+    /// Defaults to `false` so remote desktop / virtual display / screen-streaming users
+    /// (GameViewer, Parsec, Moonlight, ToDesk, RustDesk, OBS) can see the Bar & selection overlay!
+    pub hide_from_screen_capture: bool,
     pub accept_injected_input: bool,
     pub output_target: OutputTarget,
     pub active_harness: String,
@@ -48,7 +51,7 @@ impl Default for AppConfig {
             ctrl_hold_ms: 220,
             capture_keep_messages: 20,
             capture_orphan_ttl_minutes: 60,
-            exclude_from_capture: true,
+            hide_from_screen_capture: false,
             accept_injected_input: false,
             output_target: OutputTarget::Dsh,
             active_harness: "dsh".to_string(),

@@ -1281,7 +1281,7 @@ pub fn run() {
         config.ctrl_hold_ms,
     );
     let initial_width = config.bar_width;
-    let exclude_capture = config.exclude_from_capture && !cli.dev_allow_capture;
+    let exclude_capture = config.hide_from_screen_capture && !cli.dev_allow_capture;
 
     let initial_mode_str = match cli.dev_state {
         Some(DevTargetState::Lip) | Some(DevTargetState::Hidden) => "lip",
