@@ -582,6 +582,7 @@ fn harness_focus_desktop(
     harness: String,
     session_id: Option<String>,
     title: Option<String>,
+    workspace_path: Option<String>,
 ) -> Result<String, String> {
     let kind = harness::HarnessKind::parse(&harness);
     let dsh_port = app
@@ -589,7 +590,7 @@ fn harness_focus_desktop(
         .and_then(|s| s.dsh_conn.lock().ok().and_then(|c| c.active_port));
     // Step Bar out of the way so the target desktop app receives clean unobstructed foreground focus
     dispatch_state_event(&app, StateEvent::OutsideClickHide);
-    harness::focus_harness_desktop(kind, session_id, title, dsh_port)
+    harness::focus_harness_desktop(kind, session_id, title, workspace_path, dsh_port)
 }
 
 #[derive(Debug, Clone, serde::Serialize)]

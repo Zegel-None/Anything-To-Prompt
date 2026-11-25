@@ -23,8 +23,9 @@ use windows::Win32::System::Threading::{
 };
 use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GetWindowRect, GetWindowThreadProcessId, IsIconic, IsWindowVisible,
-    SetForegroundWindow, ShowWindow, SW_RESTORE, SW_SHOW, SW_SHOWMINNOACTIVE,
+    BringWindowToTop, EnumWindows, GetWindowRect, GetWindowThreadProcessId, IsIconic,
+    IsWindowVisible, SetForegroundWindow, SetWindowPos, ShowWindow, HWND_NOTOPMOST, HWND_TOPMOST,
+    SWP_NOMOVE, SWP_NOSIZE, SW_RESTORE, SW_SHOW, SW_SHOWMINNOACTIVE,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -676,6 +677,7 @@ fn select_conversation_in_window_uia(hwnd: HWND, target_title: &str) -> bool {
         let _ = GetWindowRect(hwnd, &mut win_rc);
     }
     let sidebar_right = win_rc.left + 500;
+    let titlebar_bottom = win_rc.top + 52;
 
     let mut queue: std::collections::VecDeque<(uiautomation::UIElement, usize)> =
         std::collections::VecDeque::new();
@@ -685,39 +687,42 @@ fn select_conversation_in_window_uia(hwnd: HWND, target_title: &str) -> bool {
 
     while let Some((el, depth)) = queue.pop_front() {
         visited += 1;
-        if visited > 1800 {
+        if visited > 2200 {
             break;
         }
         if let Ok(name) = el.get_name() {
             let score = title_matches_target(&name, target);
             if score > 0 {
-                let in_sidebar = el
-                    .get_bounding_rectangle()
-                    .ok()
-                    .map(|r| {
-                        let w = r.get_right() - r.get_left();
-                        let h = r.get_bottom() - r.get_top();
-                        w > 12 && h > 10 && h < 120 && r.get_left() <= sidebar_right
-                    })
-                    .unwrap_or(false);
-                let replace = match &best {
-                    None => true,
-                    Some((bs, b_side, _)) => (in_sidebar && !*b_side) || (in_sidebar == *b_side && score > *bs),
-                };
-                if replace {
-                    best = Some((score, in_sidebar, el.clone()));
-                    if score == 3 && in_sidebar {
-                        break;
+                let rect_info = el.get_bounding_rectangle().ok().map(|r| {
+                    let w = r.get_right() - r.get_left();
+                    let h = r.get_bottom() - r.get_top();
+                    let below_titlebar = r.get_top() > titlebar_bottom;
+                    let valid_box = w > 12 && h > 10 && h < 120;
+                    let in_sidebar = valid_box && below_titlebar && r.get_left() <= sidebar_right;
+                    (valid_box && below_titlebar, in_sidebar)
+                });
+                if let Some((true, in_sidebar)) = rect_info {
+                    let replace = match &best {
+                        None => true,
+                        Some((bs, b_side, _)) => {
+                            (in_sidebar && !*b_side) || (in_sidebar == *b_side && score > *bs)
+                        }
+                    };
+                    if replace {
+                        best = Some((score, in_sidebar, el.clone()));
+                        if score == 3 && in_sidebar {
+                            break;
+                        }
                     }
                 }
             }
         }
-        if depth < 14 {
+        if depth < 16 {
             if let Ok(mut child) = walker.get_first_child(&el) {
                 let mut sibs = 0usize;
                 loop {
                     sibs += 1;
-                    if sibs > 160 {
+                    if sibs > 180 {
                         break;
                     }
                     queue.push_back((child.clone(), depth + 1));
@@ -743,13 +748,102 @@ fn select_conversation_in_window_uia(hwnd: HWND, target_title: &str) -> bool {
             return true;
         }
     }
+    if let Ok(parent) = walker.get_parent(&chosen) {
+        if let Ok(inv) = parent.get_pattern::<uiautomation::patterns::UIInvokePattern>() {
+            if inv.invoke().is_ok() {
+                return true;
+            }
+        }
+        if let Ok(sel) = parent.get_pattern::<uiautomation::patterns::UISelectionItemPattern>() {
+            if sel.select().is_ok() {
+                return true;
+            }
+        }
+    }
     chosen.click().is_ok()
+}
+
+pub fn resolve_claude_desktop_exe() -> Option<PathBuf> {
+    if let Ok(local) = std::env::var("LOCALAPPDATA") {
+        for rel in [
+            r"AnthropicClaude\Claude.exe",
+            r"Programs\claude-desktop\Claude.exe",
+            r"Programs\Claude\Claude.exe",
+        ] {
+            let p = PathBuf::from(&local).join(rel);
+            if p.exists() {
+                return Some(p);
+            }
+        }
+    }
+    None
+}
+
+fn find_msix_app_launch_uri(prefix_lower: &str) -> Option<String> {
+    let local = std::env::var("LOCALAPPDATA").ok()?;
+    let packages_dir = PathBuf::from(local).join("Packages");
+    let entries = fs::read_dir(packages_dir).ok()?;
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name.to_ascii_lowercase().starts_with(prefix_lower) {
+            return Some(format!(r"shell:AppsFolder\{name}!App"));
+        }
+    }
+    None
+}
+
+fn launch_uri_or_exe_foreground(target: &str) {
+    let verb_w = to_wide_null("open");
+    let target_w = to_wide_null(target);
+    unsafe {
+        let _ = ShellExecuteW(
+            None,
+            PCWSTR(verb_w.as_ptr()),
+            PCWSTR(target_w.as_ptr()),
+            PCWSTR::null(),
+            PCWSTR::null(),
+            SW_SHOW,
+        );
+    }
+}
+
+fn bring_hwnd_to_front_force(target_hwnd: HWND) {
+    unsafe {
+        if IsIconic(target_hwnd).as_bool() {
+            let _ = ShowWindow(target_hwnd, SW_RESTORE);
+        } else {
+            let _ = ShowWindow(target_hwnd, SW_SHOW);
+        }
+        crate::window::send_dummy_vk_e8();
+        let _ = BringWindowToTop(target_hwnd);
+        // Temporary TOPMOST -> NOTOPMOST pulse guarantees the desktop app rises to the very front
+        let _ = SetWindowPos(
+            target_hwnd,
+            Some(HWND_TOPMOST),
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE,
+        );
+        let _ = SetWindowPos(
+            target_hwnd,
+            Some(HWND_NOTOPMOST),
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE,
+        );
+        let _ = SetForegroundWindow(target_hwnd);
+    }
 }
 
 pub fn focus_harness_desktop(
     kind: HarnessKind,
     session_id: Option<String>,
     title: Option<String>,
+    workspace_path: Option<String>,
     dsh_port: Option<u16>,
 ) -> Result<String, String> {
     if kind == HarnessKind::Dsh {
@@ -758,19 +852,8 @@ pub fn focus_harness_desktop(
             Some(sid) => format!("http://127.0.0.1:{port}/sessions/{sid}"),
             None => format!("http://127.0.0.1:{port}/"),
         };
-        let verb_w = to_wide_null("open");
-        let url_w = to_wide_null(&url);
-        unsafe {
-            let _ = ShellExecuteW(
-                None,
-                PCWSTR(verb_w.as_ptr()),
-                PCWSTR(url_w.as_ptr()),
-                PCWSTR::null(),
-                PCWSTR::null(),
-                SW_SHOW,
-            );
-        }
-        return Ok("已打开 DeepSeek Harness".to_string());
+        launch_uri_or_exe_foreground(&url);
+        return Ok("已打开 DeepSeek Harness 对话".to_string());
     }
 
     let exe_lower = match kind {
@@ -801,21 +884,77 @@ pub fn focus_harness_desktop(
     std::thread::spawn(move || {
         let mut freshly_launched = false;
         let mut hwnd = find_main_window_for_exe(exe_lower);
-        if hwnd.is_none() && kind == HarnessKind::Antigravity {
-            if let Some(exe) = resolve_antigravity_desktop_exe() {
-                let verb_w = to_wide_null("open");
-                let exe_w = to_wide_null(&exe.to_string_lossy());
-                unsafe {
-                    let _ = ShellExecuteW(
-                        None,
-                        PCWSTR(verb_w.as_ptr()),
-                        PCWSTR(exe_w.as_ptr()),
-                        PCWSTR::null(),
-                        PCWSTR::null(),
-                        SW_SHOW,
-                    );
+
+        if hwnd.is_none() {
+            match kind {
+                HarnessKind::Antigravity => {
+                    if let Some(exe) = resolve_antigravity_desktop_exe() {
+                        launch_uri_or_exe_foreground(&exe.to_string_lossy());
+                        freshly_launched = true;
+                    }
                 }
-                freshly_launched = true;
+                HarnessKind::Codex => {
+                    if let Some(apps_uri) = find_msix_app_launch_uri("openai.codex_") {
+                        let verb_w = to_wide_null("open");
+                        let exp_w = to_wide_null("explorer.exe");
+                        let arg_w = to_wide_null(&apps_uri);
+                        unsafe {
+                            let _ = ShellExecuteW(
+                                None,
+                                PCWSTR(verb_w.as_ptr()),
+                                PCWSTR(exp_w.as_ptr()),
+                                PCWSTR(arg_w.as_ptr()),
+                                PCWSTR::null(),
+                                SW_SHOW,
+                            );
+                        }
+                        freshly_launched = true;
+                    }
+                }
+                HarnessKind::ClaudeCode => {
+                    if let Some(exe) = resolve_claude_desktop_exe() {
+                        launch_uri_or_exe_foreground(&exe.to_string_lossy());
+                        freshly_launched = true;
+                    } else if let Some(apps_uri) = find_msix_app_launch_uri("claude_") {
+                        let verb_w = to_wide_null("open");
+                        let exp_w = to_wide_null("explorer.exe");
+                        let arg_w = to_wide_null(&apps_uri);
+                        unsafe {
+                            let _ = ShellExecuteW(
+                                None,
+                                PCWSTR(verb_w.as_ptr()),
+                                PCWSTR(exp_w.as_ptr()),
+                                PCWSTR(arg_w.as_ptr()),
+                                PCWSTR::null(),
+                                SW_SHOW,
+                            );
+                        }
+                        freshly_launched = true;
+                    } else if let Some(claude_cli) = resolve_claude_exe() {
+                        // Fallback when only Claude Code CLI is installed: open an interactive terminal resuming that session
+                        let sid = session_id.as_deref().map(|s| s.trim()).unwrap_or("");
+                        let cli_cmd = if !sid.is_empty() && !sid.ends_with(":new") {
+                            format!("\"{}\" --resume \"{}\"", claude_cli.to_string_lossy(), sid)
+                        } else {
+                            format!("\"{}\"", claude_cli.to_string_lossy())
+                        };
+                        let mut cmd = Command::new("cmd.exe");
+                        cmd.args(["/K", &cli_cmd]);
+                        if let Some(cwd) = workspace_path
+                            .as_deref()
+                            .map(clean_windows_path)
+                            .filter(|p| !p.is_empty() && Path::new(p).exists())
+                        {
+                            cmd.current_dir(cwd);
+                        }
+                        let _ = cmd.spawn();
+                        return;
+                    }
+                }
+                HarnessKind::Dsh => unreachable!(),
+            }
+
+            if freshly_launched {
                 let deadline = Instant::now() + Duration::from_secs(10);
                 while Instant::now() < deadline {
                     std::thread::sleep(Duration::from_millis(250));
@@ -832,15 +971,7 @@ pub fn focus_harness_desktop(
             return;
         };
 
-        unsafe {
-            if IsIconic(target_hwnd).as_bool() {
-                let _ = ShowWindow(target_hwnd, SW_RESTORE);
-            } else {
-                let _ = ShowWindow(target_hwnd, SW_SHOW);
-            }
-            crate::window::send_dummy_vk_e8();
-            let _ = SetForegroundWindow(target_hwnd);
-        }
+        bring_hwnd_to_front_force(target_hwnd);
 
         if let Some(ref conv_title) = resolved_title {
             std::thread::sleep(Duration::from_millis(if freshly_launched { 1600 } else { 220 }));
@@ -859,9 +990,10 @@ pub fn list_harness_availability(dsh_connected: bool) -> Vec<HarnessAvailability
     let agy = resolve_agy_exe();
     let codex = resolve_codex_exe();
     let claude = resolve_claude_exe();
-    let agy_running = is_process_name_running("antigravity.exe");
-    let codex_running = is_process_name_running("codex.exe");
-    let claude_running = is_process_name_running("claude.exe");
+    let agy_running = find_main_window_for_exe("antigravity.exe").is_some()
+        || is_process_name_running("antigravity.exe");
+    let codex_running = find_main_window_for_exe("codex.exe").is_some();
+    let claude_running = find_main_window_for_exe("claude.exe").is_some();
     let (codex_model, codex_effort, codex_access) = read_codex_config_display();
     let (claude_model, claude_effort, claude_access) = read_claude_code_config_display();
     vec![

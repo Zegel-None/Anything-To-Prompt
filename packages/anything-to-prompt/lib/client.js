@@ -5081,60 +5081,66 @@ window.__ModuleLoader__.load({
                         style: { display: 'flex', alignItems: 'center', gap: '6px' },
                         onMouseDown: (ev) => ev.stopPropagation(),
                       },
-                      activeHarness !== 'dsh'
-                        ? (() => {
-                            const meta = HARNESS_META[activeHarness] || HARNESS_META.dsh;
-                            const isDesktopRunning = Boolean(
-                              (activeAvail && activeAvail.running) ||
-                                (dsbRuntime.liveSyncMeta[activeHarness] &&
-                                  dsbRuntime.liveSyncMeta[activeHarness].running),
-                            );
-                            const sel = dsbRuntime.externalSelection[activeHarness] || {};
-                            return h(
-                              'button',
-                              {
-                                type: 'button',
-                                title: isDesktopRunning
-                                  ? '点击将 ' + meta.label + ' 桌面端拉到前台并定位到当前对话'
-                                  : '点击启动 ' + meta.label + ' 桌面端并打开当前对话',
-                                onClick: (ev) => {
-                                  ev.stopPropagation();
-                                  tauriInvoke('harness_focus_desktop', {
-                                    harness: activeHarness,
-                                    sessionId: sel.sessionId || '',
-                                    title: sel.title || '',
-                                  }).catch(() => {});
-                                },
-                                style: {
-                                  fontSize: '11px',
-                                  fontWeight: 600,
-                                  padding: '2px 8px',
-                                  borderRadius: '999px',
-                                  background: meta.accentBg,
-                                  border: '1px solid ' + meta.accentBorder,
-                                  color: meta.accent,
-                                  letterSpacing: '0.01em',
-                                  display: 'inline-flex',
-                                  alignItems: 'center',
-                                  gap: '5px',
-                                  cursor: 'pointer',
-                                  transition: 'filter 0.14s ease',
-                                },
-                              },
-                              h('span', {
-                                style: {
-                                  width: '6px',
-                                  height: '6px',
-                                  borderRadius: '999px',
-                                  background: isDesktopRunning ? '#34d399' : '#71717a',
-                                  boxShadow: isDesktopRunning ? '0 0 6px #34d399' : 'none',
-                                  flexShrink: 0,
-                                },
-                              }),
-                              meta.label + (isDesktopRunning ? '运行中' : '未运行'),
-                            );
-                          })()
-                        : null,
+                      (() => {
+                        const meta = HARNESS_META[activeHarness] || HARNESS_META.dsh;
+                        const isDesktopRunning =
+                          activeHarness === 'dsh'
+                            ? true
+                            : Boolean(
+                                (activeAvail && activeAvail.running) ||
+                                  (dsbRuntime.liveSyncMeta[activeHarness] &&
+                                    dsbRuntime.liveSyncMeta[activeHarness].running),
+                              );
+                        const sel =
+                          activeHarness === 'dsh'
+                            ? { sessionId: sessionId || '', title: '' }
+                            : dsbRuntime.externalSelection[activeHarness] || {};
+                        return h(
+                          'button',
+                          {
+                            type: 'button',
+                            title:
+                              activeHarness === 'dsh'
+                                ? '点击在浏览器打开当前 DeepSeek Harness 对话'
+                                : '点击将 ' + meta.label + ' 拉到最前并展示这个对话',
+                            onClick: (ev) => {
+                              ev.stopPropagation();
+                              tauriInvoke('harness_focus_desktop', {
+                                harness: activeHarness,
+                                sessionId: sel.sessionId || '',
+                                title: sel.title || '',
+                                workspacePath: sel.workspacePath || '',
+                              }).catch(() => {});
+                            },
+                            style: {
+                              fontSize: '11px',
+                              fontWeight: 600,
+                              padding: '2px 8px',
+                              borderRadius: '999px',
+                              background: meta.accentBg,
+                              border: '1px solid ' + meta.accentBorder,
+                              color: meta.accent,
+                              letterSpacing: '0.01em',
+                              display: 'inline-flex',
+                              alignItems: 'center',
+                              gap: '5px',
+                              cursor: 'pointer',
+                              transition: 'filter 0.14s ease',
+                            },
+                          },
+                          h('span', {
+                            style: {
+                              width: '6px',
+                              height: '6px',
+                              borderRadius: '999px',
+                              background: isDesktopRunning ? '#34d399' : '#71717a',
+                              boxShadow: isDesktopRunning ? '0 0 6px #34d399' : 'none',
+                              flexShrink: 0,
+                            },
+                          }),
+                          '查看详情',
+                        );
+                      })(),
                       activeHarness !== 'dsh' &&
                         dsbRuntime.externalActiveTurn &&
                         dsbRuntime.externalActiveTurn.harness === activeHarness
@@ -5831,7 +5837,7 @@ window.__ModuleLoader__.load({
           const panelBorder = harnessTheme.border;
 
           const snap = dsbRuntime.appSettings || {
-            version: '0.3.12',
+            version: '0.3.13',
             isElevated: false,
             dshStatus: '已连接',
             config: {
@@ -6938,7 +6944,9 @@ window.__ModuleLoader__.load({
         if (typeof window !== 'undefined' && !window.__DSB_ERR_HOOKED__) {
           window.__DSB_ERR_HOOKED__ = true;
           window.addEventListener('error', (ev) => {
-            reportDiag('WIN_ERR: ' + (ev && (ev.message || (ev.error && ev.error.stack)) || 'unknown'));
+            const msg = String((ev && (ev.message || (ev.error && ev.error.stack))) || 'unknown');
+            if (msg.includes('ResizeObserver loop')) return;
+            reportDiag('WIN_ERR: ' + msg);
           });
           window.addEventListener('unhandledrejection', (ev) => {
             const r = ev && ev.reason;
