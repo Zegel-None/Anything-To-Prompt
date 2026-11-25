@@ -2052,7 +2052,8 @@ fn execute_blue_selection_pick(
     }
 
     // Priority 2: CAD-style Blue Box / Freehand Lasso foreground element selection (NEVER background!)
-    let sampled = sample_blue_foreground_elements(&points, bbox, gesture, target_pid, 40);
+    let raw_sampled = sample_blue_foreground_elements(&points, bbox, gesture, target_pid, 80);
+    let sampled = coalesce_inline_text_runs(raw_sampled);
     if sampled.is_empty() {
         log::info!(
             "Blue {:?} found 0 foreground elements (background excluded) in bbox=({},{},{}x{})",
@@ -2147,6 +2148,93 @@ fn execute_blue_selection_pick(
         sampled.len()
     );
     inject_capsule_into_bar(app, &capsule);
+}
+
+/// Coalesce adjacent inline `type=Text` UIA leaf fragments on the same visual line
+/// (common in Electron / streaming Markdown DOMs where every CJK word or inline code
+/// token is a separate span) into a single continuous text item with a union bbox.
+/// Non-Text interactive controls (Button, Edit, etc.) and far-apart columns are untouched.
+fn coalesce_inline_text_runs(mut elements: Vec<UiaElementInfo>) -> Vec<UiaElementInfo> {
+    if elements.len() <= 1 {
+        return elements;
+    }
+
+    // Sort in natural reading order (same visual line left-to-right, then top-to-bottom)
+    // so adjacent streaming text fragments are contiguous before merging.
+    elements.sort_by(|a, b| {
+        let a_cy = a.rect.y + a.rect.h / 2;
+        let b_cy = b.rect.y + b.rect.h / 2;
+        let line_tol = (a.rect.h.min(b.rect.h).max(12) / 2).clamp(6, 14);
+        if (a_cy - b_cy).abs() <= line_tol {
+            a.rect.x.cmp(&b.rect.x)
+        } else {
+            a.rect.y.cmp(&b.rect.y)
+        }
+    });
+
+    fn is_mergeable_text(el: &UiaElementInfo) -> bool {
+        el.control_type == "Text"
+            && el.automation_id.trim().is_empty()
+            && !el.name.trim().is_empty()
+    }
+
+    fn needs_space_between(prev: &str, next: &str, gap_px: i32) -> bool {
+        let Some(last_ch) = prev.chars().last() else {
+            return false;
+        };
+        let Some(first_ch) = next.chars().next() else {
+            return false;
+        };
+        if last_ch.is_whitespace() || first_ch.is_whitespace() {
+            return false;
+        }
+        if matches!(last_ch, '（' | '(' | '「' | '『' | '【' | '[')
+            || matches!(
+                first_ch,
+                '）' | ')' | '，' | '。' | '！' | '？' | '、' | '：' | '；' | '」' | '』' | '】' | ']' | ',' | '.' | '!' | '?' | ':' | ';'
+            )
+        {
+            return false;
+        }
+        // Inline code pills / spaced runs have >=3px visual gap; also keep space between two ASCII word tokens.
+        gap_px >= 3 || (last_ch.is_ascii_alphanumeric() && first_ch.is_ascii_alphanumeric())
+    }
+
+    let mut merged: Vec<UiaElementInfo> = Vec::with_capacity(elements.len());
+    for el in elements {
+        if let Some(prev) = merged.last_mut() {
+            if is_mergeable_text(prev) && is_mergeable_text(&el) {
+                let prev_cy = prev.rect.y + prev.rect.h / 2;
+                let cur_cy = el.rect.y + el.rect.h / 2;
+                let max_h = prev.rect.h.max(el.rect.h).max(16);
+                let same_line =
+                    (prev.rect.y - el.rect.y).abs() <= 8 && (prev_cy - cur_cy).abs() <= max_h / 2;
+                let gap = el.rect.x - (prev.rect.x + prev.rect.w);
+                if same_line && (-6..=20).contains(&gap) {
+                    if needs_space_between(&prev.name, &el.name, gap) {
+                        prev.name.push(' ');
+                    }
+                    prev.name.push_str(&el.name);
+                    let min_x = prev.rect.x.min(el.rect.x);
+                    let min_y = prev.rect.y.min(el.rect.y);
+                    let max_r = (prev.rect.x + prev.rect.w).max(el.rect.x + el.rect.w);
+                    let max_b = (prev.rect.y + prev.rect.h).max(el.rect.y + el.rect.h);
+                    prev.rect = ScreenRect {
+                        x: min_x,
+                        y: min_y,
+                        w: (max_r - min_x).max(0),
+                        h: (max_b - min_y).max(0),
+                    };
+                    if !el.text_snippet.is_empty() && prev.text_snippet != prev.name {
+                        prev.text_snippet = prev.name.clone();
+                    }
+                    continue;
+                }
+            }
+        }
+        merged.push(el);
+    }
+    merged
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3974,5 +4062,54 @@ mod tests {
             resolve_primary_element_label(&el).as_deref(),
             Some("固定展开")
         );
+    }
+
+    #[test]
+    fn coalesces_streaming_inline_text_runs_without_merging_lines_or_buttons() {
+        let mk_text = |name: &str, x: i32, y: i32, w: i32| UiaElementInfo {
+            name: name.into(),
+            control_type: "Text".into(),
+            control_type_id: ControlType::Text as i32,
+            automation_id: String::new(),
+            class_name: String::new(),
+            value: String::new(),
+            help_text: String::new(),
+            text_snippet: String::new(),
+            rect: ScreenRect { x, y, w, h: 23 },
+            sibling_index: 0,
+            ancestors: Vec::new(),
+            is_root_or_empty: false,
+            affordance: None,
+        };
+        let mk_btn = |name: &str, x: i32, y: i32, w: i32| UiaElementInfo {
+            control_type: "Button".into(),
+            control_type_id: ControlType::Button as i32,
+            ..mk_text(name, x, y, w)
+        };
+
+        let items = vec![
+            mk_text("现在", 970, 963, 36),
+            mk_text("双击", 1005, 963, 41),
+            mk_text("Ctrl", 1050, 965, 39),
+            mk_text("点", 1097, 963, 19),
+            mk_text("开", 1115, 963, 22),
+            mk_text("！", 1137, 963, 18),
+            // Same line but interactive button -> must stay separate
+            mk_btn("刷新", 1160, 963, 44),
+            // Same line far-apart column (> 20px gap) -> must stay separate
+            mk_text("2分钟前", 1260, 963, 56),
+            // Next line -> must stay separate
+            mk_text("第二行", 970, 995, 54),
+        ];
+
+        let out = coalesce_inline_text_runs(items);
+        assert_eq!(out.len(), 4);
+        assert_eq!(out[0].name, "现在双击 Ctrl 点开！");
+        assert_eq!(out[0].rect.x, 970);
+        assert_eq!(out[0].rect.w, 1137 + 18 - 970);
+        assert_eq!(out[1].control_type, "Button");
+        assert_eq!(out[1].name, "刷新");
+        assert_eq!(out[2].name, "2分钟前");
+        assert_eq!(out[3].name, "第二行");
     }
 }
