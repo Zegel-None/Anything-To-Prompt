@@ -381,6 +381,10 @@ fn bar_report(app: AppHandle, payload: BarReportPayload) {
             );
         }
 
+        "bubble_notify" => {
+            dispatch_state_event(&app, StateEvent::IncomingBubbleNotice);
+        }
+
         "ui" => {
             dispatch_state_event(
                 &app,
@@ -467,6 +471,44 @@ fn bar_report(app: AppHandle, payload: BarReportPayload) {
 #[tauri::command]
 fn bar_reconnect(app: AppHandle) {
     trigger_dsh_reconnect(app);
+}
+
+#[tauri::command]
+fn bar_drag_begin(app: AppHandle) -> bool {
+    app.get_webview_window("bar")
+        .map(|w| window::begin_bar_drag(&w))
+        .unwrap_or(false)
+}
+
+#[tauri::command]
+fn bar_drag_step(app: AppHandle) -> bool {
+    app.get_webview_window("bar")
+        .map(|w| window::step_bar_drag(&w))
+        .unwrap_or(false)
+}
+
+#[tauri::command]
+fn bar_drag_end() {
+    window::end_bar_drag();
+}
+
+#[tauri::command]
+fn bar_drag_reset(app: AppHandle) {
+    let Some(shared) = app.try_state::<AppShared>() else {
+        return;
+    };
+    let cached = shared
+        .last_layout
+        .lock()
+        .map(|c| c.clone())
+        .unwrap_or_else(|_| CachedLayout {
+            width_dip: 760,
+            height_dip: DEFAULT_LIP_HEIGHT_DIP,
+            shapes: Vec::new(),
+        });
+    if let Some(bar_win) = app.get_webview_window("bar") {
+        window::reset_bar_anchor(&bar_win, cached.width_dip, cached.height_dip, &cached.shapes);
+    }
 }
 
 #[tauri::command]
@@ -1031,6 +1073,21 @@ pub fn dispatch_state_event(app: &AppHandle, event: StateEvent) {
             let js = format!(
                 "window.__DSB_BRIDGE__ && window.__DSB_BRIDGE__.setMode('{}');",
                 mode.as_str()
+            );
+            let _ = bar_win.eval(&js);
+        }
+    }
+
+    let vis_js_str = match vis_snapshot {
+        VisibilityState::Hidden => "hidden",
+        VisibilityState::Lip => "lip",
+        VisibilityState::Summon => "summon",
+    };
+
+    if fx.window_action.is_some() || fx.bridge_mode.is_some() {
+        if let Some(bar_win) = app.get_webview_window("bar") {
+            let js = format!(
+                "window.__DSB_BRIDGE__ && window.__DSB_BRIDGE__.setVisibility && window.__DSB_BRIDGE__.setVisibility('{vis_js_str}');"
             );
             let _ = bar_win.eval(&js);
         }
@@ -1970,18 +2027,24 @@ pub fn run() {
                         .lock()
                         .map(|c| c.active_harness.clone())
                         .unwrap_or_else(|_| "dsh".to_string());
-                    let js = format!(
-                        "window.__DSB_BRIDGE__ && window.__DSB_BRIDGE__.setMode('{}'); window.__DSB_BRIDGE__ && window.__DSB_BRIDGE__.setHarness && window.__DSB_BRIDGE__.setHarness('{}');",
-                        mode.as_str(),
-                        crate::harness::HarnessKind::parse(&active_harness).as_str()
-                    );
-                    let _ = webview.eval(&js);
-
                     let vis = shared
                         .state_machine
                         .lock()
                         .map(|sm| sm.visibility)
                         .unwrap_or(VisibilityState::Hidden);
+                    let vis_str = match vis {
+                        VisibilityState::Hidden => "hidden",
+                        VisibilityState::Lip => "lip",
+                        VisibilityState::Summon => "summon",
+                    };
+                    let js = format!(
+                        "window.__DSB_BRIDGE__ && window.__DSB_BRIDGE__.setMode('{}'); window.__DSB_BRIDGE__ && window.__DSB_BRIDGE__.setVisibility && window.__DSB_BRIDGE__.setVisibility('{}'); window.__DSB_BRIDGE__ && window.__DSB_BRIDGE__.setHarness && window.__DSB_BRIDGE__.setHarness('{}');",
+                        mode.as_str(),
+                        vis_str,
+                        crate::harness::HarnessKind::parse(&active_harness).as_str()
+                    );
+                    let _ = webview.eval(&js);
+
                     if vis == VisibilityState::Summon {
                         let _ = webview.eval(
                             "setTimeout(() => window.__DSB_BRIDGE__ && window.__DSB_BRIDGE__.focusComposer(), 60);",
@@ -2034,6 +2097,10 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             bar_report,
             bar_reconnect,
+            bar_drag_begin,
+            bar_drag_step,
+            bar_drag_end,
+            bar_drag_reset,
             overlay_compose_done,
             harness_get_active,
             harness_set_active,

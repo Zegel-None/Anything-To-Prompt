@@ -308,6 +308,9 @@ window.__ModuleLoader__.load({
     // Shared runtime handles between Dock, Picker Chip, and Tauri Bridge
     const dsbRuntime = {
       barMode: INITIAL_BAR_MODE,
+      barVisibility: INITIAL_BAR_MODE === 'lip' ? 'hidden' : 'summon',
+      pendingBubbleTarget: null,
+      lastSeenSessionReply: {},
       previewExpanded: false,
       barWidth: readStoredNumber(STORAGE_KEY_BAR_WIDTH, DEFAULT_BAR_WIDTH_PX, MIN_BAR_WIDTH_PX, MAX_BAR_WIDTH_PX),
       modalOpen: false,
@@ -315,7 +318,7 @@ window.__ModuleLoader__.load({
       quickSearchOpen: false,
       quickSearchSelectedIdx: -1,
       hovered: false,
-      pinned: readStoredBool(STORAGE_KEY_PINNED, false),
+      pinned: IS_BAR ? false : readStoredBool(STORAGE_KEY_PINNED, false),
       expandedHeight: readStoredNumber(STORAGE_KEY_HEIGHT, DEFAULT_EXPANDED_PX, MIN_EXPANDED_PX, MAX_EXPANDED_PX),
       sessionId: '',
       liveDraft: '',
@@ -699,46 +702,124 @@ window.__ModuleLoader__.load({
 
       const incomingSessionId = String(evt.sessionId || '');
       const curSel = dsbRuntime.externalSelection[hId] || {};
-      const shouldUpdateMessages =
-        !curSel.sessionId ||
-        !incomingSessionId ||
-        curSel.sessionId === incomingSessionId ||
-        evt.source === 'hook' ||
-        evt.source === 'watch';
+      const incomingMsgs = Array.isArray(evt.messages) ? evt.messages : [];
+      let latestReply = null;
+      for (let i = incomingMsgs.length - 1; i >= 0; i -= 1) {
+        const m = incomingMsgs[i];
+        if (m && m.role === 'assistant' && String(m.text || '').trim().length > 0) {
+          latestReply = m;
+          break;
+        }
+      }
 
-      if (shouldUpdateMessages) {
-        if (incomingSessionId) {
-          const catHit = findExternalCatalogEntry(hId, incomingSessionId);
-          const sameSession = curSel.sessionId === incomingSessionId;
-          const isAuthTitle = Boolean(evt.titleAuthoritative && evt.title);
-          const resolvedTitle = isAuthTitle
-            ? evt.title
-            : (catHit && catHit.conv && catHit.conv.title) ||
-              (sameSession && curSel.title ? curSel.title : evt.title) ||
-              HARNESS_META[hId].label;
-          const resolvedWsId =
-            (isAuthTitle && evt.workspaceId) ||
-            (catHit && catHit.ws && catHit.ws.workspaceId) ||
-            (evt.workspaceId && evt.workspaceId !== 'default-cli-project' ? evt.workspaceId : '') ||
-            (sameSession ? curSel.workspaceId : '') ||
-            evt.workspaceId ||
-            '';
-          const resolvedWsPath =
-            (isAuthTitle && evt.workspacePath) ||
-            (catHit && catHit.ws && (catHit.ws.path || (catHit.conv && catHit.conv.cwd))) ||
-            evt.workspacePath ||
-            (sameSession ? curSel.workspacePath : '') ||
-            '';
-          dsbRuntime.externalSelection[hId] = {
+      const sessionKey = incomingSessionId ? hId + ':' + incomingSessionId : '';
+      const replySig = latestReply
+        ? String(latestReply.id || '') + ':' + String(latestReply.text || '').trim().length
+        : '';
+      const prevSig = sessionKey ? dsbRuntime.lastSeenSessionReply[sessionKey] : undefined;
+      if (sessionKey && replySig) {
+        dsbRuntime.lastSeenSessionReply[sessionKey] = replySig;
+      }
+      const isNewReply = Boolean(
+        replySig &&
+          ((prevSig !== undefined && prevSig !== replySig) ||
+            (evt.source === 'hook' && prevSig !== replySig)),
+      );
+
+      const catHit = incomingSessionId ? findExternalCatalogEntry(hId, incomingSessionId) : null;
+      const sameSession = Boolean(curSel.sessionId && incomingSessionId && curSel.sessionId === incomingSessionId);
+      const isAuthTitle = Boolean(evt.titleAuthoritative && evt.title);
+      const resolvedTitle = isAuthTitle
+        ? evt.title
+        : (catHit && catHit.conv && catHit.conv.title) ||
+          (sameSession && curSel.title ? curSel.title : evt.title) ||
+          HARNESS_META[hId].label;
+      const resolvedWsId =
+        (isAuthTitle && evt.workspaceId) ||
+        (catHit && catHit.ws && catHit.ws.workspaceId) ||
+        (evt.workspaceId && evt.workspaceId !== 'default-cli-project' ? evt.workspaceId : '') ||
+        (sameSession ? curSel.workspaceId : '') ||
+        evt.workspaceId ||
+        '';
+      const resolvedWsPath =
+        (isAuthTitle && evt.workspacePath) ||
+        (catHit && catHit.ws && (catHit.ws.path || (catHit.conv && catHit.conv.cwd))) ||
+        evt.workspacePath ||
+        (sameSession ? curSel.workspacePath : '') ||
+        '';
+
+      const barIsHiddenOrLip =
+        dsbRuntime.barVisibility === 'hidden' || dsbRuntime.barVisibility === 'lip';
+      const hasDraftOrCapsules = Boolean(
+        (dsbRuntime.extDraftText || '').trim() ||
+          (dsbRuntime.extCapsules || []).length > 0 ||
+          (dsbRuntime.liveDraft || '').trim(),
+      );
+
+      if (sameSession) {
+        // Bound conversation updated -> refresh its messages in-place (never jumps away)
+        dsbRuntime.externalSelection[hId] = {
+          workspaceId: resolvedWsId,
+          workspacePath: resolvedWsPath,
+          sessionId: incomingSessionId,
+          title: resolvedTitle,
+        };
+        if (incomingMsgs.length > 0) {
+          dsbRuntime.externalMessages[hId] = incomingMsgs;
+        }
+        // If user is currently on a DIFFERENT harness while Bar is hidden and this bound session replied,
+        // pop up a clickable Lip bubble pointing to this session.
+        if (
+          hId !== dsbRuntime.activeHarness &&
+          barIsHiddenOrLip &&
+          !dsbRuntime.pinned &&
+          !hasDraftOrCapsules &&
+          isNewReply &&
+          latestReply
+        ) {
+          dsbRuntime.pendingBubbleTarget = {
+            harness: hId,
             workspaceId: resolvedWsId,
             workspacePath: resolvedWsPath,
             sessionId: incomingSessionId,
             title: resolvedTitle,
+            previewText: stripMarkdownForLip(latestReply.text),
+            assistantId: String(latestReply.id || ''),
           };
+          sendBarReport({ kind: 'bubble_notify' });
         }
-        if (Array.isArray(evt.messages) && evt.messages.length > 0) {
-          dsbRuntime.externalMessages[hId] = evt.messages;
+      } else if (!curSel.sessionId && incomingSessionId && barIsHiddenOrLip && !hasDraftOrCapsules) {
+        // Brand-new unbound harness bootstrap only when Bar is not actively being used
+        dsbRuntime.externalSelection[hId] = {
+          workspaceId: resolvedWsId,
+          workspacePath: resolvedWsPath,
+          sessionId: incomingSessionId,
+          title: resolvedTitle,
+        };
+        if (incomingMsgs.length > 0) {
+          dsbRuntime.externalMessages[hId] = incomingMsgs;
         }
+      } else if (
+        incomingSessionId &&
+        barIsHiddenOrLip &&
+        !dsbRuntime.pinned &&
+        !hasDraftOrCapsules &&
+        isNewReply &&
+        latestReply
+      ) {
+        // Another conversation replied while Bar is NOT summoned:
+        // NEVER auto-switch active selection in the background; only show a clickable Lip bubble.
+        // Clicking the bubble switches to this replying conversation.
+        dsbRuntime.pendingBubbleTarget = {
+          harness: hId,
+          workspaceId: resolvedWsId,
+          workspacePath: resolvedWsPath,
+          sessionId: incomingSessionId,
+          title: resolvedTitle,
+          previewText: stripMarkdownForLip(latestReply.text),
+          assistantId: String(latestReply.id || ''),
+        };
+        sendBarReport({ kind: 'bubble_notify' });
       }
 
       dsbRuntime.liveSyncMeta[hId] = {
@@ -772,7 +853,14 @@ window.__ModuleLoader__.load({
       'composer_pointerdown',
       'summon_from_lip',
       'submitted',
+      'bubble_notify',
     ]);
+
+    function getActiveComposerCapsuleCount() {
+      return dsbRuntime.activeHarness !== 'dsh'
+        ? (dsbRuntime.extCapsules || []).length
+        : countComposerCapsules(dsbRuntime.liveDraft);
+    }
 
     function countComposerCapsules(draftText) {
       let draftCount = 0;
@@ -885,6 +973,17 @@ window.__ModuleLoader__.load({
         setMode(mode) {
           setBarMode(mode);
           return dsbRuntime.barMode;
+        },
+        setVisibility(vis) {
+          const prev = dsbRuntime.barVisibility;
+          const next = vis === 'hidden' || vis === 'lip' || vis === 'summon' ? vis : 'hidden';
+          dsbRuntime.barVisibility = next;
+          // Clear stale bubble target when Bar hides or is summoned directly (e.g. Double-Ctrl)
+          if (next === 'hidden' || (next === 'summon' && prev !== 'lip')) {
+            dsbRuntime.pendingBubbleTarget = null;
+          }
+          notifyBarRuntime();
+          return dsbRuntime.barVisibility;
         },
         setHarness(harnessId) {
           setActiveHarness(harnessId, false);
@@ -2418,7 +2517,9 @@ window.__ModuleLoader__.load({
         const [previewExpanded, setPreviewExpanded] = useState(() => dsbRuntime.previewExpanded);
         const [barWidth, setBarWidth] = useState(() => dsbRuntime.barWidth);
         const [hovered, setHovered] = useState(false);
-        const [pinned, setPinned] = useState(() => readStoredBool(STORAGE_KEY_PINNED, false));
+        const [pinned, setPinned] = useState(() =>
+          IS_BAR ? false : readStoredBool(STORAGE_KEY_PINNED, false),
+        );
         const [expandedHeight, setExpandedHeight] = useState(() =>
           readStoredNumber(STORAGE_KEY_HEIGHT, DEFAULT_EXPANDED_PX, MIN_EXPANDED_PX, MAX_EXPANDED_PX),
         );
@@ -2536,7 +2637,8 @@ window.__ModuleLoader__.load({
           notifyBarRuntime();
         }, [inputActions, sessionId, liveDraft, hovered, previewExpanded, pinned, expandedHeight, barWidth]);
 
-        // Keep Rust pick counter synced 1:1 with the actual number of capsules currently in the composer
+        // Keep Rust pick counter synced 1:1 with ALL capsules currently in the active composer
+        // (both DSH native composer and external Harness composers — never overwrite extCapsules with 0!)
         useEffect(() => {
           if (!IS_BAR || typeof document === 'undefined') return undefined;
           let rafId = 0;
@@ -2546,7 +2648,7 @@ window.__ModuleLoader__.load({
               rafId = 0;
               sendBarReport({
                 kind: 'capsules',
-                capsuleCount: countComposerCapsules(dsbRuntime.liveDraft),
+                capsuleCount: getActiveComposerCapsuleCount(),
                 afterInsert: false,
               });
             });
@@ -2561,7 +2663,7 @@ window.__ModuleLoader__.load({
             if (rafId) cancelAnimationFrame(rafId);
             if (mo) mo.disconnect();
           };
-        }, [liveDraft, sessionId]);
+        }, [liveDraft, sessionId, dsbRuntime.activeHarness, (dsbRuntime.extCapsules || []).length]);
 
         useEffect(() => {
           dsbRuntime.setModeListener = (nextMode, wantExpanded = false) => {
@@ -3574,6 +3676,80 @@ window.__ModuleLoader__.load({
           );
         };
 
+        const handleStartDragWindow = useCallback((e) => {
+          if (!IS_BAR || e.button !== 0) return;
+          e.preventDefault();
+          e.stopPropagation();
+          let active = true;
+          let rafId = 0;
+          tauriInvoke('bar_drag_begin').catch(() => {});
+          const step = () => {
+            rafId = 0;
+            if (!active) return;
+            tauriInvoke('bar_drag_step').catch(() => {});
+          };
+          const onMove = () => {
+            if (!active || rafId) return;
+            rafId = requestAnimationFrame(step);
+          };
+          const onUp = () => {
+            active = false;
+            if (rafId) cancelAnimationFrame(rafId);
+            tauriInvoke('bar_drag_end').catch(() => {});
+            window.removeEventListener('mousemove', onMove);
+            window.removeEventListener('mouseup', onUp);
+          };
+          window.addEventListener('mousemove', onMove);
+          window.addEventListener('mouseup', onUp);
+        }, []);
+
+        const handleResetWindowPos = useCallback((e) => {
+          if (!IS_BAR) return;
+          e.preventDefault();
+          e.stopPropagation();
+          tauriInvoke('bar_drag_reset').catch(() => {});
+        }, []);
+
+        const renderDragHandle = (extraStyle) => {
+          if (!IS_BAR || barMode === 'lip') return null;
+          return h(
+            'div',
+            {
+              'data-dsb-drag-handle': '1',
+              title: '按住拖动移动窗口位置 · 双击恢复底部居中',
+              onMouseDown: handleStartDragWindow,
+              onDoubleClick: handleResetWindowPos,
+              style: Object.assign(
+                {
+                  position: 'absolute',
+                  top: '2px',
+                  left: '50%',
+                  transform: 'translateX(-50%)',
+                  width: '56px',
+                  height: '12px',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  cursor: 'grab',
+                  zIndex: 25,
+                  userSelect: 'none',
+                },
+                extraStyle || null,
+              ),
+            },
+            h('span', {
+              style: {
+                width: '36px',
+                height: '3.5px',
+                borderRadius: '999px',
+                background: 'rgba(165, 172, 186, 0.36)',
+                pointerEvents: 'none',
+                transition: 'background 0.14s ease',
+              },
+            }),
+          );
+        };
+
         const renderPinButton = () =>
           h(
             'button',
@@ -3582,7 +3758,9 @@ window.__ModuleLoader__.load({
               onClick: togglePin,
               'aria-label': pinned ? '取消固定' : '固定展开',
               'aria-pressed': pinned ? 'true' : 'false',
-              title: pinned ? '取消固定（鼠标移出自动收起）' : '固定展开聊天窗',
+              title: pinned
+                ? '取消常驻置顶（恢复点击外部自动关闭）'
+                : '固定常驻前台（点击其他区域不关闭）',
               style: {
                 width: '20px',
                 height: '20px',
@@ -4271,15 +4449,17 @@ window.__ModuleLoader__.load({
               'div',
               {
                 style: {
+                  position: 'relative',
                   background: 'rgba(255,255,255,0.04)',
                   borderRadius: '14px',
                   border: '1px solid ' + m.border,
-                  padding: '12px 14px 10px',
+                  padding: '15px 14px 10px',
                   display: 'flex',
                   flexDirection: 'column',
                   boxSizing: 'border-box',
                 },
               },
+              ctx.renderDragHandle && ctx.renderDragHandle(),
               ctx.renderCapsulesRow(),
               h('textarea', {
                 'data-dsb-ext-input': '1',
@@ -4410,6 +4590,7 @@ window.__ModuleLoader__.load({
               }
             },
             renderCapsulesRow: renderExtCapsulesRow,
+            renderDragHandle,
             workspaceBasename,
             getPermissionMode: () => dsbRuntime.claudePermissionMode || 'auto',
             setPermissionMode: (modeId) => {
@@ -4837,6 +5018,23 @@ window.__ModuleLoader__.load({
                     onClick: () => {
                       if (editingName) return;
                       if (IS_BAR && barMode === 'lip') {
+                        const bubble = dsbRuntime.pendingBubbleTarget;
+                        dsbRuntime.pendingBubbleTarget = null;
+                        if (bubble && bubble.harness && bubble.sessionId) {
+                          const targetH = normalizeHarnessId(bubble.harness);
+                          if (targetH !== dsbRuntime.activeHarness) {
+                            setActiveHarness(targetH, true);
+                          }
+                          dsbRuntime.externalSelection[targetH] = {
+                            workspaceId: bubble.workspaceId || '',
+                            workspacePath: bubble.workspacePath || '',
+                            sessionId: bubble.sessionId,
+                            title: bubble.title || HARNESS_META[targetH].label,
+                          };
+                          writeStoredExtSelection(targetH, dsbRuntime.externalSelection[targetH]);
+                          loadExternalConversationMessages(targetH, bubble.sessionId);
+                          notifyBarRuntime();
+                        }
                         sendBarReport({ kind: 'summon_from_lip' });
                       } else {
                         setHovered(true);
@@ -4867,10 +5065,18 @@ window.__ModuleLoader__.load({
                         whiteSpace: 'normal',
                         wordBreak: 'break-word',
                         overflowWrap: 'anywhere',
-                        opacity: latestSingleLine ? 0.92 : 0.62,
+                        opacity:
+                          (IS_BAR && barMode === 'lip' && dsbRuntime.pendingBubbleTarget) ||
+                          latestSingleLine
+                            ? 0.92
+                            : 0.62,
                       },
                     },
-                    latestSingleLine || getHarnessMeta(activeHarness).emptyLipHint,
+                    IS_BAR && barMode === 'lip' && dsbRuntime.pendingBubbleTarget
+                      ? (dsbRuntime.pendingBubbleTarget.title
+                          ? '[' + dsbRuntime.pendingBubbleTarget.title + '] '
+                          : '') + dsbRuntime.pendingBubbleTarget.previewText
+                      : latestSingleLine || getHarnessMeta(activeHarness).emptyLipHint,
                   ),
                 ),
             !(IS_BAR && barMode === 'lip')
@@ -4892,6 +5098,9 @@ window.__ModuleLoader__.load({
                 })
               : null,
             ),
+            IS_BAR && barMode !== 'lip' && activeHarness === 'dsh'
+              ? renderDragHandle({ top: 'auto', bottom: '-12px', zIndex: 40 })
+              : null,
           ),
           renderExternalNativeComposer(),
           renderQuickSearchPopup(),

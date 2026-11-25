@@ -646,17 +646,13 @@ pub fn inspect_hover_at_with_uia(
     if let Some(ref info) = uia_info {
         match classify_hover_target(info, win_rect, &win_class) {
             HoverTargetKind::Element => {
-                let display = if !info.name.is_empty() {
-                    truncate_chars(&info.name, 26)
-                } else if !info.value.is_empty() && info.value != "[PASSWORD_REDACTED]" {
-                    truncate_chars(&info.value, 26)
-                } else if !info.automation_id.is_empty() {
-                    truncate_chars(&info.automation_id, 26)
-                } else if !info.class_name.is_empty() {
-                    truncate_chars(&info.class_name, 26)
-                } else {
-                    String::new()
-                };
+                let display = resolve_primary_element_label(info).unwrap_or_else(|| {
+                    if !info.class_name.is_empty() {
+                        truncate_chars(&info.class_name, 26)
+                    } else {
+                        String::new()
+                    }
+                });
                 let label = if display.is_empty() {
                     info.control_type.clone()
                 } else {
@@ -3210,6 +3206,64 @@ fn sample_uia_grid_in_rect(
     out
 }
 
+/// Extracts a meaningful control name from the nearest interactive UIA ancestor
+/// (e.g. `Button(name="固定展开", id="")` when the user clicked an unnamed `<svg>`/`Image` inside it).
+pub fn extract_interactive_ancestor_label(ancestors: &[String]) -> Option<String> {
+    const INTERACTIVE_TYPES: &[&str] = &[
+        "Button",
+        "MenuItem",
+        "TabItem",
+        "Hyperlink",
+        "CheckBox",
+        "RadioButton",
+        "ComboBox",
+        "ListItem",
+        "TreeItem",
+        "SplitButton",
+        "Edit",
+        "Slider",
+        "ToggleButton",
+        "HeaderItem",
+        "DataItem",
+    ];
+    for entry in ancestors.iter().take(3) {
+        let Some((ctrl_type, rest)) = entry.split_once('(') else {
+            continue;
+        };
+        if !INTERACTIVE_TYPES.contains(&ctrl_type.trim()) {
+            continue;
+        }
+        if let Some(after_key) = rest.split("name=\"").nth(1) {
+            if let Some((raw_name, _)) = after_key.split_once('"') {
+                let cleaned = raw_name.trim();
+                if !cleaned.is_empty() {
+                    return Some(truncate_chars(cleaned, 28));
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Resolves the best short semantic label for a picked UIA element, promoting an immediate
+/// named interactive ancestor (like `Button(name="固定展开")`) when the clicked leaf is an
+/// unnamed icon/Image inside a button.
+pub fn resolve_primary_element_label(e: &UiaElementInfo) -> Option<String> {
+    if !e.name.trim().is_empty() {
+        Some(truncate_chars(e.name.trim(), 28))
+    } else if !e.value.trim().is_empty() && e.value != "[PASSWORD_REDACTED]" {
+        Some(truncate_chars(e.value.trim(), 28))
+    } else if let Some(anc) = extract_interactive_ancestor_label(&e.ancestors) {
+        Some(anc)
+    } else if !e.automation_id.trim().is_empty() {
+        Some(truncate_chars(e.automation_id.trim(), 28))
+    } else if !e.help_text.trim().is_empty() {
+        Some(truncate_chars(e.help_text.trim(), 28))
+    } else {
+        None
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn build_capsule_payload(
     n: usize,
@@ -3235,17 +3289,7 @@ fn build_capsule_payload(
 
     let adapter_badge = adapter_outputs.iter().find_map(|o| o.badge.clone());
     let primary_label = primary_el
-        .and_then(|e| {
-            if !e.name.is_empty() {
-                Some(truncate_chars(&e.name, 28))
-            } else if !e.value.is_empty() && e.value != "[PASSWORD_REDACTED]" {
-                Some(truncate_chars(&e.value, 28))
-            } else if !e.automation_id.is_empty() {
-                Some(truncate_chars(&e.automation_id, 28))
-            } else {
-                None
-            }
-        })
+        .and_then(resolve_primary_element_label)
         .or_else(|| adapter_badge.clone())
         .unwrap_or_else(|| truncate_chars(win_title, 28));
 
@@ -3899,5 +3943,36 @@ mod tests {
         assert!(cap.summary.detail.contains("蓝线圈选"));
         assert!(cap.text.contains("kind=element_group"));
         assert!(cap.text.contains("count=3"));
+    }
+
+    #[test]
+    fn tap_pick_on_unnamed_icon_promotes_interactive_ancestor_button_name() {
+        let el = UiaElementInfo {
+            name: String::new(),
+            control_type: "Image".into(),
+            control_type_id: ControlType::Image as i32,
+            automation_id: String::new(),
+            class_name: String::new(),
+            value: String::new(),
+            help_text: String::new(),
+            text_snippet: String::new(),
+            rect: ScreenRect {
+                x: 1720,
+                y: 885,
+                w: 25,
+                h: 26,
+            },
+            sibling_index: 0,
+            ancestors: vec![
+                r#"Button(name="固定展开", id="")"#.into(),
+                r#"Group(name="", id="")"#.into(),
+            ],
+            is_root_or_empty: false,
+            affordance: None,
+        };
+        assert_eq!(
+            resolve_primary_element_label(&el).as_deref(),
+            Some("固定展开")
+        );
     }
 }

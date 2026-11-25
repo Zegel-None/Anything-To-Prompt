@@ -73,6 +73,8 @@ pub enum StateEvent {
         assistant_id: String,
         streaming: bool,
     },
+    /// Background reply from another conversation while Bar is Hidden -> wake Lip notification bubble only.
+    IncomingBubbleNotice,
     UiUpdated {
         hovered: bool,
         pinned: bool,
@@ -154,7 +156,11 @@ impl BarStateMachine {
     pub fn apply(&mut self, event: StateEvent) -> TransitionEffects {
         match event {
             StateEvent::SingleCtrlClose => {
-                if self.pen_active || self.modal || self.visibility != VisibilityState::Summon {
+                if self.pen_active
+                    || self.modal
+                    || self.pinned
+                    || self.visibility != VisibilityState::Summon
+                {
                     return TransitionEffects::none();
                 }
                 self.visibility = VisibilityState::Hidden;
@@ -190,7 +196,11 @@ impl BarStateMachine {
             }
 
             StateEvent::OutsideClickHide => {
-                if self.pen_active || self.modal || self.visibility == VisibilityState::Hidden {
+                if self.pen_active
+                    || self.modal
+                    || self.pinned
+                    || self.visibility == VisibilityState::Hidden
+                {
                     return TransitionEffects::none();
                 }
                 self.visibility = VisibilityState::Hidden;
@@ -229,7 +239,7 @@ impl BarStateMachine {
             },
 
             StateEvent::StepDown => {
-                if self.pen_active || self.modal {
+                if self.pen_active || self.modal || self.pinned {
                     return TransitionEffects::none();
                 }
                 match self.visibility {
@@ -290,6 +300,19 @@ impl BarStateMachine {
                 self.last_streaming = streaming;
 
                 if is_new_activity && self.visibility == VisibilityState::Hidden {
+                    self.visibility = VisibilityState::Lip;
+                    return TransitionEffects {
+                        window_action: Some(WindowAction::ShowNoActivate),
+                        bridge_mode: Some(BridgeMode::Lip),
+                        reset_pick_counter: false,
+                        record_sent_message: false,
+                    };
+                }
+                TransitionEffects::none()
+            }
+
+            StateEvent::IncomingBubbleNotice => {
+                if self.visibility == VisibilityState::Hidden {
                     self.visibility = VisibilityState::Lip;
                     return TransitionEffects {
                         window_action: Some(WindowAction::ShowNoActivate),
@@ -575,5 +598,64 @@ mod tests {
         });
         assert_eq!(sm.visibility, VisibilityState::Lip);
         assert_eq!(fx.window_action, Some(WindowAction::ShowNoActivate));
+    }
+
+    #[test]
+    fn pinned_bar_stays_open_on_outside_click_single_ctrl_esc_and_submit() {
+        let mut sm = BarStateMachine::new();
+        sm.apply(StateEvent::DoubleCtrlOpen);
+        sm.apply(StateEvent::UiUpdated {
+            hovered: true,
+            pinned: true,
+            popup_open: false,
+            modal: false,
+            composer_focused: true,
+        });
+        assert!(sm.pinned);
+
+        assert!(sm.apply(StateEvent::OutsideClickHide).window_action.is_none());
+        assert_eq!(sm.visibility, VisibilityState::Summon);
+
+        assert!(sm.apply(StateEvent::SingleCtrlClose).window_action.is_none());
+        assert_eq!(sm.visibility, VisibilityState::Summon);
+
+        assert!(sm.apply(StateEvent::StepDown).window_action.is_none());
+        assert_eq!(sm.visibility, VisibilityState::Summon);
+
+        let fx_sub = sm.apply(StateEvent::Submitted);
+        assert!(fx_sub.window_action.is_none());
+        assert_eq!(sm.visibility, VisibilityState::Summon);
+
+        // Unpin -> outside click closes normally again
+        sm.apply(StateEvent::UiUpdated {
+            hovered: false,
+            pinned: false,
+            popup_open: false,
+            modal: false,
+            composer_focused: false,
+        });
+        let fx_hide = sm.apply(StateEvent::OutsideClickHide);
+        assert_eq!(sm.visibility, VisibilityState::Hidden);
+        assert_eq!(fx_hide.window_action, Some(WindowAction::Hide));
+    }
+
+    #[test]
+    fn incoming_bubble_notice_wakes_only_when_hidden() {
+        let mut sm = BarStateMachine::new();
+        assert_eq!(sm.visibility, VisibilityState::Hidden);
+
+        let fx = sm.apply(StateEvent::IncomingBubbleNotice);
+        assert_eq!(sm.visibility, VisibilityState::Lip);
+        assert_eq!(fx.window_action, Some(WindowAction::ShowNoActivate));
+
+        // Clicking the bubble summons Bar
+        let fx2 = sm.apply(StateEvent::SummonFromLip);
+        assert_eq!(sm.visibility, VisibilityState::Summon);
+        assert_eq!(fx2.window_action, Some(WindowAction::ActivateAndFocus));
+
+        // While Summon, another conversation's IncomingBubbleNotice must NOT alter visibility
+        let fx3 = sm.apply(StateEvent::IncomingBubbleNotice);
+        assert_eq!(sm.visibility, VisibilityState::Summon);
+        assert!(fx3.window_action.is_none());
     }
 }

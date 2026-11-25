@@ -120,17 +120,19 @@
         'div',
         {
           style: {
+            position: 'relative',
             width: '100%',
             background: '#303032',
             borderRadius: '20px',
             border: '1px solid rgba(255, 255, 255, 0.08)',
-            padding: '13px 16px 11px 16px',
+            padding: '16px 16px 11px 16px',
             display: 'flex',
             flexDirection: 'column',
             boxSizing: 'border-box',
             boxShadow: '0 8px 26px rgba(0, 0, 0, 0.36)',
           },
         },
+        ctx.renderDragHandle && ctx.renderDragHandle(),
         ctx.renderCapsulesRow(),
         h('textarea', {
           'data-dsb-ext-input': '1',

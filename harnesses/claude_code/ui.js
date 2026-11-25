@@ -66,16 +66,18 @@
         'div',
         {
           style: {
+            position: 'relative',
             background: '#30302E',
             borderRadius: '15px',
             border: '1px solid rgba(255, 248, 240, 0.11)',
-            padding: '13px 14px 10px 15px',
+            padding: '16px 14px 10px 15px',
             display: 'flex',
             flexDirection: 'column',
             boxSizing: 'border-box',
             boxShadow: '0 4px 18px rgba(0, 0, 0, 0.28)',
           },
         },
+        ctx.renderDragHandle && ctx.renderDragHandle(),
         ctx.renderCapsulesRow(),
         h('textarea', {
           'data-dsb-ext-input': '1',

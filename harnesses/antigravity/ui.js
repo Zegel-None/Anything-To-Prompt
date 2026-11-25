@@ -44,15 +44,17 @@
         'div',
         {
           style: {
+            position: 'relative',
             background: '#17171a',
             borderRadius: '14px',
             border: '1px solid rgba(255, 255, 255, 0.08)',
-            padding: '11px 13px 9px 14px',
+            padding: '15px 13px 9px 14px',
             display: 'flex',
             flexDirection: 'column',
             boxSizing: 'border-box',
           },
         },
+        ctx.renderDragHandle && ctx.renderDragHandle(),
         ctx.renderCapsulesRow(),
         h('textarea', {
           'data-dsb-ext-input': '1',

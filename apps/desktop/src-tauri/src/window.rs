@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Mutex;
 use tauri::WebviewWindow;
 use windows::core::PWSTR;
 use windows::Win32::Foundation::{CloseHandle, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
@@ -90,6 +91,136 @@ pub fn compute_bottom_anchored_rect(
     let x = left + (avail_w - clamped_w) / 2;
     let y = bottom - phys_margin - clamped_h;
     (x, y, clamped_w, clamped_h)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CustomBarAnchor {
+    center_x: i32,
+    bottom_y: i32,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct BarDragSession {
+    start_cursor: POINT,
+    start_rect: RECT,
+}
+
+static CUSTOM_BAR_ANCHOR: Mutex<Option<CustomBarAnchor>> = Mutex::new(None);
+static BAR_DRAG_SESSION: Mutex<Option<BarDragSession>> = Mutex::new(None);
+
+pub fn compute_custom_anchored_rect(
+    center_x: i32,
+    bottom_y: i32,
+    phys_w: i32,
+    phys_h: i32,
+    bounds: (i32, i32, i32, i32),
+) -> (i32, i32) {
+    let (left, top, right, bottom) = bounds;
+    let min_x = left;
+    let max_x = (right - phys_w).max(left);
+    let x = (center_x - phys_w / 2).clamp(min_x, max_x);
+    let min_y = top;
+    let max_y = (bottom - phys_h).max(top);
+    let y = (bottom_y - phys_h).clamp(min_y, max_y);
+    (x, y)
+}
+
+fn query_monitor_work_bounds_at(pt: POINT) -> (i32, i32, i32, i32) {
+    unsafe {
+        let hmon = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
+        let mut mi = MONITORINFO {
+            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+            ..Default::default()
+        };
+        if GetMonitorInfoW(hmon, &mut mi).as_bool() {
+            (mi.rcWork.left, mi.rcWork.top, mi.rcWork.right, mi.rcWork.bottom)
+        } else {
+            (0, 0, 1920, 1032)
+        }
+    }
+}
+
+pub fn begin_bar_drag(bar_win: &WebviewWindow) -> bool {
+    let Some(hwnd) = hwnd_of(bar_win) else {
+        return false;
+    };
+    unsafe {
+        let mut pt = POINT::default();
+        let mut rc = RECT::default();
+        if GetCursorPos(&mut pt).is_err() || GetWindowRect(hwnd, &mut rc).is_err() {
+            return false;
+        }
+        if let Ok(mut guard) = BAR_DRAG_SESSION.lock() {
+            *guard = Some(BarDragSession {
+                start_cursor: pt,
+                start_rect: rc,
+            });
+        }
+        true
+    }
+}
+
+pub fn step_bar_drag(bar_win: &WebviewWindow) -> bool {
+    let Some(hwnd) = hwnd_of(bar_win) else {
+        return false;
+    };
+    let Some(sess) = BAR_DRAG_SESSION.lock().ok().and_then(|g| *g) else {
+        return false;
+    };
+    unsafe {
+        let mut cur = POINT::default();
+        if GetCursorPos(&mut cur).is_err() {
+            return false;
+        }
+        let dx = cur.x - sess.start_cursor.x;
+        let dy = cur.y - sess.start_cursor.y;
+        let w = (sess.start_rect.right - sess.start_rect.left).max(320);
+        let h = (sess.start_rect.bottom - sess.start_rect.top).max(40);
+        let (ml, mt, mr, mb) = query_monitor_work_bounds_at(cur);
+        // Allow free movement across the monitor while keeping at least 120px & handle reachable
+        let min_x = ml - w + 120.min(w);
+        let max_x = mr - 120.min(w);
+        let min_y = mt;
+        let max_y = (mb - 48).max(mt);
+        let x = (sess.start_rect.left + dx).clamp(min_x, max_x.max(min_x));
+        let y = (sess.start_rect.top + dy).clamp(min_y, max_y);
+
+        let _ = SetWindowPos(
+            hwnd,
+            None,
+            x,
+            y,
+            0,
+            0,
+            SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+        );
+        if let Ok(mut anchor) = CUSTOM_BAR_ANCHOR.lock() {
+            *anchor = Some(CustomBarAnchor {
+                center_x: x + w / 2,
+                bottom_y: y + h,
+            });
+        }
+        true
+    }
+}
+
+pub fn end_bar_drag() {
+    if let Ok(mut guard) = BAR_DRAG_SESSION.lock() {
+        *guard = None;
+    }
+}
+
+pub fn reset_bar_anchor(
+    bar_win: &WebviewWindow,
+    width_dip: i32,
+    height_dip: i32,
+    shapes: &[ShapeRectDip],
+) {
+    if let Ok(mut anchor) = CUSTOM_BAR_ANCHOR.lock() {
+        *anchor = None;
+    }
+    end_bar_drag();
+    apply_bar_layout(bar_win, width_dip, height_dip, shapes);
 }
 
 pub fn scale_shape_to_phys(shape: &ShapeRectDip, scale: f64) -> (i32, i32, i32, i32, i32) {
@@ -401,19 +532,34 @@ pub fn apply_bar_layout(
         return;
     };
     let scale = dpi_scale_for_hwnd(hwnd);
-    let mon = query_cursor_monitor_geometry(Some(hwnd));
-    let (x, y, phys_w, phys_h) = compute_bottom_anchored_rect(
-        (
-            mon.anchor_left,
-            mon.anchor_top,
-            mon.anchor_right,
-            mon.anchor_bottom,
-        ),
-        width_dip,
-        height_dip,
-        BOTTOM_MARGIN_DIP,
-        scale,
-    );
+    let custom_anchor = CUSTOM_BAR_ANCHOR.lock().ok().and_then(|g| *g);
+    let (x, y, phys_w, phys_h) = if let Some(anchor) = custom_anchor {
+        let bounds = query_monitor_work_bounds_at(POINT {
+            x: anchor.center_x,
+            y: anchor.bottom_y - 24,
+        });
+        let avail_w = (bounds.2 - bounds.0).max(320);
+        let avail_h = (bounds.3 - bounds.1).max(120);
+        let clamped_w = (((width_dip as f64) * scale).round() as i32).clamp(320, avail_w);
+        let clamped_h = (((height_dip as f64) * scale).round() as i32).clamp(40, avail_h);
+        let (cx, cy) =
+            compute_custom_anchored_rect(anchor.center_x, anchor.bottom_y, clamped_w, clamped_h, bounds);
+        (cx, cy, clamped_w, clamped_h)
+    } else {
+        let mon = query_cursor_monitor_geometry(Some(hwnd));
+        compute_bottom_anchored_rect(
+            (
+                mon.anchor_left,
+                mon.anchor_top,
+                mon.anchor_right,
+                mon.anchor_bottom,
+            ),
+            width_dip,
+            height_dip,
+            BOTTOM_MARGIN_DIP,
+            scale,
+        )
+    };
 
     unsafe {
         let overlay_vis = visible_overlay_hwnd();
@@ -847,5 +993,22 @@ mod tests {
         assert!(is_ime_or_voice_helper_identity("unknown.exe", "MSCTFIME_Candidate"));
         assert!(!is_ime_or_voice_helper_identity("chrome.exe", "Chrome_WidgetWin_1"));
         assert!(!is_ime_or_voice_helper_identity("Antigravity.exe", "Chrome_WidgetWin_1"));
+    }
+
+    #[test]
+    fn custom_anchor_keeps_bottom_edge_fixed_and_clamps_to_bounds() {
+        let bounds = (0, 0, 1920, 1040);
+        let (x1, y1) = compute_custom_anchored_rect(1200, 820, 760, 152, bounds);
+        assert_eq!(x1, 1200 - 380);
+        assert_eq!(y1 + 152, 820);
+
+        // Expanding upward keeps bottom edge fixed at 820
+        let (x2, y2) = compute_custom_anchored_rect(1200, 820, 760, 490, bounds);
+        assert_eq!(x2, x1);
+        assert_eq!(y2 + 490, 820);
+
+        // Near top edge: clamps cleanly to y=0 without flying off-screen
+        let (_x3, y3) = compute_custom_anchored_rect(1200, 300, 760, 490, bounds);
+        assert_eq!(y3, 0);
     }
 }
