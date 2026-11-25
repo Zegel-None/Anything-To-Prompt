@@ -865,7 +865,9 @@ fn start_hook_event_router(app: AppHandle, rx: mpsc::Receiver<HookEvent>) {
     std::thread::Builder::new()
         .name("dsb-hook-router".to_string())
         .spawn(move || {
-            let mut pending_raw_capture: Option<captures::RawScreenCapture> = None;
+            let mut pending_raw_capture: Option<
+                std::thread::JoinHandle<Option<captures::RawScreenCapture>>,
+            > = None;
             let mut pending_tap_allow_bg = false;
             let mut active_drag_mode = pick::adapters::office::OfficeDragMode::NormalStroke;
             let mut active_drag_hwnd: isize = 0;
@@ -1011,7 +1013,11 @@ fn start_hook_event_router(app: AppHandle, rx: mpsc::Receiver<HookEvent>) {
                             .lock()
                             .map(|mut d| is_bg_dwell_unlocked(&mut d))
                             .unwrap_or(false);
-                        pending_raw_capture = pick::capture_mousedown_snapshot(x, y);
+                        // Spawn pre-drag snapshot asynchronously so PenMouseDown returns in <0.1ms
+                        // and the first PenDrag frames paint on the overlay with 0ms capture lag!
+                        pending_raw_capture = Some(std::thread::spawn(move || {
+                            pick::capture_mousedown_snapshot(x, y)
+                        }));
                         // Right button ALWAYS draws a red doodle screenshot (never hijacked by Office text/cell drag).
                         if button == hooks::PenButton::Right {
                             active_drag_mode = pick::adapters::office::OfficeDragMode::NormalStroke;
@@ -1104,18 +1110,22 @@ fn start_hook_event_router(app: AppHandle, rx: mpsc::Receiver<HookEvent>) {
                         }
                     }
                     HookEvent::PenTap { x, y } => {
-                        let pre = pending_raw_capture.take();
+                        let pre_handle = pending_raw_capture.take();
                         let allow_bg = pending_tap_allow_bg;
                         pending_tap_allow_bg = false;
                         active_drag_mode = pick::adapters::office::OfficeDragMode::NormalStroke;
                         active_drag_hwnd = 0;
                         let tap_app = app.clone();
                         std::thread::spawn(move || {
+                            let pre = pre_handle.and_then(|h| h.join().ok().flatten());
                             pick::execute_tap_pick(&tap_app, x, y, pre, allow_bg);
                         });
                     }
                     HookEvent::PenStroke { points, button } => {
-                        let pre = pending_raw_capture.take();
+                        let pre_handle = pending_raw_capture.take();
+                        let need_pre = button == hooks::PenButton::Right
+                            || active_drag_mode
+                                != pick::adapters::office::OfficeDragMode::NormalStroke;
                         pending_tap_allow_bg = false;
                         active_drag_mode = pick::adapters::office::OfficeDragMode::NormalStroke;
                         active_drag_hwnd = 0;
@@ -1124,6 +1134,11 @@ fn start_hook_event_router(app: AppHandle, rx: mpsc::Receiver<HookEvent>) {
                         }
                         let stroke_app = app.clone();
                         std::thread::spawn(move || {
+                            let pre = if need_pre {
+                                pre_handle.and_then(|h| h.join().ok().flatten())
+                            } else {
+                                None
+                            };
                             pick::execute_stroke_pick(&stroke_app, points, button, pre);
                         });
                     }
@@ -1281,7 +1296,7 @@ pub fn run() {
     }));
 
     let search_engine = Arc::new(search::SearchEngine::new(config.search_roots.clone()));
-    search_engine.spawn_background_indexer();
+    let search_engine_for_setup = search_engine.clone();
 
     let app_shared = AppShared {
         config: Mutex::new(config),
@@ -1577,6 +1592,7 @@ pub fn run() {
             start_input_hooks(hook_shared.clone(), hook_tx);
             start_hook_event_router(app_handle.clone(), hook_rx);
             start_dsh_health_monitor(app_handle.clone());
+            search_engine_for_setup.spawn_background_indexer();
 
             if let Some(target) = startup_dev_state {
                 dispatch_state_event(&app_handle, StateEvent::DevForceState(target));

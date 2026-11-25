@@ -153,6 +153,16 @@ impl SearchEngine {
         let _ = std::thread::Builder::new()
             .name("atp-quick-search-indexer".to_string())
             .spawn(move || {
+                // Lower priority + brief yield so WebView2 cold init and WH_MOUSE_LL hooks come up first
+                #[cfg(windows)]
+                unsafe {
+                    use windows::Win32::System::Threading::{
+                        GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_BELOW_NORMAL,
+                    };
+                    let _ = SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+                }
+                std::thread::sleep(std::time::Duration::from_millis(350));
+
                 // Phase 1 (<0.5s): Tier 1 high-value curated roots + Start Menu apps live immediately
                 let seen_t1 = engine.rebuild_tier1_index();
 

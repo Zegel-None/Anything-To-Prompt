@@ -693,22 +693,111 @@ pub fn save_annotated_capture(
     Ok(out_path)
 }
 
-/// Saves an unannotated, clean reference screenshot (no red stroke / badge occlusion)
-/// alongside a red-doodle capture so vision models can read occluded details accurately.
-pub fn save_clean_capture(
+/// Saves BOTH the annotated red-doodle PNG and the unoccluded clean reference PNG in a single
+/// PNG-encode pass, writing the clean PNG while the overlay canvas composites the red stroke in parallel.
+pub fn save_red_dual_captures(
+    app: &AppHandle,
     raw: &RawScreenCapture,
+    rect: Option<ScreenRect>,
+    strokes: &[(i32, i32)],
     number: usize,
     cfg: &AppConfig,
-) -> Result<PathBuf> {
+) -> (Option<PathBuf>, Option<PathBuf>) {
     let captures_dir = AppConfig::captures_dir();
-    fs::create_dir_all(&captures_dir).context("failed to create captures dir")?;
-    let filename = format!("pick-{}-{}-clean.png", now_unix_millis(), number);
-    let out_path = captures_dir.join(filename);
-    raw.image
-        .save_with_format(&out_path, ImageFormat::Png)
-        .context("failed to save clean reference PNG")?;
-    register_saved_capture(&out_path, cfg);
-    Ok(out_path)
+    if fs::create_dir_all(&captures_dir).is_err() {
+        return (None, None);
+    }
+    let ts = now_unix_millis();
+    let annot_path = captures_dir.join(format!("pick-{ts}-{number}.png"));
+    let clean_path = captures_dir.join(format!("pick-{ts}-{number}-clean.png"));
+
+    let mut png_buf = Vec::new();
+    let encoded_ok = raw
+        .image
+        .write_to(&mut Cursor::new(&mut png_buf), ImageFormat::Png)
+        .is_ok();
+
+    // Kick off overlay canvas composition first so it overlaps disk write of the clean PNG!
+    let mut compose_rx: Option<(String, mpsc::Receiver<String>)> = None;
+    if encoded_ok {
+        if let (Some(ov), Some(shared)) = (
+            app.get_webview_window("overlay"),
+            app.try_state::<AppShared>(),
+        ) {
+            let b64 = base64::engine::general_purpose::STANDARD.encode(&png_buf);
+            let req_id = format!("cmp-{ts}-{number}");
+            let (tx, rx) = mpsc::channel::<String>();
+            if let Ok(mut map) = shared.compose_waiters.lock() {
+                map.insert(req_id.clone(), tx);
+            }
+            let stroke_json: Vec<serde_json::Value> = strokes
+                .iter()
+                .map(|&(x, y)| serde_json::json!({ "x": x, "y": y }))
+                .collect();
+            let _ = ov.emit(
+                "pen:compose",
+                serde_json::json!({
+                    "id": req_id,
+                    "pngBase64": b64,
+                    "originX": raw.origin_x,
+                    "originY": raw.origin_y,
+                    "rect": rect,
+                    "strokes": stroke_json,
+                    "n": number,
+                }),
+            );
+            compose_rx = Some((req_id, rx));
+        }
+    }
+
+    // Write clean reference PNG directly from the already-encoded bytes (zero second PNG encode!)
+    let clean_written = (encoded_ok && fs::write(&clean_path, &png_buf).is_ok())
+        || raw.image.save_with_format(&clean_path, ImageFormat::Png).is_ok();
+    let saved_clean = if clean_written {
+        register_saved_capture(&clean_path, cfg);
+        Some(clean_path)
+    } else {
+        None
+    };
+
+    let mut composed_bytes: Option<Vec<u8>> = None;
+    if let Some((req_id, rx)) = compose_rx {
+        if let Ok(data_url) = rx.recv_timeout(Duration::from_millis(400)) {
+            if let Some(stripped) = data_url.strip_prefix("data:image/png;base64,") {
+                if let Ok(decoded) = base64::engine::general_purpose::STANDARD.decode(stripped) {
+                    if !decoded.is_empty() {
+                        composed_bytes = Some(decoded);
+                    }
+                }
+            }
+        } else if let Some(shared) = app.try_state::<AppShared>() {
+            if let Ok(mut map) = shared.compose_waiters.lock() {
+                map.remove(&req_id);
+            }
+        }
+    }
+
+    let saved_annot = if let Some(bytes) = composed_bytes {
+        if fs::write(&annot_path, bytes).is_ok() {
+            register_saved_capture(&annot_path, cfg);
+            Some(annot_path)
+        } else {
+            None
+        }
+    } else {
+        let fallback_img = annotate_rgba_in_rust(raw, rect, strokes, number);
+        if fallback_img
+            .save_with_format(&annot_path, ImageFormat::Png)
+            .is_ok()
+        {
+            register_saved_capture(&annot_path, cfg);
+            Some(annot_path)
+        } else {
+            None
+        }
+    };
+
+    (saved_annot, saved_clean)
 }
 
 #[cfg(test)]

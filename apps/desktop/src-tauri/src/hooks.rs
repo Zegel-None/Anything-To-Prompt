@@ -14,9 +14,9 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, DispatchMessageW, GetCursorPos, GetForegroundWindow, GetMessageW,
     GetWindowRect, PostThreadMessageW, SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx,
-    HHOOK, KBDLLHOOKSTRUCT, LLKHF_INJECTED, MSG, MSLLHOOKSTRUCT, WH_KEYBOARD_LL, WH_MOUSE_LL,
-    WM_APP, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MOUSEMOVE,
-    WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSKEYDOWN, WM_SYSKEYUP,
+    HHOOK, KBDLLHOOKSTRUCT, MSG, MSLLHOOKSTRUCT, WH_KEYBOARD_LL, WH_MOUSE_LL, WM_APP, WM_KEYDOWN,
+    WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MOUSEMOVE, WM_RBUTTONDOWN,
+    WM_RBUTTONUP, WM_SYSKEYDOWN, WM_SYSKEYUP,
 };
 
 const DUMMY_EXTRA_INFO: usize = 0xD5B0_00E8;
@@ -607,42 +607,41 @@ unsafe extern "system" fn low_level_keyboard_proc(
         if let Some(bridge) = HOOK_BRIDGE.get() {
             bridge.kb_hook_events.fetch_add(1, Ordering::Relaxed);
             let kb = &*(lparam.0 as *const KBDLLHOOKSTRUCT);
+            // Skip only our own synthetic VK_E8 (DUMMY_EXTRA_INFO). Allow injected non-Ctrl keys
+            // (Logitech macros, remote desktop, Computer-Use) so fast Ctrl+C/V/A chords taint immediately.
             if kb.dwExtraInfo != DUMMY_EXTRA_INFO {
-                let is_injected = (kb.flags.0 & LLKHF_INJECTED.0) != 0;
-                if !is_injected || bridge.shared.accept_injected.load(Ordering::Relaxed) {
-                    // Ctrl down/up transitions are driven solely by 8ms OS physical key-state
-                    // polling (GetAsyncKeyState) in dsb-hook-worker so WH_KEYBOARD_LL (which fires
-                    // BEFORE Windows updates GetAsyncKeyState) never races and splits a single Ctrl
-                    // press into a phantom double-tap. Here we only forward real non-Ctrl keys so
-                    // even ultra-fast chords (e.g. Ctrl+C/V/A) taint immediately.
-                    if !DoubleCtrlDetector::is_ctrl_vk(kb.vkCode)
-                        && !is_ignored_pseudo_vk(kb.vkCode)
-                    {
-                        let msg = wparam.0 as u32;
-                        let now_ms = bridge.epoch.elapsed().as_millis() as u64;
-                        match msg {
-                            WM_KEYDOWN | WM_SYSKEYDOWN => {
-                                bridge.first_ctrl_tainted.store(true, Ordering::Release);
-                                bridge.second_ctrl_fast.store(false, Ordering::Release);
-                                if bridge.ctrl_down_fast.load(Ordering::Acquire) {
-                                    bridge
-                                        .shared
-                                        .pen_overlay_active
-                                        .store(false, Ordering::Release);
-                                }
-                                let _ = bridge.raw_tx.send(RawSignal::KeyDown {
-                                    vk: kb.vkCode,
-                                    now_ms,
-                                });
+                // Ctrl down/up transitions are driven solely by 8ms OS physical key-state
+                // polling (GetAsyncKeyState) in dsb-hook-worker so WH_KEYBOARD_LL (which fires
+                // BEFORE Windows updates GetAsyncKeyState) never races and splits a single Ctrl
+                // press into a phantom double-tap. Here we only forward real non-Ctrl keys so
+                // even ultra-fast chords (e.g. Ctrl+C/V/A) taint immediately.
+                if !DoubleCtrlDetector::is_ctrl_vk(kb.vkCode)
+                    && !is_ignored_pseudo_vk(kb.vkCode)
+                {
+                    let msg = wparam.0 as u32;
+                    let now_ms = bridge.epoch.elapsed().as_millis() as u64;
+                    match msg {
+                        WM_KEYDOWN | WM_SYSKEYDOWN => {
+                            bridge.first_ctrl_tainted.store(true, Ordering::Release);
+                            bridge.second_ctrl_fast.store(false, Ordering::Release);
+                            if bridge.ctrl_down_fast.load(Ordering::Acquire) {
+                                bridge
+                                    .shared
+                                    .pen_overlay_active
+                                    .store(false, Ordering::Release);
                             }
-                            WM_KEYUP | WM_SYSKEYUP => {
-                                let _ = bridge.raw_tx.send(RawSignal::KeyUp {
-                                    vk: kb.vkCode,
-                                    now_ms,
-                                });
-                            }
-                            _ => {}
+                            let _ = bridge.raw_tx.send(RawSignal::KeyDown {
+                                vk: kb.vkCode,
+                                now_ms,
+                            });
                         }
+                        WM_KEYUP | WM_SYSKEYUP => {
+                            let _ = bridge.raw_tx.send(RawSignal::KeyUp {
+                                vk: kb.vkCode,
+                                now_ms,
+                            });
+                        }
+                        _ => {}
                     }
                 }
             }

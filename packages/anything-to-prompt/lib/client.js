@@ -2496,11 +2496,18 @@ window.__ModuleLoader__.load({
                 setQuickHits(list);
                 setQuickSelectedIdx(-1);
                 if (list.length > 0) {
-                  tauriInvoke('quick_search_status')
-                    .then((st) => {
-                      if (st && typeof st === 'object') setQuickStatus(st);
-                    })
-                    .catch(() => {});
+                  const nowTs = Date.now();
+                  const curMode = quickStatus && quickStatus.engineMode;
+                  const alreadyFull = curMode === 'ntfs_hybrid' || curMode === 'everything_ipc';
+                  const lastTs = dsbRuntime._lastQuickStatusAt || 0;
+                  if (!alreadyFull || nowTs - lastTs > 15000) {
+                    dsbRuntime._lastQuickStatusAt = nowTs;
+                    tauriInvoke('quick_search_status')
+                      .then((st) => {
+                        if (st && typeof st === 'object') setQuickStatus(st);
+                      })
+                      .catch(() => {});
+                  }
                 }
               })
               .catch(() => {

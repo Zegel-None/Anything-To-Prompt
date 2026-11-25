@@ -4,7 +4,7 @@ pub mod grounding;
 pub mod process;
 
 use crate::captures::{
-    capture_target_window_bitblt, save_annotated_capture, save_clean_capture, RawScreenCapture,
+    capture_target_window_bitblt, save_annotated_capture, save_red_dual_captures, RawScreenCapture,
     ScreenRect,
 };
 use crate::config::OutputTarget;
@@ -1789,6 +1789,9 @@ fn execute_red_screenshot_pick(
 
     let (root_hwnd, target_pid, win_title, win_class) = resolve_root_window_at(center_x, center_y);
     if target_pid == 0 {
+        if let Some(ov) = app.get_webview_window("overlay") {
+            let _ = ov.emit("pen:clear_stroke", serde_json::json!({}));
+        }
         return;
     }
 
@@ -1815,16 +1818,17 @@ fn execute_red_screenshot_pick(
 
     let raw_cap =
         pre_capture.or_else(|| capture_target_window_bitblt(root_hwnd, center_x, center_y).ok());
-    let annotated_screenshot_path = raw_cap.as_ref().and_then(|raw| {
-        save_annotated_capture(app, raw, Some(bbox), &points, n, &cfg)
-            .ok()
-            .map(|p| p.to_string_lossy().to_string())
-    });
-    let clean_screenshot_path = raw_cap.as_ref().and_then(|raw| {
-        save_clean_capture(raw, n, &cfg)
-            .ok()
-            .map(|p| p.to_string_lossy().to_string())
-    });
+    let (annotated_screenshot_path, clean_screenshot_path) = match raw_cap.as_ref() {
+        Some(raw) => {
+            let (annot_p, clean_p) =
+                save_red_dual_captures(app, raw, Some(bbox), &points, n, &cfg);
+            (
+                annot_p.map(|p| p.to_string_lossy().to_string()),
+                clean_p.map(|p| p.to_string_lossy().to_string()),
+            )
+        }
+        None => (None, None),
+    };
 
     let proc_meta = inspect_process(target_pid, &cfg.app_source_map);
     let app_display = if !proc_meta.product_name.is_empty() {
@@ -1930,6 +1934,9 @@ fn execute_blue_selection_pick(
 
     let (root_hwnd, target_pid, win_title, win_class) = resolve_root_window_at(start_pt.0, start_pt.1);
     if target_pid == 0 {
+        if let Some(ov) = app.get_webview_window("overlay") {
+            let _ = ov.emit("pen:clear_stroke", serde_json::json!({}));
+        }
         return;
     }
 
@@ -2039,6 +2046,9 @@ fn execute_blue_selection_pick(
             bbox.w,
             bbox.h
         );
+        if let Some(ov) = app.get_webview_window("overlay") {
+            let _ = ov.emit("pen:clear_stroke", serde_json::json!({}));
+        }
         emit_pick_toast(app, "蓝线范围内未检测到前景元素（已自动排除背景）");
         return;
     }

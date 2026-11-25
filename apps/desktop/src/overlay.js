@@ -776,6 +776,13 @@
       redraw();
     });
 
+    evApi.listen('pen:clear_stroke', () => {
+      state.liveStroke = [];
+      state.blueMorph = { lockedLasso: false, morphStartTs: 0, lastBox: null };
+      state.liveDrag = null;
+      redraw();
+    });
+
     evApi.listen('pen:toast', (ev) => {
       const p = ev.payload || {};
       if (p.text) showToast(p.text, p.durationMs || 1500);

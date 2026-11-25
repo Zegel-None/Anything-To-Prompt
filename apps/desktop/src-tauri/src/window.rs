@@ -197,7 +197,7 @@ pub fn init_bar_window(bar_win: &WebviewWindow, exclude_from_capture: bool, widt
     apply_bar_layout(bar_win, width_dip, DEFAULT_LIP_HEIGHT_DIP, &[default_shape]);
 }
 
-pub fn init_overlay_window(overlay_win: &WebviewWindow, _exclude_from_capture: bool) {
+pub fn init_overlay_window(overlay_win: &WebviewWindow, exclude_from_capture: bool) {
     // Use Tauri's DirectComposition-safe click-through API (never touch WebView2 child HWNDs with WS_EX_LAYERED!)
     let _ = overlay_win.set_ignore_cursor_events(true);
 
@@ -224,8 +224,11 @@ pub fn init_overlay_window(overlay_win: &WebviewWindow, _exclude_from_capture: b
             0,
             SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_FRAMECHANGED,
         );
-        // Overlay is always excluded from screen captures so pen strokes never pollute raw screenshots
-        let _ = SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE);
+        // Overlay is excluded from screen captures by default so pen strokes never pollute raw screenshots
+        // (honors `--dev-allow-capture` when explicitly requested for visual demo/E2E verification).
+        if exclude_from_capture {
+            let _ = SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE);
+        }
     }
 }
 
