@@ -1,0 +1,29 @@
+{
+  "id": "my_harness",
+  "order": 100,
+  "aliases": ["my-harness"],
+  "label": "MyHarness",
+  "fullLabel": "My Custom Harness",
+  "badge": "MH",
+  "syncHint": "本地 CLI / 桌面端实时同步",
+  "placeholder": "输入消息，支持按 Ctrl 圈选屏幕元素…",
+  "accent": "#a78bfa",
+  "accentBg": "rgba(167, 139, 250, 0.16)",
+  "accentBorder": "rgba(167, 139, 250, 0.44)",
+  "surface": "#1c1c20",
+  "border": "rgba(255, 255, 255, 0.12)",
+  "useNativeComposer": false,
+  "cornerRadius": 18,
+  "fallbackSlabHeight": 168,
+  "chipIconStyle": "dot",
+  "newWorkspaceLabel": "指定目录新开…",
+  "detailButtonTitle": "点击将 My Custom Harness 拉到最前并展示这个对话",
+  "emptyHistoryHint": "My Custom Harness 已就绪 — 发消息后对话流将在此实时展开",
+  "emptyLipHint": "My Custom Harness 已就绪 · 双击 Ctrl 唤出输入框",
+  "defaultSelection": {
+    "workspaceId": "",
+    "workspacePath": "",
+    "sessionId": "",
+    "title": "MyHarness · 新对话"
+  }
+}

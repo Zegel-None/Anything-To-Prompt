@@ -1,0 +1,29 @@
+{
+  "id": "antigravity",
+  "order": 20,
+  "aliases": ["agy"],
+  "label": "Antigravity",
+  "fullLabel": "Antigravity",
+  "badge": "AG",
+  "syncHint": "CLI Project 原生同步",
+  "placeholder": "提问任何问题，使用 @ 提及，/ 执行操作",
+  "accent": "#38bdf8",
+  "accentBg": "rgba(56, 189, 248, 0.12)",
+  "accentBorder": "rgba(255, 255, 255, 0.14)",
+  "surface": "#16171a",
+  "border": "rgba(255, 255, 255, 0.11)",
+  "useNativeComposer": false,
+  "cornerRadius": 16,
+  "fallbackSlabHeight": 158,
+  "chipIconStyle": "dot",
+  "newWorkspaceLabel": "指定目录新开…",
+  "detailButtonTitle": "点击将 Antigravity 拉到最前并展示这个对话",
+  "emptyHistoryHint": "Antigravity 已就绪 — 发消息后自动同步到桌面端 CLI Project",
+  "emptyLipHint": "Antigravity · CLI Project 已就绪 · 双击 Ctrl 唤出输入框",
+  "defaultSelection": {
+    "workspaceId": "default-cli-project",
+    "workspacePath": "",
+    "sessionId": "",
+    "title": "CLI Project · 新对话"
+  }
+}

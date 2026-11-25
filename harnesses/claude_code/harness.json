@@ -1,0 +1,29 @@
+{
+  "id": "claude_code",
+  "order": 40,
+  "aliases": ["claude-code", "claudecode", "claude"],
+  "label": "Claude",
+  "fullLabel": "Claude Code",
+  "badge": "CC",
+  "syncHint": "CLI 同库共享历史",
+  "placeholder": "今天想处理什么？支持按 Ctrl 圈选屏幕元素…",
+  "accent": "#D97757",
+  "accentBg": "rgba(217, 119, 87, 0.17)",
+  "accentBorder": "rgba(217, 119, 87, 0.46)",
+  "surface": "#2B2B29",
+  "border": "rgba(255, 248, 240, 0.12)",
+  "useNativeComposer": false,
+  "cornerRadius": 18,
+  "fallbackSlabHeight": 174,
+  "chipIconStyle": "dot",
+  "newWorkspaceLabel": "指定目录新开…",
+  "detailButtonTitle": "点击将 Claude Code 拉到最前并展示这个对话",
+  "emptyHistoryHint": "Claude Code CLI 已就绪 — 发消息后自动同步至 ~/.claude/projects 会话历史",
+  "emptyLipHint": "Claude Code · CLI 已就绪 · 双击 Ctrl 唤出输入框",
+  "defaultSelection": {
+    "workspaceId": "",
+    "workspacePath": "",
+    "sessionId": "",
+    "title": "Claude Code · 新对话"
+  }
+}

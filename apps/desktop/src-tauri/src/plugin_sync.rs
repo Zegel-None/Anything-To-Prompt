@@ -32,7 +32,7 @@ const EMBEDDED_FILES: &[(&str, &str)] = &[
     ),
     (
         "lib/client.js",
-        include_str!("../../../../packages/anything-to-prompt/lib/client.js"),
+        include_str!(concat!(env!("OUT_DIR"), "/generated_client.js")),
     ),
     (
         "locale/zh.json",

@@ -1,0 +1,23 @@
+{
+  "id": "dsh",
+  "order": 10,
+  "aliases": ["deepseek", "deepseek-harness", "deepseek_harness"],
+  "label": "DeepSeek",
+  "fullLabel": "DeepSeek Harness",
+  "badge": "DS",
+  "syncHint": "双向实时同步",
+  "placeholder": "",
+  "accent": "#60a5fa",
+  "accentBg": "rgba(59, 130, 246, 0.16)",
+  "accentBorder": "rgba(96, 165, 250, 0.42)",
+  "surface": "var(--dsw-alias-bg-layer-2, #27272a)",
+  "border": "var(--dsw-alias-border-l2, rgba(128,128,128,0.22))",
+  "useNativeComposer": true,
+  "cornerRadius": 24,
+  "fallbackSlabHeight": 158,
+  "chipIconStyle": "folder",
+  "newWorkspaceLabel": "新建工作区…",
+  "detailButtonTitle": "点击在浏览器打开当前 DeepSeek Harness 对话",
+  "emptyHistoryHint": "暂无历史消息 — 在下方输入框发消息后，对话流将在此实时展开",
+  "emptyLipHint": "暂无消息 · 双击 Ctrl 唤出输入框"
+}

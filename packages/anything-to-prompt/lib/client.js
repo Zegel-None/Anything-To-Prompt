@@ -49,74 +49,167 @@ window.__ModuleLoader__.load({
     const STORAGE_KEY_ACTIVE_HARNESS = 'dsh_card_dock:active_harness';
     const STORAGE_KEY_CLAUDE_PERM = 'dsh_card_dock:claude_perm_mode';
 
-    const CLAUDE_PERM_MODES = [
-      { id: 'auto', label: '自动', title: 'Claude auto 模式（默认：智能自动执行并拦截高危操作）' },
-      { id: 'acceptEdits', label: '自动编辑', title: 'acceptEdits（自动允许文件编辑）' },
-      { id: 'plan', label: '仅规划', title: 'plan（只读分析与规划，不修改文件）' },
-      { id: 'dontAsk', label: '免询问', title: 'dontAsk（免交互确认提示）' },
-    ];
-
-    const HARNESS_ORDER = ['dsh', 'antigravity', 'codex', 'claude_code'];
-    const HARNESS_META = {
-      dsh: {
-        id: 'dsh',
-        label: 'DeepSeek',
-        fullLabel: 'DeepSeek Harness',
-        badge: 'DS',
-        syncHint: '双向实时同步',
-        accent: '#60a5fa',
-        accentBg: 'rgba(59, 130, 246, 0.16)',
-        accentBorder: 'rgba(96, 165, 250, 0.42)',
-        surface: 'var(--dsw-alias-bg-layer-2, #27272a)',
-        border: 'var(--dsw-alias-border-l2, rgba(128,128,128,0.22))',
-      },
-      antigravity: {
-        id: 'antigravity',
-        label: 'Antigravity',
-        fullLabel: 'Antigravity',
-        badge: 'AG',
-        syncHint: 'CLI Project 原生同步',
-        placeholder: '提问任何问题，使用 @ 提及，/ 执行操作',
-        accent: '#38bdf8',
-        accentBg: 'rgba(56, 189, 248, 0.12)',
-        accentBorder: 'rgba(255, 255, 255, 0.14)',
-        surface: '#16171a',
-        border: 'rgba(255, 255, 255, 0.11)',
-      },
-      codex: {
-        id: 'codex',
-        label: 'Codex',
-        fullLabel: 'Codex',
-        badge: 'CX',
-        syncHint: 'app-server 共享历史',
-        placeholder: '随心输入',
-        accent: '#3b82f6',
-        accentBg: 'rgba(59, 130, 246, 0.16)',
-        accentBorder: 'rgba(255, 255, 255, 0.14)',
-        surface: '#262628',
-        border: 'rgba(255, 255, 255, 0.13)',
-      },
-      claude_code: {
-        id: 'claude_code',
-        label: 'Claude',
-        fullLabel: 'Claude Code',
-        badge: 'CC',
-        syncHint: 'CLI 同库共享历史',
-        placeholder: '今天想处理什么？支持按 Ctrl 圈选屏幕元素…',
-        accent: '#D97757',
-        accentBg: 'rgba(217, 119, 87, 0.17)',
-        accentBorder: 'rgba(217, 119, 87, 0.46)',
-        surface: '#2B2B29',
-        border: 'rgba(255, 248, 240, 0.12)',
-      },
+    // Shared crisp SVG icons exposed to every drop-in harness module (`harnesses/<id>/ui.js`)
+    const HARNESS_SDK_ICONS = {
+      plus: (sz = 16, col = '#a1a1aa') =>
+        h(
+          'svg',
+          { width: sz, height: sz, viewBox: '0 0 24 24', fill: 'none', stroke: col, strokeWidth: 2, strokeLinecap: 'round' },
+          h('path', { d: 'M12 5v14M5 12h14' }),
+        ),
+      chevronDown: (col = 'rgba(255,255,255,0.45)') =>
+        h(
+          'svg',
+          { width: 11, height: 11, viewBox: '0 0 24 24', fill: 'none', stroke: col, strokeWidth: 2.2, strokeLinecap: 'round', strokeLinejoin: 'round' },
+          h('path', { d: 'M6 9l6 6 6-6' }),
+        ),
+      shield: (col = '#a1a1aa') =>
+        h(
+          'svg',
+          { width: 13, height: 13, viewBox: '0 0 24 24', fill: 'none', stroke: col, strokeWidth: 1.9, strokeLinecap: 'round', strokeLinejoin: 'round' },
+          h('path', { d: 'M12 3l7 3v5c0 5-3.2 8.8-7 10-3.8-1.2-7-5-7-10V6l7-3z' }),
+          h('path', { d: 'M12 8v4M12 16h.01' }),
+        ),
+      laptop: (col = '#d4d4d8') =>
+        h(
+          'svg',
+          { width: 14, height: 14, viewBox: '0 0 24 24', fill: 'none', stroke: col, strokeWidth: 1.8, strokeLinecap: 'round', strokeLinejoin: 'round' },
+          h('rect', { x: 4, y: 5, width: 16, height: 11, rx: 1.8 }),
+          h('path', { d: 'M2 19h20' }),
+        ),
+      folderOutline: (col = '#d4d4d8') =>
+        h(
+          'svg',
+          { width: 14, height: 14, viewBox: '0 0 24 24', fill: 'none', stroke: col, strokeWidth: 1.8, strokeLinecap: 'round', strokeLinejoin: 'round' },
+          h('path', { d: 'M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7z' }),
+        ),
+      arrowUp: (col = '#111214') =>
+        h(
+          'svg',
+          { width: 14, height: 14, viewBox: '0 0 24 24', fill: 'none', stroke: col, strokeWidth: 2.3, strokeLinecap: 'round', strokeLinejoin: 'round' },
+          h('path', { d: 'M12 19V5M6 11l6-6 6 6' }),
+        ),
+      claudeSpark: (sz = 14, col = '#D97757') =>
+        h(
+          'svg',
+          { width: sz, height: sz, viewBox: '0 0 24 24', fill: 'none', stroke: col, strokeWidth: 2, strokeLinecap: 'round' },
+          h('path', { d: 'M12 2.5v19M2.5 12h19M5.2 5.2l13.6 13.6M18.8 5.2L5.2 18.8' }),
+          h('circle', { cx: 12, cy: 12, r: 2.2, fill: col, stroke: 'none' }),
+        ),
+      search: (sz = 12, col = 'rgba(229,231,235,0.68)') =>
+        h(
+          'svg',
+          { width: sz, height: sz, viewBox: '0 0 24 24', fill: 'none', stroke: col, strokeWidth: 2.1, strokeLinecap: 'round', strokeLinejoin: 'round' },
+          h('circle', { cx: 11, cy: 11, r: 7 }),
+          h('path', { d: 'M20 20l-3.5-3.5' }),
+        ),
     };
+
+    // Auto-populated at build time by `apps/desktop/src-tauri/build.rs` from `harnesses/<id>/{harness.json,ui.js}`.
+    // Contributors only add a new folder under `harnesses/` — zero edits needed here.
+    const __ATP_BUILTIN_HARNESS_MODULES__ = /*__ATP_HARNESS_MODULES__*/ [];
+
+    const FALLBACK_DSH_MANIFEST = {
+      id: 'dsh',
+      order: 10,
+      aliases: ['deepseek'],
+      label: 'DeepSeek',
+      fullLabel: 'DeepSeek Harness',
+      badge: 'DS',
+      syncHint: '双向实时同步',
+      placeholder: '',
+      accent: '#60a5fa',
+      accentBg: 'rgba(59, 130, 246, 0.16)',
+      accentBorder: 'rgba(96, 165, 250, 0.42)',
+      surface: 'var(--dsw-alias-bg-layer-2, #27272a)',
+      border: 'var(--dsw-alias-border-l2, rgba(128,128,128,0.22))',
+      useNativeComposer: true,
+      cornerRadius: CARD_RADIUS_PX,
+      fallbackSlabHeight: 158,
+      chipIconStyle: 'folder',
+      newWorkspaceLabel: '新建工作区…',
+      detailButtonTitle: '点击在浏览器打开当前 DeepSeek Harness 对话',
+      emptyHistoryHint: '暂无历史消息 — 在下方输入框发消息后，对话流将在此实时展开',
+      emptyLipHint: '暂无消息 · 双击 Ctrl 唤出输入框',
+    };
+
+    const HARNESS_SDK = { h, icons: HARNESS_SDK_ICONS };
+    const HARNESS_ORDER = [];
+    const HARNESS_META = {};
+    const HARNESS_ADAPTERS = {};
+    const HARNESS_ALIAS_MAP = {};
+
+    function registerHarnessModule(entry) {
+      if (!entry || !entry.manifest || !entry.manifest.id) return;
+      const raw = entry.manifest;
+      const id = String(raw.id).trim().toLowerCase();
+      if (!id || HARNESS_META[id]) return;
+      const meta = {
+        id,
+        order: Number.isFinite(raw.order) ? raw.order : 500,
+        aliases: Array.isArray(raw.aliases) ? raw.aliases : [],
+        label: raw.label || id,
+        fullLabel: raw.fullLabel || raw.label || id,
+        badge: raw.badge || id.slice(0, 2).toUpperCase(),
+        syncHint: raw.syncHint || '本地对话实时同步',
+        placeholder: raw.placeholder || '输入消息，支持按 Ctrl 圈选屏幕元素…',
+        accent: raw.accent || '#60a5fa',
+        accentBg: raw.accentBg || 'rgba(59, 130, 246, 0.16)',
+        accentBorder: raw.accentBorder || 'rgba(96, 165, 250, 0.42)',
+        surface: raw.surface || '#1e1e22',
+        border: raw.border || 'rgba(255, 255, 255, 0.12)',
+        useNativeComposer: Boolean(raw.useNativeComposer),
+        cornerRadius: Number.isFinite(raw.cornerRadius) ? raw.cornerRadius : 18,
+        fallbackSlabHeight: Number.isFinite(raw.fallbackSlabHeight) ? raw.fallbackSlabHeight : 168,
+        chipIconStyle: raw.chipIconStyle || 'dot',
+        newWorkspaceLabel: raw.newWorkspaceLabel || (raw.useNativeComposer ? '新建工作区…' : '指定目录新开…'),
+        detailButtonTitle: raw.detailButtonTitle || ('点击将 ' + (raw.label || id) + ' 拉到最前并展示这个对话'),
+        emptyHistoryHint: raw.emptyHistoryHint || ((raw.fullLabel || raw.label || id) + ' 已就绪 — 发消息后对话流将在此实时展开'),
+        emptyLipHint: raw.emptyLipHint || ((raw.label || id) + ' 已就绪 · 双击 Ctrl 唤出输入框'),
+        defaultSelection: raw.defaultSelection || {
+          workspaceId: '',
+          workspacePath: '',
+          sessionId: '',
+          title: (raw.label || id) + ' · 新对话',
+        },
+      };
+      HARNESS_ORDER.push(id);
+      HARNESS_META[id] = meta;
+      HARNESS_ALIAS_MAP[id] = id;
+      for (const alias of meta.aliases) {
+        const key = String(alias || '').trim().toLowerCase();
+        if (key) HARNESS_ALIAS_MAP[key] = id;
+      }
+      let adapter = {};
+      if (typeof entry.initUi === 'function') {
+        try {
+          adapter = entry.initUi(HARNESS_SDK) || {};
+        } catch {}
+      }
+      HARNESS_ADAPTERS[id] = adapter;
+    }
+
+    if (Array.isArray(__ATP_BUILTIN_HARNESS_MODULES__) && __ATP_BUILTIN_HARNESS_MODULES__.length > 0) {
+      for (const mod of __ATP_BUILTIN_HARNESS_MODULES__) {
+        registerHarnessModule(mod);
+      }
+    }
+    if (!HARNESS_META.dsh) {
+      registerHarnessModule({ manifest: FALLBACK_DSH_MANIFEST, initUi: null });
+    }
+
+    function getHarnessMeta(id) {
+      return HARNESS_META[id] || HARNESS_META.dsh || FALLBACK_DSH_MANIFEST;
+    }
+
+    function getHarnessAdapter(id) {
+      return HARNESS_ADAPTERS[id] || {};
+    }
 
     function normalizeHarnessId(raw) {
       const s = String(raw || '').trim().toLowerCase();
-      if (s === 'antigravity' || s === 'agy') return 'antigravity';
-      if (s === 'codex') return 'codex';
-      if (s === 'claude_code' || s === 'claude-code' || s === 'claudecode' || s === 'claude') return 'claude_code';
-      return 'dsh';
+      if (s && HARNESS_ALIAS_MAP[s]) return HARNESS_ALIAS_MAP[s];
+      return HARNESS_ORDER[0] || 'dsh';
     }
 
     function tauriInvoke(cmd, args) {
@@ -198,20 +291,31 @@ window.__ModuleLoader__.load({
       scheduleLayoutReport: null,
       lastReportKeys: new Map(),
       listeners: new Set(),
-      // Multi-harness state (DSH + Antigravity + Codex + Claude Code)
+      // Multi-harness state (auto-initialized dynamically for every registered harness in `harnesses/<id>/`)
       activeHarness: normalizeHarnessId(readStoredString(STORAGE_KEY_ACTIVE_HARNESS, 'dsh')),
       harnessAvailability: [],
-      externalCatalogs: { antigravity: null, codex: null, claude_code: null },
-      externalSelection: {
-        antigravity: { workspaceId: 'default-cli-project', workspacePath: '', sessionId: '', title: 'CLI Project · 新对话' },
-        codex: { workspaceId: '', workspacePath: '', sessionId: '', title: 'Codex · 新对话' },
-        claude_code: { workspaceId: '', workspacePath: '', sessionId: '', title: 'Claude Code · 新对话' },
-      },
-      externalMessages: { antigravity: [], codex: [], claude_code: [] },
+      externalCatalogs: Object.fromEntries(
+        HARNESS_ORDER.filter((id) => !getHarnessMeta(id).useNativeComposer).map((id) => [id, null]),
+      ),
+      externalSelection: Object.fromEntries(
+        HARNESS_ORDER.filter((id) => !getHarnessMeta(id).useNativeComposer).map((id) => [
+          id,
+          { ...getHarnessMeta(id).defaultSelection },
+        ]),
+      ),
+      externalMessages: Object.fromEntries(
+        HARNESS_ORDER.filter((id) => !getHarnessMeta(id).useNativeComposer).map((id) => [id, []]),
+      ),
       externalActiveTurn: null,
-      externalLoading: { antigravity: false, codex: false, claude_code: false },
-      liveSyncMeta: { antigravity: null, codex: null, claude_code: null },
-      lastSyncCatalogRefresh: { antigravity: 0, codex: 0, claude_code: 0 },
+      externalLoading: Object.fromEntries(
+        HARNESS_ORDER.filter((id) => !getHarnessMeta(id).useNativeComposer).map((id) => [id, false]),
+      ),
+      liveSyncMeta: Object.fromEntries(
+        HARNESS_ORDER.filter((id) => !getHarnessMeta(id).useNativeComposer).map((id) => [id, null]),
+      ),
+      lastSyncCatalogRefresh: Object.fromEntries(
+        HARNESS_ORDER.filter((id) => !getHarnessMeta(id).useNativeComposer).map((id) => [id, 0]),
+      ),
       appSettings: null,
       claudePermissionMode: readStoredString(STORAGE_KEY_CLAUDE_PERM, 'auto'),
       extDraftText: '',
@@ -327,7 +431,7 @@ window.__ModuleLoader__.load({
         });
     }
 
-    function setActiveHarness(harnessId, persist = true) {
+    function setActiveHarness(harnessId, persist = true, skipCatalogRefresh = false) {
       const norm = normalizeHarnessId(harnessId);
       dsbRuntime.activeHarness = norm;
       applyHarnessThemeAttribute(norm);
@@ -335,7 +439,7 @@ window.__ModuleLoader__.load({
         writeStoredString(STORAGE_KEY_ACTIVE_HARNESS, norm);
         tauriInvoke('harness_set_active', { harness: norm }).catch(() => {});
       }
-      if (norm !== 'dsh') {
+      if (!getHarnessMeta(norm).useNativeComposer && !skipCatalogRefresh) {
         refreshExternalCatalog(norm, true);
       }
       notifyBarRuntime();
@@ -1079,61 +1183,44 @@ window.__ModuleLoader__.load({
         'html[data-dsh-bar-clone="1"] [data-dsb-menu-scroll]::-webkit-scrollbar { width: 4px; }',
         'html[data-dsh-bar-clone="1"] [data-dsb-menu-scroll]::-webkit-scrollbar-thumb { background: rgba(128,128,128,0.28); border-radius: 999px; }',
         // =====================================================================
-        // Multi-Harness 1:1 Native Composer Replicas (Antigravity, Codex & Claude Code)
-        // When targeting an external CLI, hide DSH's native [data-composer-card]
-        // and display the 1:1 replicated desktop composer ([data-dsb-external-composer]).
+        // Multi-Harness Auto-Discovered Styles (`harnesses/<id>/{harness.json,ui.js}`)
+        // Hide DSH's native [data-composer-card] whenever an external harness renders
+        // its composer ([data-dsb-external-composer]), and append each module's scoped CSS.
         // =====================================================================
-        'html[data-dsh-bar-clone="1"][data-dsb-harness="antigravity"]:has([data-dsb-external-composer]) [data-composer-card],',
-        'html[data-dsh-bar-clone="1"][data-dsb-harness="codex"]:has([data-dsb-external-composer]) [data-composer-card],',
-        'html[data-dsh-bar-clone="1"][data-dsb-harness="claude_code"]:has([data-dsb-external-composer]) [data-composer-card] {',
-        '  display: none !important;',
-        '}',
+        ...HARNESS_ORDER.filter((id) => !getHarnessMeta(id).useNativeComposer).map(
+          (id) =>
+            'html[data-dsh-bar-clone="1"][data-dsb-harness="' +
+            id +
+            '"]:has([data-dsb-external-composer]) [data-composer-card] { display: none !important; }',
+        ),
         'html[data-dsh-bar-clone="1"][data-dsb-mode="lip"] [data-dsb-external-composer] {',
         '  display: none !important;',
         '}',
-        'html[data-dsh-bar-clone="1"][data-dsb-harness="antigravity"] [data-dsb-card] {',
-        '  background: #121213 !important;',
-        '  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.06) inset !important;',
-        '  border-radius: 16px 16px 0 0 !important;',
-        '  color: #eceef2 !important;',
-        '}',
-        'html[data-dsh-bar-clone="1"][data-dsb-harness="antigravity"][data-dsb-mode="lip"] [data-dsb-card] {',
-        '  border-radius: 16px !important;',
-        '}',
-        'html[data-dsh-bar-clone="1"][data-dsb-harness="antigravity"] [data-dsb-divider] {',
-        '  display: none !important;',
-        '}',
-        'html[data-dsh-bar-clone="1"][data-dsb-harness="codex"] [data-dsb-card] {',
-        '  background: #1f1f1f !important;',
-        '  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.06) inset !important;',
-        '  border-radius: 14px 14px 0 0 !important;',
-        '  width: calc(100% - 28px) !important;',
-        '  margin: 0 14px !important;',
-        '  color: #f4f4f5 !important;',
-        '}',
-        'html[data-dsh-bar-clone="1"][data-dsb-harness="codex"][data-dsb-mode="lip"] [data-dsb-card] {',
-        '  border-radius: 14px !important;',
-        '}',
-        'html[data-dsh-bar-clone="1"][data-dsb-harness="codex"] [data-dsb-divider] {',
-        '  display: none !important;',
-        '}',
-        'html[data-dsh-bar-clone="1"][data-dsb-harness="claude_code"] [data-dsb-card] {',
-        '  background: #242422 !important;',
-        '  box-shadow: 0 0 0 1px rgba(255, 248, 240, 0.08) inset !important;',
-        '  border-radius: 18px 18px 0 0 !important;',
-        '  color: #EDEBE6 !important;',
-        '}',
-        'html[data-dsh-bar-clone="1"][data-dsb-harness="claude_code"][data-dsb-mode="lip"] [data-dsb-card] {',
-        '  border-radius: 18px !important;',
-        '}',
-        'html[data-dsh-bar-clone="1"][data-dsb-harness="claude_code"] [data-dsb-divider] {',
-        '  display: none !important;',
-        '}',
+        ...HARNESS_ORDER.map((id) => {
+          const adapter = getHarnessAdapter(id);
+          if (adapter && typeof adapter.css === 'string' && adapter.css.trim()) {
+            return adapter.css;
+          }
+          const m = getHarnessMeta(id);
+          if (m.useNativeComposer) return '';
+          // Sensible adaptive default card theme for declarative harness.json-only modules
+          return [
+            'html[data-dsh-bar-clone="1"][data-dsb-harness="' + id + '"] [data-dsb-card] {',
+            '  background: ' + m.surface + ' !important;',
+            '  box-shadow: 0 0 0 1px ' + m.border + ' inset !important;',
+            '  border-radius: ' + m.cornerRadius + 'px ' + m.cornerRadius + 'px 0 0 !important;',
+            '  color: #f3f4f6 !important;',
+            '}',
+            'html[data-dsh-bar-clone="1"][data-dsb-harness="' + id + '"][data-dsb-mode="lip"] [data-dsb-card] {',
+            '  border-radius: ' + m.cornerRadius + 'px !important;',
+            '}',
+            'html[data-dsh-bar-clone="1"][data-dsb-harness="' + id + '"] [data-dsb-divider] {',
+            '  display: none !important;',
+            '}',
+          ].join('\n');
+        }).filter(Boolean),
         '[data-dsb-ext-input="1"]::placeholder {',
         '  color: rgba(255, 255, 255, 0.36);',
-        '}',
-        '[data-dsb-external-composer="claude_code"] [data-dsb-ext-input="1"]::placeholder {',
-        '  color: rgba(237, 235, 230, 0.42);',
         '}',
         // =====================================================================
         // Rich Markdown typography inside the expanded history drawer
@@ -2774,14 +2861,7 @@ window.__ModuleLoader__.load({
           }
 
           const shapes = [];
-          const cornerRadius =
-            dsbRuntime.activeHarness === 'antigravity'
-              ? 16
-              : dsbRuntime.activeHarness === 'codex'
-                ? 20
-                : dsbRuntime.activeHarness === 'claude_code'
-                  ? 18
-                  : CARD_RADIUS_PX;
+          const cornerRadius = getHarnessMeta(dsbRuntime.activeHarness).cornerRadius || CARD_RADIUS_PX;
           if (hasSlab) {
             shapes.push({
               x: Math.round(slabLeft),
@@ -2812,13 +2892,31 @@ window.__ModuleLoader__.load({
             if (cs.display === 'none' || cs.visibility === 'hidden') continue;
             const pr = el.getBoundingClientRect();
             if (pr.width < 12 || pr.height < 12) continue;
-            shapes.push({
-              x: Math.round(pr.left),
-              y: Math.round(pr.top),
-              w: Math.round(pr.width),
-              h: Math.round(pr.height),
-              r: 12,
-            });
+            const subPanels = el.querySelectorAll('[data-dsb-popup-panel="1"]');
+            if (subPanels && subPanels.length > 0) {
+              for (const panel of subPanels) {
+                if (!(panel instanceof HTMLElement)) continue;
+                const pcs = getComputedStyle(panel);
+                if (pcs.display === 'none' || pcs.visibility === 'hidden') continue;
+                const sr = panel.getBoundingClientRect();
+                if (sr.width < 12 || sr.height < 12) continue;
+                shapes.push({
+                  x: Math.round(sr.left),
+                  y: Math.round(sr.top),
+                  w: Math.round(sr.width),
+                  h: Math.round(sr.height),
+                  r: 14,
+                });
+              }
+            } else {
+              shapes.push({
+                x: Math.round(pr.left),
+                y: Math.round(pr.top),
+                w: Math.round(pr.width),
+                h: Math.round(pr.height),
+                r: 12,
+              });
+            }
             const explicitBottom = Number(el.getAttribute('data-dsb-popup-bottom'));
             const neededForPopup =
               Number.isFinite(explicitBottom) && explicitBottom > 0
@@ -4091,679 +4189,63 @@ window.__ModuleLoader__.load({
           }
         };
 
-        const renderPlusSvg = (sz = 16, col = '#a1a1aa') =>
-          h(
-            'svg',
-            { width: sz, height: sz, viewBox: '0 0 24 24', fill: 'none', stroke: col, strokeWidth: 2, strokeLinecap: 'round' },
-            h('path', { d: 'M12 5v14M5 12h14' }),
-          );
-
-        const renderChevronDownSvg = (col = 'rgba(255,255,255,0.45)') =>
-          h(
-            'svg',
-            { width: 11, height: 11, viewBox: '0 0 24 24', fill: 'none', stroke: col, strokeWidth: 2.2, strokeLinecap: 'round', strokeLinejoin: 'round' },
-            h('path', { d: 'M6 9l6 6 6-6' }),
-          );
-
-        const renderShieldSvg = (col = '#a1a1aa') =>
-          h(
-            'svg',
-            { width: 13, height: 13, viewBox: '0 0 24 24', fill: 'none', stroke: col, strokeWidth: 1.9, strokeLinecap: 'round', strokeLinejoin: 'round' },
-            h('path', { d: 'M12 3l7 3v5c0 5-3.2 8.8-7 10-3.8-1.2-7-5-7-10V6l7-3z' }),
-            h('path', { d: 'M12 8v4M12 16h.01' }),
-          );
-
-        const renderLaptopSvg = (col = '#d4d4d8') =>
-          h(
-            'svg',
-            { width: 14, height: 14, viewBox: '0 0 24 24', fill: 'none', stroke: col, strokeWidth: 1.8, strokeLinecap: 'round', strokeLinejoin: 'round' },
-            h('rect', { x: 4, y: 5, width: 16, height: 11, rx: 1.8 }),
-            h('path', { d: 'M2 19h20' }),
-          );
-
-        const renderFolderOutlineSvg = (col = '#d4d4d8') =>
-          h(
-            'svg',
-            { width: 14, height: 14, viewBox: '0 0 24 24', fill: 'none', stroke: col, strokeWidth: 1.8, strokeLinecap: 'round', strokeLinejoin: 'round' },
-            h('path', { d: 'M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7z' }),
-          );
-
-        const renderArrowUpSvg = (col = '#111214') =>
-          h(
-            'svg',
-            { width: 14, height: 14, viewBox: '0 0 24 24', fill: 'none', stroke: col, strokeWidth: 2.3, strokeLinecap: 'round', strokeLinejoin: 'round' },
-            h('path', { d: 'M12 19V5M6 11l6-6 6 6' }),
-          );
-
-        const renderClaudeSparkSvg = (sz = 14, col = '#D97757') =>
-          h(
-            'svg',
-            { width: sz, height: sz, viewBox: '0 0 24 24', fill: 'none', stroke: col, strokeWidth: 2, strokeLinecap: 'round' },
-            h('path', { d: 'M12 2.5v19M2.5 12h19M5.2 5.2l13.6 13.6M18.8 5.2L5.2 18.8' }),
-            h('circle', { cx: 12, cy: 12, r: 2.2, fill: col, stroke: 'none' }),
-          );
-
-        const renderExternalNativeComposer = () => {
-          if (!IS_BAR || barMode === 'lip' || activeHarness === 'dsh') return null;
-
-          const hasPayload = Boolean(extDraft.trim() || extCapsules.length > 0);
-          const openSwitcher = (ev) => {
-            ev.stopPropagation();
-            if (typeof dsbRuntime.toggleHarnessMenu === 'function') {
-              dsbRuntime.toggleHarnessMenu(ev.currentTarget);
-            }
-          };
-
-          if (activeHarness === 'claude_code') {
-            const claudeModel = (activeAvail && activeAvail.modelLabel) || 'Claude Opus';
-            const claudeEffort = (activeAvail && activeAvail.effortLabel) || '高';
-            const currentPermId = dsbRuntime.claudePermissionMode || 'auto';
-            const currentPerm =
-              CLAUDE_PERM_MODES.find((m) => m.id === currentPermId) || CLAUDE_PERM_MODES[0];
-            const cycleClaudePerm = (ev) => {
-              ev.stopPropagation();
-              const idx = CLAUDE_PERM_MODES.findIndex((m) => m.id === currentPerm.id);
-              const next = CLAUDE_PERM_MODES[(idx + 1) % CLAUDE_PERM_MODES.length];
-              dsbRuntime.claudePermissionMode = next.id;
-              writeStoredString(STORAGE_KEY_CLAUDE_PERM, next.id);
-              notifyBarRuntime();
-            };
-            const claudeWsLabel =
-              (extSel.workspacePath ? workspaceBasename(extSel.workspacePath) : '') ||
-              extSel.title ||
-              'Claude Code';
-
-            // Claude Desktop (Code Mode) 1:1 Dark Replica:
-            // Warm charcoal #242422 shell + #30302E rounded-16px composer surface + warm ivory #F2EFE9 text
-            // + interactive permission pill + signature terracotta #D97757 rounded-square (9px) send button
-            return h(
-              'div',
-              {
-                'data-dsb-external-composer': 'claude_code',
-                style: {
-                  width: '100vw',
-                  padding: '5px 6px 6px',
-                  background: '#242422',
-                  borderRadius: '0 0 18px 18px',
-                  borderLeft: '1px solid rgba(255, 248, 240, 0.08)',
-                  borderRight: '1px solid rgba(255, 248, 240, 0.08)',
-                  borderBottom: '1px solid rgba(255, 248, 240, 0.08)',
-                  boxSizing: 'border-box',
-                  pointerEvents: 'auto',
-                  fontFamily: '"Segoe UI", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif',
-                },
-              },
-              h(
-                'div',
-                {
-                  style: {
-                    background: '#30302E',
-                    borderRadius: '15px',
-                    border: '1px solid rgba(255, 248, 240, 0.11)',
-                    padding: '13px 14px 10px 15px',
-                    display: 'flex',
-                    flexDirection: 'column',
-                    boxSizing: 'border-box',
-                    boxShadow: '0 4px 18px rgba(0, 0, 0, 0.28)',
-                  },
-                },
-                renderExtCapsulesRow(),
-                h('textarea', {
-                  'data-dsb-ext-input': '1',
-                  rows: 1,
-                  value: extDraft,
-                  onChange: handleExtInputChange,
-                  onKeyDown: handleExtInputKeyDown,
-                  placeholder: '今天想处理什么？支持按 Ctrl 圈选屏幕元素…',
-                  style: {
-                    width: '100%',
-                    minHeight: '26px',
-                    maxHeight: '140px',
-                    border: 'none',
-                    outline: 'none',
-                    resize: 'none',
-                    background: 'transparent',
-                    color: '#F2EFE9',
-                    fontSize: '14px',
-                    lineHeight: '22px',
-                    fontFamily: 'inherit',
-                    padding: 0,
-                    margin: 0,
-                    boxSizing: 'border-box',
-                  },
-                }),
-                h(
-                  'div',
-                  {
-                    style: {
-                      display: 'flex',
-                      alignItems: 'center',
-                      justifyContent: 'space-between',
-                      marginTop: '12px',
-                      height: '32px',
-                      gap: '8px',
-                    },
-                  },
-                  h(
-                    'div',
-                    { style: { display: 'flex', alignItems: 'center', gap: '8px', minWidth: 0 } },
-                    h(
-                      'button',
-                      {
-                        type: 'button',
-                        title: '切换 Harness / 工作区 / 对话',
-                        onClick: openSwitcher,
-                        style: {
-                          width: '28px',
-                          height: '28px',
-                          borderRadius: '8px',
-                          border: '1px solid rgba(255, 248, 240, 0.10)',
-                          background: 'rgba(255, 248, 240, 0.04)',
-                          padding: 0,
-                          cursor: 'pointer',
-                          display: 'inline-flex',
-                          alignItems: 'center',
-                          justifyContent: 'center',
-                          flexShrink: 0,
-                        },
-                      },
-                      renderPlusSvg(15, '#D8D4CA'),
-                    ),
-                    h(
-                      'button',
-                      {
-                        type: 'button',
-                        'data-dsb-claude-perm': currentPerm.id,
-                        title: currentPerm.title + '（点击切换）',
-                        onClick: cycleClaudePerm,
-                        style: {
-                          height: '28px',
-                          padding: '0 9px',
-                          borderRadius: '8px',
-                          border:
-                            currentPerm.id === 'plan'
-                              ? '1px solid rgba(147, 197, 253, 0.34)'
-                              : '1px solid rgba(217, 119, 87, 0.34)',
-                          background:
-                            currentPerm.id === 'plan'
-                              ? 'rgba(59, 130, 246, 0.12)'
-                              : 'rgba(217, 119, 87, 0.12)',
-                          color: currentPerm.id === 'plan' ? '#93c5fd' : '#E89B7E',
-                          fontSize: '12px',
-                          fontWeight: 500,
-                          cursor: 'pointer',
-                          display: 'inline-flex',
-                          alignItems: 'center',
-                          gap: '5px',
-                          flexShrink: 0,
-                        },
-                      },
-                      renderShieldSvg(currentPerm.id === 'plan' ? '#93c5fd' : '#D97757'),
-                      h('span', null, currentPerm.label),
-                    ),
-                    h(
-                      'button',
-                      {
-                        type: 'button',
-                        'data-dsb-session-chip': '1',
-                        title: '点击切换 Harness / 工作区 / 对话',
-                        onClick: openSwitcher,
-                        style: {
-                          height: '28px',
-                          border: '1px solid rgba(255, 248, 240, 0.09)',
-                          background: 'rgba(255, 248, 240, 0.04)',
-                          padding: '0 9px',
-                          borderRadius: '8px',
-                          cursor: 'pointer',
-                          display: 'inline-flex',
-                          alignItems: 'center',
-                          gap: '6px',
-                          fontSize: '12.5px',
-                          color: '#EAE6DF',
-                          fontWeight: 500,
-                          maxWidth: '250px',
-                        },
-                      },
-                      renderClaudeSparkSvg(13, '#D97757'),
-                      h(
-                        'span',
-                        {
-                          style: {
-                            overflow: 'hidden',
-                            textOverflow: 'ellipsis',
-                            whiteSpace: 'nowrap',
-                          },
-                        },
-                        claudeWsLabel,
-                      ),
-                      renderChevronDownSvg('rgba(234, 230, 223, 0.55)'),
-                    ),
-                  ),
-                  h(
-                    'div',
-                    { style: { display: 'flex', alignItems: 'center', gap: '10px', flexShrink: 0 } },
-                    h(
-                      'span',
-                      {
-                        title: '来自 ~/.claude/settings.json',
-                        style: {
-                          display: 'inline-flex',
-                          alignItems: 'center',
-                          gap: '5px',
-                          fontSize: '12.5px',
-                          whiteSpace: 'nowrap',
-                          userSelect: 'none',
-                        },
-                      },
-                      h('span', { style: { color: '#ECE9E2', fontWeight: 500 } }, claudeModel),
-                      claudeEffort
-                        ? h('span', { style: { color: '#9E9A90' } }, claudeEffort)
-                        : null,
-                      renderChevronDownSvg('#8A867C'),
-                    ),
-                    h(
-                      'button',
-                      {
-                        type: 'button',
-                        title: isExtStreaming ? '停止生成' : '发送到 Claude Code',
-                        onClick: submitExternalComposer,
-                        style: isExtStreaming
-                          ? {
-                              width: '30px',
-                              height: '30px',
-                              borderRadius: '9px',
-                              border: '1px solid rgba(217, 119, 87, 0.45)',
-                              background: '#262624',
-                              cursor: 'pointer',
-                              display: 'inline-flex',
-                              alignItems: 'center',
-                              justifyContent: 'center',
-                              padding: 0,
-                            }
-                          : {
-                              width: '30px',
-                              height: '30px',
-                              borderRadius: '9px',
-                              border: 'none',
-                              background: hasPayload ? '#D97757' : 'rgba(217, 119, 87, 0.46)',
-                              color: '#FFFDF9',
-                              cursor: 'pointer',
-                              display: 'inline-flex',
-                              alignItems: 'center',
-                              justifyContent: 'center',
-                              padding: 0,
-                              transition: 'background 0.14s ease',
-                            },
-                      },
-                      isExtStreaming
-                        ? h('span', {
-                            style: {
-                              width: '10px',
-                              height: '10px',
-                              borderRadius: '2px',
-                              background: '#D97757',
-                            },
-                          })
-                        : renderArrowUpSvg('#FFFDF9'),
-                    ),
-                  ),
-                ),
-              ),
-            );
-          }
-
-          if (activeHarness === 'antigravity') {
-            const modelName = (activeAvail && activeAvail.modelLabel) || 'Gemini 4 Neon';
-            const effortName = (activeAvail && activeAvail.effortLabel) || 'High';
-            const accessName = (activeAvail && activeAvail.accessLabel) || '极速';
-            const sessionLabel = extSel.title || 'CLI Project';
-
-            return h(
-              'div',
-              {
-                'data-dsb-external-composer': 'antigravity',
-                style: {
-                  width: '100vw',
-                  padding: '4px 5px 5px',
-                  background: '#111113',
-                  borderRadius: '0 0 18px 18px',
-                  borderLeft: '1px solid rgba(255, 255, 255, 0.06)',
-                  borderRight: '1px solid rgba(255, 255, 255, 0.06)',
-                  borderBottom: '1px solid rgba(255, 255, 255, 0.06)',
-                  boxSizing: 'border-box',
-                  pointerEvents: 'auto',
-                  fontFamily: '"Segoe UI", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif',
-                },
-              },
-              h(
-                'div',
-                {
-                  style: {
-                    background: '#17171a',
-                    borderRadius: '14px',
-                    border: '1px solid rgba(255, 255, 255, 0.08)',
-                    padding: '11px 13px 9px 14px',
-                    display: 'flex',
-                    flexDirection: 'column',
-                    boxSizing: 'border-box',
-                  },
-                },
-                renderExtCapsulesRow(),
-                h('textarea', {
-                  'data-dsb-ext-input': '1',
-                  rows: 1,
-                  value: extDraft,
-                  onChange: handleExtInputChange,
-                  onKeyDown: handleExtInputKeyDown,
-                  placeholder: '提问任何问题，使用 @ 提及，/ 执行操作',
-                  style: {
-                    width: '100%',
-                    minHeight: '24px',
-                    maxHeight: '140px',
-                    border: 'none',
-                    outline: 'none',
-                    resize: 'none',
-                    background: 'transparent',
-                    color: '#eceef2',
-                    fontSize: '13.5px',
-                    lineHeight: '21px',
-                    fontFamily: 'inherit',
-                    padding: 0,
-                    margin: 0,
-                    boxSizing: 'border-box',
-                  },
-                }),
-                h(
-                  'div',
-                  {
-                    style: {
-                      display: 'flex',
-                      alignItems: 'center',
-                      justifyContent: 'space-between',
-                      marginTop: '10px',
-                      height: '30px',
-                      gap: '8px',
-                    },
-                  },
-                  h(
-                    'div',
-                    { style: { display: 'flex', alignItems: 'center', gap: '12px', minWidth: 0 } },
-                    h(
-                      'button',
-                      {
-                        type: 'button',
-                        title: '切换 Harness / 工作区 / 对话',
-                        onClick: openSwitcher,
-                        style: {
-                          border: 'none',
-                          background: 'transparent',
-                          padding: '2px',
-                          cursor: 'pointer',
-                          display: 'inline-flex',
-                          alignItems: 'center',
-                          justifyContent: 'center',
-                          color: '#a1a1aa',
-                        },
-                      },
-                      renderPlusSvg(15, '#a1a1aa'),
-                    ),
-                    h(
-                      'span',
-                      {
-                        style: {
-                          display: 'inline-flex',
-                          alignItems: 'center',
-                          gap: '5px',
-                          fontSize: '12.5px',
-                          whiteSpace: 'nowrap',
-                          userSelect: 'none',
-                        },
-                      },
-                      h('span', { style: { color: '#d4d4d8', fontWeight: 500 } }, modelName),
-                      h('span', { style: { color: '#71717a' } }, effortName),
-                      renderChevronDownSvg('#71717a'),
-                    ),
-                    h(
-                      'button',
-                      {
-                        type: 'button',
-                        'data-dsb-session-chip': '1',
-                        title: '点击切换 Harness / 工作区 / 对话',
-                        onClick: openSwitcher,
-                        style: {
-                          border: 'none',
-                          background: 'transparent',
-                          padding: '2px 4px',
-                          borderRadius: '6px',
-                          cursor: 'pointer',
-                          display: 'inline-flex',
-                          alignItems: 'center',
-                          gap: '5px',
-                          fontSize: '12px',
-                          color: '#38bdf8',
-                          maxWidth: '210px',
-                        },
-                      },
-                      h('span', {
-                        style: {
-                          width: '5.5px',
-                          height: '5.5px',
-                          borderRadius: '999px',
-                          background: '#38bdf8',
-                          flexShrink: 0,
-                        },
-                      }),
-                      h(
-                        'span',
-                        {
-                          style: {
-                            overflow: 'hidden',
-                            textOverflow: 'ellipsis',
-                            whiteSpace: 'nowrap',
-                          },
-                        },
-                        sessionLabel,
-                      ),
-                    ),
-                  ),
-                  h(
-                    'div',
-                    { style: { display: 'flex', alignItems: 'center', gap: '12px', flexShrink: 0 } },
-                    h(
-                      'span',
-                      {
-                        style: {
-                          display: 'inline-flex',
-                          alignItems: 'center',
-                          gap: '5px',
-                          fontSize: '12.5px',
-                          color: '#d4d4d8',
-                          userSelect: 'none',
-                        },
-                      },
-                      renderShieldSvg('#9ca3af'),
-                      accessName,
-                      renderChevronDownSvg('#71717a'),
-                    ),
-                    h(
-                      'button',
-                      {
-                        type: 'button',
-                        title: isExtStreaming ? '停止生成' : '发送到 Antigravity',
-                        onClick: submitExternalComposer,
-                        style: isExtStreaming
-                          ? {
-                              width: '28px',
-                              height: '28px',
-                              borderRadius: '999px',
-                              border: '1px solid rgba(255,255,255,0.08)',
-                              background: '#232327',
-                              cursor: 'pointer',
-                              display: 'inline-flex',
-                              alignItems: 'center',
-                              justifyContent: 'center',
-                              padding: 0,
-                            }
-                          : {
-                              width: '28px',
-                              height: '28px',
-                              borderRadius: '999px',
-                              border: 'none',
-                              background: hasPayload ? '#f4f4f5' : '#d4d4d8',
-                              cursor: 'pointer',
-                              display: 'inline-flex',
-                              alignItems: 'center',
-                              justifyContent: 'center',
-                              padding: 0,
-                              opacity: hasPayload ? 1 : 0.88,
-                            },
-                      },
-                      isExtStreaming
-                        ? h('span', {
-                            style: {
-                              width: '10px',
-                              height: '10px',
-                              borderRadius: '2px',
-                              background: '#c94a4a',
-                            },
-                          })
-                        : renderArrowUpSvg('#111214'),
-                    ),
-                  ),
-                ),
-              ),
-            );
-          }
-
-          // Codex Desktop 1:1 Replica (inset #1f1f1f top shelf + 20px #303032 graphite card + coral-orange 完全访问 + cobalt #2b6be6 button)
-          const codexModel = (activeAvail && activeAvail.modelLabel) || 'GPT-6.1 Terra';
-          const codexEffort = (activeAvail && activeAvail.effortLabel) || '高';
-          const codexAccess = (activeAvail && activeAvail.accessLabel) || '完全访问';
-          const codexWsLabel =
-            (extSel.workspacePath ? workspaceBasename(extSel.workspacePath) : '') ||
-            extSel.title ||
-            'Codex';
-
+        const renderDefaultAdaptiveComposer = (ctx) => {
+          const m = ctx.manifest;
+          const label =
+            (ctx.selection && ctx.selection.workspacePath
+              ? ctx.workspaceBasename(ctx.selection.workspacePath)
+              : '') ||
+            (ctx.selection && ctx.selection.title) ||
+            m.label;
           return h(
             'div',
             {
-              'data-dsb-external-composer': 'codex',
+              'data-dsb-external-composer': m.id,
               style: {
                 width: '100vw',
-                display: 'flex',
-                flexDirection: 'column',
-                background: 'transparent',
+                padding: '5px 6px 6px',
+                background: m.surface,
+                borderRadius: '0 0 ' + m.cornerRadius + 'px ' + m.cornerRadius + 'px',
+                borderLeft: '1px solid ' + m.border,
+                borderRight: '1px solid ' + m.border,
+                borderBottom: '1px solid ' + m.border,
                 boxSizing: 'border-box',
                 pointerEvents: 'auto',
                 fontFamily: '"Segoe UI", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif',
               },
             },
-            // Inset top shelf matching Codex Desktop (`💻 此计算机  📁 <workspace>`)
             h(
               'div',
               {
                 style: {
-                  margin: '0 14px',
-                  height: '34px',
-                  padding: '0 14px',
-                  background: '#1f1f1f',
-                  borderLeft: '1px solid rgba(255, 255, 255, 0.06)',
-                  borderRight: '1px solid rgba(255, 255, 255, 0.06)',
-                  borderTop: '1px solid rgba(255, 255, 255, 0.05)',
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: '16px',
-                  boxSizing: 'border-box',
-                },
-              },
-              h(
-                'span',
-                {
-                  style: {
-                    display: 'inline-flex',
-                    alignItems: 'center',
-                    gap: '6px',
-                    fontSize: '12.5px',
-                    color: '#e4e4e7',
-                    fontWeight: 500,
-                    flexShrink: 0,
-                    userSelect: 'none',
-                  },
-                },
-                renderLaptopSvg('#d4d4d8'),
-                '此计算机',
-              ),
-              h(
-                'button',
-                {
-                  type: 'button',
-                  'data-dsb-session-chip': '1',
-                  title: '点击切换 Harness / 工作区 / 对话',
-                  onClick: openSwitcher,
-                  style: {
-                    border: 'none',
-                    background: 'transparent',
-                    padding: '2px 4px',
-                    borderRadius: '6px',
-                    cursor: 'pointer',
-                    display: 'inline-flex',
-                    alignItems: 'center',
-                    gap: '6px',
-                    fontSize: '12.5px',
-                    color: '#f4f4f5',
-                    fontWeight: 500,
-                    maxWidth: '340px',
-                  },
-                },
-                renderFolderOutlineSvg('#d4d4d8'),
-                h(
-                  'span',
-                  {
-                    style: {
-                      overflow: 'hidden',
-                      textOverflow: 'ellipsis',
-                      whiteSpace: 'nowrap',
-                    },
-                  },
-                  codexWsLabel,
-                ),
-              ),
-            ),
-            // Main 20px-radius Codex graphite composer card
-            h(
-              'div',
-              {
-                style: {
-                  width: '100%',
-                  background: '#303032',
-                  borderRadius: '20px',
-                  border: '1px solid rgba(255, 255, 255, 0.08)',
-                  padding: '13px 16px 11px 16px',
+                  background: 'rgba(255,255,255,0.04)',
+                  borderRadius: '14px',
+                  border: '1px solid ' + m.border,
+                  padding: '12px 14px 10px',
                   display: 'flex',
                   flexDirection: 'column',
                   boxSizing: 'border-box',
-                  boxShadow: '0 8px 26px rgba(0, 0, 0, 0.36)',
                 },
               },
-              renderExtCapsulesRow(),
+              ctx.renderCapsulesRow(),
               h('textarea', {
                 'data-dsb-ext-input': '1',
                 rows: 1,
-                value: extDraft,
-                onChange: handleExtInputChange,
-                onKeyDown: handleExtInputKeyDown,
-                placeholder: '随心输入',
+                value: ctx.draft,
+                onChange: ctx.onInputChange,
+                onKeyDown: ctx.onInputKeyDown,
+                placeholder: m.placeholder,
                 style: {
                   width: '100%',
-                  minHeight: '26px',
+                  minHeight: '24px',
                   maxHeight: '140px',
                   border: 'none',
                   outline: 'none',
                   resize: 'none',
                   background: 'transparent',
-                  color: '#f4f4f5',
-                  fontSize: '14px',
-                  lineHeight: '22px',
+                  color: '#f3f4f6',
+                  fontSize: '13.5px',
+                  lineHeight: '21px',
                   fontFamily: 'inherit',
                   padding: 0,
                   margin: 0,
@@ -4777,100 +4259,117 @@ window.__ModuleLoader__.load({
                     display: 'flex',
                     alignItems: 'center',
                     justifyContent: 'space-between',
-                    marginTop: '14px',
+                    marginTop: '10px',
                     height: '30px',
                     gap: '8px',
                   },
                 },
                 h(
-                  'div',
-                  { style: { display: 'flex', alignItems: 'center', gap: '12px' } },
-                  h(
-                    'button',
-                    {
-                      type: 'button',
-                      title: '切换 Harness / 工作区 / 对话',
-                      onClick: openSwitcher,
-                      style: {
-                        border: 'none',
-                        background: 'transparent',
-                        padding: '2px',
-                        cursor: 'pointer',
-                        display: 'inline-flex',
-                        alignItems: 'center',
-                        justifyContent: 'center',
-                      },
+                  'button',
+                  {
+                    type: 'button',
+                    'data-dsb-session-chip': '1',
+                    title: '点击切换 Harness / 工作区 / 对话',
+                    onClick: ctx.onOpenSwitcher,
+                    style: {
+                      height: '28px',
+                      border: '1px solid ' + m.accentBorder,
+                      background: m.accentBg,
+                      padding: '0 9px',
+                      borderRadius: '8px',
+                      cursor: 'pointer',
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      gap: '6px',
+                      fontSize: '12px',
+                      color: '#f3f4f6',
+                      fontWeight: 500,
+                      maxWidth: '280px',
                     },
-                    renderPlusSvg(17, '#e4e4e7'),
-                  ),
+                  },
+                  h('span', {
+                    style: {
+                      width: '6px',
+                      height: '6px',
+                      borderRadius: '999px',
+                      background: m.accent,
+                      flexShrink: 0,
+                    },
+                  }),
                   h(
                     'span',
-                    {
-                      title: '来自 ~/.codex/config.toml',
-                      style: {
-                        fontSize: '13px',
-                        fontWeight: 500,
-                        color: '#ef6c35',
-                        userSelect: 'none',
-                      },
-                    },
-                    codexAccess,
+                    { style: { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } },
+                    label,
                   ),
+                  HARNESS_SDK_ICONS.chevronDown('rgba(243,244,246,0.55)'),
                 ),
                 h(
-                  'div',
-                  { style: { display: 'flex', alignItems: 'center', gap: '12px' } },
-                  h(
-                    'span',
-                    {
-                      style: {
-                        display: 'inline-flex',
-                        alignItems: 'center',
-                        gap: '6px',
-                        fontSize: '13px',
-                        userSelect: 'none',
-                      },
+                  'button',
+                  {
+                    type: 'button',
+                    title: ctx.isStreaming ? '停止生成' : '发送到 ' + m.fullLabel,
+                    onClick: ctx.onSubmit,
+                    style: {
+                      width: '28px',
+                      height: '28px',
+                      borderRadius: '999px',
+                      border: 'none',
+                      background: ctx.hasPayload ? m.accent : m.accentBg,
+                      color: '#ffffff',
+                      cursor: 'pointer',
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      padding: 0,
                     },
-                    h('span', { style: { color: '#f4f4f5', fontWeight: 500 } }, codexModel),
-                    codexEffort
-                      ? h('span', { style: { color: '#9ca3af' } }, codexEffort)
-                      : null,
-                  ),
-                  h(
-                    'button',
-                    {
-                      type: 'button',
-                      title: isExtStreaming ? '停止生成' : '发送到 Codex',
-                      onClick: submitExternalComposer,
-                      style: {
-                        width: '30px',
-                        height: '30px',
-                        borderRadius: '999px',
-                        border: 'none',
-                        background: '#2b6be6',
-                        color: '#ffffff',
-                        cursor: 'pointer',
-                        display: 'inline-flex',
-                        alignItems: 'center',
-                        justifyContent: 'center',
-                        padding: 0,
-                      },
-                    },
-                    isExtStreaming
-                      ? h('span', {
-                          style: {
-                            width: '10px',
-                            height: '10px',
-                            borderRadius: '2px',
-                            background: '#ffffff',
-                          },
-                        })
-                      : renderArrowUpSvg('#ffffff'),
-                  ),
+                  },
+                  ctx.isStreaming
+                    ? h('span', {
+                        style: { width: '10px', height: '10px', borderRadius: '2px', background: '#ffffff' },
+                      })
+                    : HARNESS_SDK_ICONS.arrowUp('#ffffff'),
                 ),
               ),
             ),
           );
+        };
+
+        const renderExternalNativeComposer = () => {
+          const manifest = getHarnessMeta(activeHarness);
+          if (!IS_BAR || barMode === 'lip' || manifest.useNativeComposer) return null;
+
+          const adapter = getHarnessAdapter(activeHarness);
+          const composerCtx = {
+            manifest,
+            avail: activeAvail,
+            selection: extSel,
+            draft: extDraft,
+            capsules: extCapsules,
+            hasPayload: Boolean(extDraft.trim() || extCapsules.length > 0),
+            isStreaming: isExtStreaming,
+            onInputChange: handleExtInputChange,
+            onInputKeyDown: handleExtInputKeyDown,
+            onSubmit: submitExternalComposer,
+            onOpenSwitcher: (ev) => {
+              ev.stopPropagation();
+              if (typeof dsbRuntime.toggleHarnessMenu === 'function') {
+                dsbRuntime.toggleHarnessMenu(ev.currentTarget);
+              }
+            },
+            renderCapsulesRow: renderExtCapsulesRow,
+            workspaceBasename,
+            getPermissionMode: () => dsbRuntime.claudePermissionMode || 'auto',
+            setPermissionMode: (modeId) => {
+              dsbRuntime.claudePermissionMode = modeId;
+              writeStoredString(STORAGE_KEY_CLAUDE_PERM, modeId);
+              notifyBarRuntime();
+            },
+          };
+
+          if (adapter && typeof adapter.renderComposer === 'function') {
+            return adapter.renderComposer(composerCtx);
+          }
+          return renderDefaultAdaptiveComposer(composerCtx);
         };
 
         return h(
@@ -5082,9 +4581,9 @@ window.__ModuleLoader__.load({
                         onMouseDown: (ev) => ev.stopPropagation(),
                       },
                       (() => {
-                        const meta = HARNESS_META[activeHarness] || HARNESS_META.dsh;
+                        const meta = getHarnessMeta(activeHarness);
                         const isDesktopRunning =
-                          activeHarness === 'dsh'
+                          meta.useNativeComposer
                             ? true
                             : Boolean(
                                 (activeAvail && activeAvail.running) ||
@@ -5092,17 +4591,14 @@ window.__ModuleLoader__.load({
                                     dsbRuntime.liveSyncMeta[activeHarness].running),
                               );
                         const sel =
-                          activeHarness === 'dsh'
+                          meta.useNativeComposer
                             ? { sessionId: sessionId || '', title: '' }
                             : dsbRuntime.externalSelection[activeHarness] || {};
                         return h(
                           'button',
                           {
                             type: 'button',
-                            title:
-                              activeHarness === 'dsh'
-                                ? '点击在浏览器打开当前 DeepSeek Harness 对话'
-                                : '点击将 ' + meta.label + ' 拉到最前并展示这个对话',
+                            title: meta.detailButtonTitle,
                             onClick: (ev) => {
                               ev.stopPropagation();
                               tauriInvoke('harness_focus_desktop', {
@@ -5199,13 +4695,7 @@ window.__ModuleLoader__.load({
                               padding: '28px 12px',
                             },
                           },
-                          activeHarness === 'antigravity'
-                            ? 'Antigravity 已就绪 — 发消息后自动同步到桌面端 CLI Project'
-                            : activeHarness === 'codex'
-                              ? 'Codex (app-server) 已就绪 — 发消息后写入 ~/.codex 共享历史'
-                              : activeHarness === 'claude_code'
-                                ? 'Claude Code CLI 已就绪 — 发消息后自动同步至 ~/.claude/projects 会话历史'
-                                : '暂无历史消息 — 在下方输入框发消息后，对话流将在此实时展开',
+                          getHarnessMeta(activeHarness).emptyHistoryHint,
                         )
                       : entries.map((item, idx) => {
                           const isUser = item.role === 'user';
@@ -5327,14 +4817,7 @@ window.__ModuleLoader__.load({
                         opacity: latestSingleLine ? 0.92 : 0.62,
                       },
                     },
-                    latestSingleLine ||
-                      (activeHarness === 'antigravity'
-                        ? 'Antigravity · CLI Project 已就绪 · 双击 Ctrl 唤出输入框'
-                        : activeHarness === 'codex'
-                          ? 'Codex · app-server 已就绪 · 双击 Ctrl 唤出输入框'
-                          : activeHarness === 'claude_code'
-                            ? 'Claude Code · CLI 已就绪 · 双击 Ctrl 唤出输入框'
-                            : '暂无消息 · 双击 Ctrl 唤出输入框'),
+                    latestSingleLine || getHarnessMeta(activeHarness).emptyLipHint,
                   ),
                 ),
             !(IS_BAR && barMode === 'lip')
@@ -5373,6 +4856,9 @@ window.__ModuleLoader__.load({
         const [menuOpen, setMenuOpen] = useState(false);
         const [settingsView, setSettingsView] = useState(false);
         const [actionToast, setActionToast] = useState('');
+        const [hoveredHarnessId, setHoveredHarnessId] = useState('');
+        const [harnessSearchOpen, setHarnessSearchOpen] = useState(false);
+        const [harnessQuery, setHarnessQuery] = useState('');
         const [hoveredWsId, setHoveredWsId] = useState('');
         const [manualPathMode, setManualPathMode] = useState(false);
         const [manualPathValue, setManualPathValue] = useState('');
@@ -5454,7 +4940,15 @@ window.__ModuleLoader__.load({
         }, []);
 
         const activeHarness = dsbRuntime.activeHarness || 'dsh';
-        const harnessTheme = HARNESS_META[activeHarness] || HARNESS_META.dsh;
+        const activeMeta = getHarnessMeta(activeHarness);
+        // Level 1 hover browses that Harness's Workspaces & Conversations immediately without
+        // forcing an active-composer switch until the user clicks a Harness, Workspace, or Chat.
+        const browsedHarness =
+          menuOpen && hoveredHarnessId && HARNESS_META[hoveredHarnessId]
+            ? hoveredHarnessId
+            : activeHarness;
+        const browsedMeta = getHarnessMeta(browsedHarness);
+        const harnessTheme = activeMeta;
 
         const wsSnap = workspaces && workspaces.list ? workspaces.list.getSnapshot() : { items: [], archivedSessionIds: [], pinnedSessionIds: [] };
         const sessSnap = sessions && sessions.list ? sessions.list.getSnapshot() : { ids: [], byId: {} };
@@ -5470,19 +4964,24 @@ window.__ModuleLoader__.load({
           mainSessionIdOfList(sessSnap);
 
         const activeSession = dshActiveSessionId ? byId[dshActiveSessionId] : null;
-        const extSel = activeHarness !== 'dsh' ? dsbRuntime.externalSelection[activeHarness] || {} : null;
-        const activeSessionId = activeHarness === 'dsh' ? dshActiveSessionId : String((extSel && extSel.sessionId) || '');
-        const activeTitle =
-          activeHarness === 'dsh'
-            ? sessionDisplayTitle(activeSession)
-            : (extSel && extSel.title) || harnessTheme.label + ' · 新对话';
+        const activeExtSel = !activeMeta.useNativeComposer ? dsbRuntime.externalSelection[activeHarness] || {} : null;
+        const browsedExtSel = !browsedMeta.useNativeComposer ? dsbRuntime.externalSelection[browsedHarness] || {} : null;
+        const activeSessionId = activeMeta.useNativeComposer
+          ? dshActiveSessionId
+          : String((activeExtSel && activeExtSel.sessionId) || '');
+        const browsedSessionId = browsedMeta.useNativeComposer
+          ? dshActiveSessionId
+          : String((browsedExtSel && browsedExtSel.sessionId) || '');
+        const activeTitle = activeMeta.useNativeComposer
+          ? sessionDisplayTitle(activeSession)
+          : (activeExtSel && activeExtSel.title) || activeMeta.label + ' · 新对话';
 
-        // Compute grouped workspaces and conversations for the active Harness
-        const { groups, activeWsId } = useMemo(() => {
-          if (activeHarness !== 'dsh') {
-            const catalog = dsbRuntime.externalCatalogs[activeHarness];
+        // Compute grouped workspaces and conversations for the browsed Harness (Level 2 & Level 3)
+        const { groups, browsedActiveWsId } = useMemo(() => {
+          if (!browsedMeta.useNativeComposer) {
+            const catalog = dsbRuntime.externalCatalogs[browsedHarness];
             const extGroups = catalog && Array.isArray(catalog.groups) ? catalog.groups : [];
-            const selWsId = (extSel && extSel.workspaceId) || '';
+            const selWsId = (browsedExtSel && browsedExtSel.workspaceId) || '';
             const found = extGroups.some((g) => g.workspaceId === selWsId)
               ? selWsId
               : extGroups[0]
@@ -5490,7 +4989,7 @@ window.__ModuleLoader__.load({
                 : '';
             return {
               groups: extGroups,
-              activeWsId: found,
+              browsedActiveWsId: found,
             };
           }
 
@@ -5577,21 +5076,43 @@ window.__ModuleLoader__.load({
 
           return {
             groups: result,
-            activeWsId: foundWsId || (result[0] ? result[0].workspaceId : ''),
+            browsedActiveWsId: foundWsId || (result[0] ? result[0].workspaceId : ''),
           };
-        }, [activeHarness, wsItems, sessSnap, dshActiveSessionId, extSel && extSel.workspaceId, dsbRuntime.externalCatalogs[activeHarness]]);
+        }, [
+          browsedHarness,
+          browsedMeta.useNativeComposer,
+          wsItems,
+          sessSnap,
+          dshActiveSessionId,
+          browsedExtSel && browsedExtSel.workspaceId,
+          dsbRuntime.externalCatalogs[browsedHarness],
+        ]);
 
+        // Reset browsed Harness + search filter whenever menu opens
         useEffect(() => {
           if (menuOpen) {
+            setHoveredHarnessId(activeHarness);
+            setHarnessQuery('');
+            setHarnessSearchOpen(HARNESS_ORDER.length > 6);
             refreshHarnessAvailability();
-            if (activeHarness !== 'dsh') {
+            if (!activeMeta.useNativeComposer) {
               refreshExternalCatalog(activeHarness, false);
             }
-            setHoveredWsId(activeWsId || (groups[0] ? groups[0].workspaceId : ''));
             setManualPathMode(false);
             setPickerError('');
           }
-        }, [menuOpen, activeHarness, activeWsId]);
+        }, [menuOpen]);
+
+        // Sync hovered workspace & lazily load catalog when hovering a different Harness in Level 1
+        useEffect(() => {
+          if (!menuOpen) return;
+          if (!browsedMeta.useNativeComposer && !dsbRuntime.externalCatalogs[browsedHarness] && !dsbRuntime.externalLoading[browsedHarness]) {
+            refreshExternalCatalog(browsedHarness, false);
+          }
+          setHoveredWsId(browsedActiveWsId || (groups[0] ? groups[0].workspaceId : ''));
+          setManualPathMode(false);
+          setPickerError('');
+        }, [menuOpen, browsedHarness, browsedActiveWsId]);
 
         // Outside click / Esc handling for popup
         useEffect(() => {
@@ -5621,7 +5142,7 @@ window.__ModuleLoader__.load({
           };
         }, [menuOpen]);
 
-        // Re-snap popover coordinates on the next frame whenever harness switches while menu is open
+        // Re-snap popover coordinates and Win32 window shapes whenever Harness/columns change
         useEffect(() => {
           if (!menuOpen) return undefined;
           const raf = window.requestAnimationFrame(() => {
@@ -5631,13 +5152,20 @@ window.__ModuleLoader__.load({
             }
           });
           return () => window.cancelAnimationFrame(raf);
-        }, [menuOpen, activeHarness]);
+        }, [menuOpen, activeHarness, browsedHarness, hoveredWsId, settingsView]);
 
-        const handleOpenSession = (conv, group) => {
+        const handleOpenSession = (conv, group, targetHarness = browsedHarness) => {
           setMenuOpen(false);
-          if (activeHarness !== 'dsh') {
-            selectExternalConversation(activeHarness, group, conv);
+          const targetMeta = getHarnessMeta(targetHarness);
+          if (!targetMeta.useNativeComposer) {
+            selectExternalConversation(targetHarness, group, conv);
+            if (targetHarness !== activeHarness) {
+              setActiveHarness(targetHarness, true, true);
+            }
             return;
+          }
+          if (targetHarness !== activeHarness) {
+            setActiveHarness(targetHarness, true, true);
           }
           const id = typeof conv === 'string' ? conv : conv.id;
           writeStoredString(STORAGE_KEY_LAST_SESSION, id);
@@ -5650,11 +5178,18 @@ window.__ModuleLoader__.load({
           window.location.replace('/sessions/' + encodeURIComponent(id) + '?dsh_bar_clone=1');
         };
 
-        const handleNewConversation = async (group) => {
+        const handleNewConversation = async (group, targetHarness = browsedHarness) => {
           setMenuOpen(false);
-          if (activeHarness !== 'dsh') {
-            startNewExternalConversation(activeHarness, group);
+          const targetMeta = getHarnessMeta(targetHarness);
+          if (!targetMeta.useNativeComposer) {
+            startNewExternalConversation(targetHarness, group);
+            if (targetHarness !== activeHarness) {
+              setActiveHarness(targetHarness, true, true);
+            }
             return;
+          }
+          if (targetHarness !== activeHarness) {
+            setActiveHarness(targetHarness, true, true);
           }
           const wsId = typeof group === 'string' ? group : group.workspaceId;
           try {
@@ -5664,27 +5199,31 @@ window.__ModuleLoader__.load({
             }
             if (sessions && typeof sessions.create === 'function') {
               const newId = await sessions.create({ workspaceId: wsId });
-              if (newId) handleOpenSession(newId);
+              if (newId) handleOpenSession(newId, group, targetHarness);
             }
           } catch (err) {
             setPickerError(err instanceof Error ? err.message : String(err));
           }
         };
 
-        const createWorkspaceAtPath = async (pickedPath) => {
+        const createWorkspaceAtPath = async (pickedPath, targetHarness = browsedHarness) => {
           if (!pickedPath) return;
-          if (activeHarness !== 'dsh') {
+          const targetMeta = getHarnessMeta(targetHarness);
+          if (!targetMeta.useNativeComposer) {
             const label = workspaceBasename(pickedPath);
-            startNewExternalConversation(activeHarness, {
-              workspaceId:
-                activeHarness === 'codex' || activeHarness === 'claude_code'
-                  ? pickedPath
-                  : 'default-cli-project',
+            startNewExternalConversation(targetHarness, {
+              workspaceId: targetHarness === 'antigravity' ? 'default-cli-project' : pickedPath,
               label,
               path: pickedPath,
             });
+            if (targetHarness !== activeHarness) {
+              setActiveHarness(targetHarness, true, true);
+            }
             setMenuOpen(false);
             return;
+          }
+          if (targetHarness !== activeHarness) {
+            setActiveHarness(targetHarness, true, true);
           }
           if (!workspaces || typeof workspaces.create !== 'function') return;
           const ws = await workspaces.create({ path: pickedPath });
@@ -5697,7 +5236,7 @@ window.__ModuleLoader__.load({
 
         const handleCreateWorkspace = async () => {
           setPickerError('');
-          if (activeHarness !== 'dsh') {
+          if (!browsedMeta.useNativeComposer) {
             setManualPathMode(true);
             return;
           }
@@ -5715,7 +5254,7 @@ window.__ModuleLoader__.load({
               return;
             }
             if (pickedPath) {
-              await createWorkspaceAtPath(pickedPath);
+              await createWorkspaceAtPath(pickedPath, browsedHarness);
             }
           } catch {
             setManualPathMode(true);
@@ -5747,9 +5286,6 @@ window.__ModuleLoader__.load({
             setSubmenuMarginBottom(0);
             return;
           }
-          // Align the right panel's first row (6px padding + 1px border = 7px from panel top)
-          // directly with the hovered workspace row `rr.top`, while clamping so Level 2 never
-          // overflows above Level 1's top or below Level 1's bottom (above the Bar card).
           const targetTop = Math.max(0, Math.round(rr.top - pr.top - 7));
           const maxBottomOffset = Math.max(0, Math.round(pr.height - cr.height));
           const desiredBottomOffset = Math.round(pr.height - (targetTop + cr.height));
@@ -5762,7 +5298,7 @@ window.__ModuleLoader__.load({
           if (!menuOpen || settingsView) return undefined;
           const raf = window.requestAnimationFrame(recomputeSubmenuAlignment);
           return () => window.cancelAnimationFrame(raf);
-        }, [recomputeSubmenuAlignment, menuOpen, settingsView, activeHarness, groups.length]);
+        }, [recomputeSubmenuAlignment, menuOpen, settingsView, browsedHarness, groups.length]);
 
         const availById = useMemo(() => {
           const map = {};
@@ -5772,18 +5308,27 @@ window.__ModuleLoader__.load({
           return map;
         }, [dsbRuntime.harnessAvailability]);
 
+        const filteredHarnesses = useMemo(() => {
+          const q = String(harnessQuery || '').trim().toLowerCase();
+          if (!q) return HARNESS_ORDER;
+          return HARNESS_ORDER.filter((hid) => {
+            const m = getHarnessMeta(hid);
+            if (hid.includes(q)) return true;
+            if (String(m.label || '').toLowerCase().includes(q)) return true;
+            if (String(m.fullLabel || '').toLowerCase().includes(q)) return true;
+            if (Array.isArray(m.aliases) && m.aliases.some((a) => String(a).toLowerCase().includes(q))) return true;
+            return false;
+          });
+        }, [harnessQuery]);
+
         const renderMenu = () => {
           if (!menuOpen) return null;
           const isValidRect = (r) => !!(r && r.width > 4 && r.height > 4 && r.bottom > 0);
 
-          // Always measure the live, visible Bar slab (upper card + active composer) so `bottomPx`
-          // is mathematically invariant to window vertical resizes and NEVER drifts or flies off-screen
-          // when switching harnesses (where old buttons unmount with 0x0 rect).
           const cardEl = document.querySelector('[data-dsb-card]');
-          const compEl =
-            dsbRuntime.activeHarness !== 'dsh'
-              ? document.querySelector('[data-dsb-external-composer]')
-              : document.querySelector('[data-composer-card]');
+          const compEl = !activeMeta.useNativeComposer
+            ? document.querySelector('[data-dsb-external-composer]')
+            : document.querySelector('[data-composer-card]');
           const cr = cardEl ? cardEl.getBoundingClientRect() : null;
           const ir = compEl ? compEl.getBoundingClientRect() : null;
           let slabTop = null;
@@ -5796,23 +5341,15 @@ window.__ModuleLoader__.load({
             slabTop = slabTop === null ? ir.top : Math.min(slabTop, ir.top);
             slabBottom = slabBottom === null ? ir.bottom : Math.max(slabBottom, ir.bottom);
           }
-          const fallbackSlabH =
-            dsbRuntime.activeHarness === 'codex'
-              ? 196
-              : dsbRuntime.activeHarness === 'claude_code'
-                ? 174
-                : 158;
-          // Pure element-span height (slabBottom - slabTop) is 100% invariant to
-          // Win32 SetWindowPos resizes and window.innerHeight lag, eliminating 60Hz vertical jitter.
+          const fallbackSlabH = activeMeta.fallbackSlabHeight || 158;
           const slabHeight =
             slabTop !== null && slabBottom !== null
               ? Math.max(56, Math.min(380, Math.round(slabBottom - slabTop)))
               : fallbackSlabH;
           const bottomPx = slabHeight + 8;
 
-          // Live visible session chip for horizontal alignment (ignore detached / hidden 0x0 refs)
           let chipRect = null;
-          if (dsbRuntime.activeHarness !== 'dsh') {
+          if (!activeMeta.useNativeComposer) {
             const liveExtChip = document.querySelector(
               '[data-dsb-external-composer] [data-dsb-session-chip="1"]',
             );
@@ -5828,16 +5365,26 @@ window.__ModuleLoader__.load({
             if (isValidRect(r0)) chipRect = r0;
           }
 
-          const menuMaxW = 468;
+          // Responsive 3-column widths so Harness -> Workspace -> Conversation fits comfortably
+          // inside both standard 760px Bar and narrow dragged Bars (>= 480px).
+          const winW = typeof window !== 'undefined' ? window.innerWidth || 760 : 760;
+          const compact3Col = winW < 640;
+          const col1W = compact3Col ? 138 : 166;
+          const col2W = compact3Col ? 156 : 188;
+          const col3W = compact3Col ? 176 : 236;
+          const totalCascadeW = settingsView
+            ? Math.min(468, Math.max(360, winW - 16))
+            : col1W + 6 + col2W + (hoveredGroup ? 6 + col3W : 0);
           const leftPx = chipRect
-            ? Math.max(8, Math.min(Math.round(chipRect.left), Math.max(8, window.innerWidth - menuMaxW - 8)))
+            ? Math.max(8, Math.min(Math.round(chipRect.left), Math.max(8, winW - totalCascadeW - 8)))
             : 12;
 
           const panelBg = harnessTheme.surface;
           const panelBorder = harnessTheme.border;
+          const browsedTheme = browsedMeta;
 
           const snap = dsbRuntime.appSettings || {
-            version: '0.3.14',
+            version: '0.4.0',
             isElevated: false,
             dshStatus: '已连接',
             config: {
@@ -5945,10 +5492,11 @@ window.__ModuleLoader__.load({
             h(
               'div',
               {
+                'data-dsb-popup-panel': '1',
                 'data-dsb-settings-panel': '1',
                 'data-dg-scroll': '1',
                 style: {
-                  width: '466px',
+                  width: totalCascadeW + 'px',
                   maxHeight: '430px',
                   overflowY: 'auto',
                   borderRadius: '14px',
@@ -5962,7 +5510,6 @@ window.__ModuleLoader__.load({
                   boxSizing: 'border-box',
                 },
               },
-              // Header
               h(
                 'div',
                 {
@@ -5990,7 +5537,7 @@ window.__ModuleLoader__.load({
                         border: '1px solid ' + harnessTheme.accentBorder,
                       },
                     },
-                    'v' + (snap.version || '0.3.0'),
+                    'v' + (snap.version || '0.4.0'),
                   ),
                   actionToast
                     ? h('span', { style: { fontSize: '11px', color: '#34d399', marginLeft: '4px' } }, actionToast)
@@ -6012,11 +5559,9 @@ window.__ModuleLoader__.load({
                       cursor: 'pointer',
                     },
                   },
-                  '← 返回工作区',
+                  '← 返回菜单',
                 ),
               ),
-
-              // Output target segmented picker
               h(
                 'div',
                 { style: { display: 'flex', flexDirection: 'column', gap: '4px' } },
@@ -6054,14 +5599,12 @@ window.__ModuleLoader__.load({
                   }),
                 ),
               ),
-
-              // Core toggles
               h(
                 'div',
                 { style: { display: 'flex', flexDirection: 'column', gap: '4px' } },
                 renderToggleRow(
                   'syncExternalPlugins',
-                  '四家插件伴随启动 & 实时对话同步',
+                  '多 Harness 伴随启动 & 实时对话同步',
                   'DSH ' +
                     (syncSt.dshPlugin ? '✓' : '·') +
                     '  Antigravity ' +
@@ -6119,8 +5662,6 @@ window.__ModuleLoader__.load({
                   (v) => updateAppSettings({ preferAdmin: v }),
                 ),
               ),
-
-              // Quick action footer (replaces old system tray actions)
               h(
                 'div',
                 {
@@ -6137,7 +5678,7 @@ window.__ModuleLoader__.load({
                   'div',
                   { style: { display: 'flex', alignItems: 'center', gap: '4px', flexWrap: 'wrap' } },
                   [
-                    { id: 'resync_plugins', label: '重同步插件', toast: '四家插件已同步' },
+                    { id: 'resync_plugins', label: '重同步插件', toast: '插件已同步' },
                     { id: 'reconnect_dsh', label: '重连 DSH', toast: '正在重连 DSH…' },
                     { id: 'open_captures', label: '截图目录', toast: '' },
                     { id: 'open_config', label: '配置文件', toast: '' },
@@ -6184,6 +5725,10 @@ window.__ModuleLoader__.load({
               ),
             );
 
+          // 3-Level Cascading Menu (Left -> Right):
+          // Level 1: Harness (scrollable + searchable, scales to 100+ Harnesses)
+          // Level 2: Workspaces of hovered Harness
+          // Level 3: Conversations of hovered Workspace
           const menuNode = h(
             'div',
             {
@@ -6195,8 +5740,8 @@ window.__ModuleLoader__.load({
                 bottom: bottomPx + 'px',
                 left: leftPx + 'px',
                 display: 'flex',
-                flexDirection: 'column',
-                alignItems: 'stretch',
+                flexDirection: 'row',
+                alignItems: 'flex-end',
                 gap: '6px',
                 zIndex: 9999,
                 pointerEvents: 'auto',
@@ -6204,399 +5749,556 @@ window.__ModuleLoader__.load({
                 fontFamily: 'system-ui, -apple-system, "Segoe UI", Roboto, "PingFang SC", sans-serif',
               },
             },
-            // Level 0 (Top): Harness Switcher (DeepSeek / Antigravity / Codex / Claude) + Refresh + Settings Gear
-            h(
-              'div',
-              {
-                'data-dsb-harness-bar': '1',
-                style: {
-                  width: '466px',
-                  borderRadius: '14px',
-                  padding: '5px 6px',
-                  background: panelBg,
-                  border: '1px solid ' + panelBorder,
-                  boxShadow: '0 8px 24px rgba(0,0,0,0.38)',
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: '4px',
-                  boxSizing: 'border-box',
-                },
-              },
-              HARNESS_ORDER.map((hid) => {
-                const meta = HARNESS_META[hid];
-                const isSelected = activeHarness === hid;
-                const avail = availById[hid];
-                const isReady = avail ? Boolean(avail.available) : true;
-                return h(
-                  'button',
-                  {
-                    key: hid,
-                    type: 'button',
-                    'data-dsb-harness-opt': hid,
-                    title: meta.fullLabel + ' · ' + meta.syncHint,
-                    onClick: () => {
-                      setPickerError('');
-                      setManualPathMode(false);
-                      setActiveHarness(hid, true);
-                    },
-                    style: {
-                      flex: 1,
-                      padding: '6px 6px',
-                      borderRadius: '10px',
-                      border: isSelected ? '1px solid ' + meta.accentBorder : '1px solid transparent',
-                      background: isSelected ? meta.accentBg : 'transparent',
-                      color: isSelected ? '#ffffff' : 'rgba(229, 231, 235, 0.78)',
-                      fontSize: '12px',
-                      fontWeight: isSelected ? 650 : 500,
-                      cursor: 'pointer',
-                      display: 'inline-flex',
-                      alignItems: 'center',
-                      justifyContent: 'center',
-                      gap: '5px',
-                      opacity: isReady ? 1 : 0.55,
-                      whiteSpace: 'nowrap',
-                      transition: 'background 0.14s ease, border-color 0.14s ease',
-                    },
-                  },
-                  h('span', {
-                    style: {
-                      width: '7px',
-                      height: '7px',
-                      borderRadius: '999px',
-                      background: isReady ? meta.accent : '#6b7280',
-                      boxShadow: isSelected ? '0 0 8px ' + meta.accent : 'none',
-                      flexShrink: 0,
-                    },
-                  }),
-                  h('span', null, meta.label),
-                );
-              }),
-              activeHarness !== 'dsh' && !settingsView
-                ? h(
-                    'button',
-                    {
-                      type: 'button',
-                      title: '刷新工作区与历史会话',
-                      onClick: () => refreshExternalCatalog(activeHarness, false),
-                      style: {
-                        width: '26px',
-                        height: '26px',
-                        borderRadius: '8px',
-                        border: 'none',
-                        background: 'rgba(255,255,255,0.06)',
-                        color: 'rgba(229,231,235,0.85)',
-                        fontSize: '13px',
-                        cursor: 'pointer',
-                        flexShrink: 0,
-                      },
-                    },
-                    '↻',
-                  )
-                : null,
-              h(
-                'button',
-                {
-                  type: 'button',
-                  'data-dsb-settings-btn': '1',
-                  title: settingsView ? '返回工作区列表' : '插件与悬浮条设置',
-                  onClick: () => {
-                    const next = !settingsView;
-                    if (next) refreshAppSettings();
-                    setSettingsView(next);
-                    if (typeof dsbRuntime.scheduleLayoutReport === 'function') {
-                      dsbRuntime.scheduleLayoutReport(240);
-                    }
-                  },
-                  style: {
-                    width: '26px',
-                    height: '26px',
-                    borderRadius: '8px',
-                    border: settingsView ? '1px solid ' + harnessTheme.accentBorder : 'none',
-                    background: settingsView ? harnessTheme.accentBg : 'rgba(255,255,255,0.06)',
-                    color: settingsView ? harnessTheme.accent : 'rgba(229,231,235,0.85)',
-                    fontSize: '13px',
-                    cursor: 'pointer',
-                    flexShrink: 0,
-                    display: 'inline-flex',
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                    padding: 0,
-                  },
-                },
-                '⚙',
-              ),
-            ),
-
-            // Either Settings Panel OR Workspaces | Conversations
             settingsView
               ? renderSettingsBody()
               : h(
-              'div',
-              {
-                style: {
-                  display: 'flex',
-                  alignItems: 'flex-end',
-                  gap: '6px',
-                },
-              },
-            // Level 1: Workspaces
-            h(
-              'div',
-              {
-                ref: wsPanelRef,
-                style: {
-                  width: '196px',
-                  maxHeight: '286px',
-                  borderRadius: '14px',
-                  padding: '6px',
-                  background: panelBg,
-                  border: '1px solid ' + panelBorder,
-                  boxShadow: '0 8px 24px rgba(0,0,0,0.35)',
-                  display: 'flex',
-                  flexDirection: 'column',
-                  gap: '2px',
-                  boxSizing: 'border-box',
-                },
-              },
-              manualPathMode
-                ? h(
-                    'div',
-                    { style: { padding: '4px', display: 'flex', flexDirection: 'column', gap: '4px' } },
-                    h('input', {
-                      type: 'text',
-                      autoFocus: true,
-                      placeholder: '输入工作区目录路径…',
-                      value: manualPathValue,
-                      onChange: (ev) => setManualPathValue(ev.target.value),
-                      onKeyDown: (ev) => {
-                        if (ev.key === 'Enter' && manualPathValue.trim()) {
-                          createWorkspaceAtPath(manualPathValue.trim()).catch((err) => {
-                            setPickerError(err instanceof Error ? err.message : String(err));
-                          });
-                        } else if (ev.key === 'Escape') {
-                          ev.stopPropagation();
-                          setManualPathMode(false);
-                        }
-                      },
-                      style: {
-                        width: '100%',
-                        boxSizing: 'border-box',
-                        padding: '4px 8px',
-                        borderRadius: '8px',
-                        fontSize: '12px',
-                        background: 'rgba(128,128,128,0.14)',
-                        border: '1px solid ' + harnessTheme.accentBorder,
-                        color: 'inherit',
-                        outline: 'none',
-                      },
-                    }),
-                    h(
-                      'div',
-                      { style: { display: 'flex', gap: '4px', justifyContent: 'flex-end' } },
-                      h(
-                        'button',
-                        {
-                          type: 'button',
-                          onClick: () => setManualPathMode(false),
-                          style: { fontSize: '11.5px', padding: '2px 8px', borderRadius: '6px', background: 'transparent', color: 'inherit', border: '1px solid rgba(128,128,128,0.25)', cursor: 'pointer' },
-                        },
-                        '取消',
-                      ),
-                      h(
-                        'button',
-                        {
-                          type: 'button',
-                          onClick: () => {
-                            if (manualPathValue.trim()) {
-                              createWorkspaceAtPath(manualPathValue.trim()).catch((err) => {
-                                setPickerError(err instanceof Error ? err.message : String(err));
-                              });
-                            }
-                          },
-                          style: { fontSize: '11.5px', padding: '2px 8px', borderRadius: '6px', background: harnessTheme.accentBg, color: harnessTheme.accent, border: '1px solid ' + harnessTheme.accentBorder, cursor: 'pointer' },
-                        },
-                        '确定',
-                      ),
-                    ),
-                  )
-                : h(
-                    'button',
-                    {
-                      type: 'button',
-                      onClick: handleCreateWorkspace,
-                      style: {
-                        width: '100%',
-                        textAlign: 'left',
-                        padding: '6px 10px',
-                        borderRadius: '10px',
-                        fontSize: '12px',
-                        fontWeight: 500,
-                        color: harnessTheme.accent,
-                        background: harnessTheme.accentBg,
-                        border: 'none',
-                        cursor: 'pointer',
-                        display: 'flex',
-                        alignItems: 'center',
-                        gap: '6px',
-                      },
-                    },
-                    h('span', null, '＋'),
-                    h('span', null, activeHarness === 'dsh' ? '新建工作区…' : '指定目录新开…'),
-                  ),
-              pickerError
-                ? h('div', { style: { fontSize: '11px', color: '#f87171', padding: '2px 8px' } }, pickerError)
-                : null,
-              h('div', { style: { height: '1px', margin: '4px 2px', background: panelBorder } }),
-              h(
-                'div',
-                {
-                  'data-dsb-menu-scroll': '1',
-                  onScroll: recomputeSubmenuAlignment,
-                  style: { overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '2px', maxHeight: '206px' },
-                },
-                activeHarness !== 'dsh' && dsbRuntime.externalLoading[activeHarness] && groups.length === 0
-                  ? h('div', { style: { padding: '12px 10px', fontSize: '12px', opacity: 0.65, textAlign: 'center' } }, '正在读取工作区…')
-                  : groups.length === 0
-                    ? h('div', { style: { padding: '12px 10px', fontSize: '12px', opacity: 0.65, textAlign: 'center' } }, '暂无工作区')
-                    : groups.map((g) => {
-                  const isHover = hoveredGroup && g.workspaceId === hoveredGroup.workspaceId;
-                  const isActiveWs = g.workspaceId === activeWsId;
-                  return h(
-                    'button',
-                    {
-                      key: g.workspaceId,
-                      ref: (el) => {
-                        if (el) wsRowRefs.current.set(g.workspaceId, el);
-                        else wsRowRefs.current.delete(g.workspaceId);
-                      },
-                      type: 'button',
-                      onMouseEnter: () => setHoveredWsId(g.workspaceId),
-                      onClick: () => setHoveredWsId(g.workspaceId),
-                      style: {
-                        width: '100%',
-                        textAlign: 'left',
-                        padding: '6px 10px',
-                        borderRadius: '10px',
-                        fontSize: '12px',
-                        fontWeight: isActiveWs ? 600 : 400,
-                        background: isHover ? 'rgba(128,128,128,0.14)' : 'transparent',
-                        color: 'inherit',
-                        border: 'none',
-                        cursor: 'pointer',
-                        display: 'flex',
-                        alignItems: 'center',
-                        justifyContent: 'space-between',
-                        gap: '6px',
-                      },
-                    },
-                    h(
-                      'span',
-                      { style: { display: 'inline-flex', alignItems: 'center', gap: '6px', minWidth: 0, flex: 1 } },
-                      renderFolderIcon(14),
-                      h('span', { style: { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, g.label),
-                    ),
-                    h('span', { style: { opacity: 0.6, flexShrink: 0 } }, (isActiveWs ? '● ' : '') + '›'),
-                  );
-                }),
-              ),
-            ),
-
-            // Level 2: Conversations in hovered workspace (first row aligned with hovered workspace row)
-            hoveredGroup
-              ? h(
-                  'div',
-                  {
-                    ref: convPanelRef,
-                    style: {
-                      width: '248px',
-                      maxHeight: '286px',
-                      marginBottom: submenuMarginBottom + 'px',
-                      borderRadius: '14px',
-                      padding: '6px',
-                      background: panelBg,
-                      border: '1px solid ' + panelBorder,
-                      boxShadow: '0 8px 24px rgba(0,0,0,0.35)',
-                      display: 'flex',
-                      flexDirection: 'column',
-                      gap: '2px',
-                      boxSizing: 'border-box',
-                      transition: 'margin-bottom 90ms ease-out',
-                    },
-                  },
-                  hoveredGroup.workspaceId !== '__ungrouped__'
-                    ? h(
-                        'button',
-                        {
-                          type: 'button',
-                          onClick: () => handleNewConversation(hoveredGroup),
-                          style: {
-                            width: '100%',
-                            textAlign: 'left',
-                            padding: '6px 10px',
-                            borderRadius: '10px',
-                            fontSize: '12px',
-                            fontWeight: 500,
-                            color: harnessTheme.accent,
-                            background: harnessTheme.accentBg,
-                            border: 'none',
-                            cursor: 'pointer',
-                            display: 'flex',
-                            alignItems: 'center',
-                            gap: '6px',
-                          },
-                        },
-                        h('span', null, '＋'),
-                        h('span', null, '新对话'),
-                      )
-                    : null,
-                  hoveredGroup.workspaceId !== '__ungrouped__'
-                    ? h('div', { style: { height: '1px', margin: '4px 2px', background: panelBorder } })
-                    : null,
+                  React.Fragment,
+                  null,
+                  // ===========================================================
+                  // Level 1 (Left): Harness List (scales cleanly to 100+ items)
+                  // ===========================================================
                   h(
                     'div',
                     {
-                      'data-dsb-menu-scroll': '1',
-                      style: { overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '2px', maxHeight: '220px' },
+                      'data-dsb-popup-panel': '1',
+                      'data-dsb-harness-col': '1',
+                      style: {
+                        width: col1W + 'px',
+                        maxHeight: '300px',
+                        borderRadius: '14px',
+                        padding: '6px',
+                        background: panelBg,
+                        border: '1px solid ' + panelBorder,
+                        boxShadow: '0 8px 24px rgba(0,0,0,0.38)',
+                        display: 'flex',
+                        flexDirection: 'column',
+                        gap: '2px',
+                        boxSizing: 'border-box',
+                      },
                     },
-                    hoveredGroup.convs.length === 0
-                      ? h('div', { style: { padding: '12px 10px', fontSize: '12px', opacity: 0.6, textAlign: 'center' } }, '暂无对话')
-                      : hoveredGroup.convs.map((c) => {
-                          const isSel = c.id === activeSessionId;
-                          return h(
+                    // Compact column header: title + count + search toggle
+                    h(
+                      'div',
+                      {
+                        style: {
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'space-between',
+                          padding: '3px 6px 4px',
+                          gap: '4px',
+                        },
+                      },
+                      h(
+                        'div',
+                        { style: { display: 'inline-flex', alignItems: 'center', gap: '5px', minWidth: 0 } },
+                        h(
+                          'span',
+                          { style: { fontSize: '11px', fontWeight: 600, opacity: 0.68, letterSpacing: '0.02em' } },
+                          'Harness',
+                        ),
+                        h(
+                          'span',
+                          {
+                            style: {
+                              fontSize: '10px',
+                              padding: '0 5px',
+                              borderRadius: '999px',
+                              background: 'rgba(255,255,255,0.07)',
+                              color: 'rgba(229,231,235,0.7)',
+                              lineHeight: '16px',
+                            },
+                          },
+                          String(HARNESS_ORDER.length),
+                        ),
+                      ),
+                      h(
+                        'button',
+                        {
+                          type: 'button',
+                          'data-dsb-harness-search-btn': '1',
+                          title: harnessSearchOpen ? '收起搜索' : '筛选 Harness',
+                          onClick: () => {
+                            setHarnessSearchOpen((prev) => {
+                              if (prev) setHarnessQuery('');
+                              return !prev;
+                            });
+                          },
+                          style: {
+                            width: '22px',
+                            height: '22px',
+                            borderRadius: '6px',
+                            border: 'none',
+                            background: harnessSearchOpen ? 'rgba(255,255,255,0.10)' : 'transparent',
+                            cursor: 'pointer',
+                            display: 'inline-flex',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            padding: 0,
+                          },
+                        },
+                        HARNESS_SDK_ICONS.search(12, harnessSearchOpen ? '#ffffff' : 'rgba(229,231,235,0.62)'),
+                      ),
+                    ),
+                    harnessSearchOpen
+                      ? h('input', {
+                          type: 'text',
+                          'data-dsb-harness-filter': '1',
+                          autoFocus: HARNESS_ORDER.length <= 6,
+                          placeholder: '筛选 Harness…',
+                          value: harnessQuery,
+                          onChange: (ev) => setHarnessQuery(ev.target.value),
+                          onKeyDown: (ev) => {
+                            if (ev.key === 'Escape' && harnessQuery) {
+                              ev.stopPropagation();
+                              setHarnessQuery('');
+                            }
+                          },
+                          style: {
+                            width: '100%',
+                            boxSizing: 'border-box',
+                            padding: '4px 8px',
+                            marginBottom: '2px',
+                            borderRadius: '8px',
+                            fontSize: '11.5px',
+                            background: 'rgba(255,255,255,0.06)',
+                            border: '1px solid ' + panelBorder,
+                            color: 'inherit',
+                            outline: 'none',
+                          },
+                        })
+                      : null,
+                    h(
+                      'div',
+                      {
+                        'data-dsb-menu-scroll': '1',
+                        style: {
+                          overflowY: 'auto',
+                          display: 'flex',
+                          flexDirection: 'column',
+                          gap: '2px',
+                          maxHeight: '204px',
+                        },
+                      },
+                      filteredHarnesses.length === 0
+                        ? h(
+                            'div',
+                            { style: { padding: '10px 6px', fontSize: '11.5px', opacity: 0.55, textAlign: 'center' } },
+                            '无匹配项',
+                          )
+                        : filteredHarnesses.map((hid) => {
+                            const meta = getHarnessMeta(hid);
+                            const isActiveH = activeHarness === hid;
+                            const isBrowsedH = browsedHarness === hid;
+                            const avail = availById[hid];
+                            const isReady = avail ? Boolean(avail.available) : true;
+                            return h(
+                              'button',
+                              {
+                                key: hid,
+                                type: 'button',
+                                'data-dsb-harness-opt': hid,
+                                title: meta.fullLabel + ' · ' + meta.syncHint,
+                                onMouseEnter: () => setHoveredHarnessId(hid),
+                                onClick: () => {
+                                  setHoveredHarnessId(hid);
+                                  setPickerError('');
+                                  setManualPathMode(false);
+                                  setActiveHarness(hid, true);
+                                },
+                                style: {
+                                  width: '100%',
+                                  textAlign: 'left',
+                                  padding: '6px 9px',
+                                  borderRadius: '10px',
+                                  border: isBrowsedH
+                                    ? '1px solid ' + meta.accentBorder
+                                    : '1px solid transparent',
+                                  background: isBrowsedH
+                                    ? meta.accentBg
+                                    : isActiveH
+                                      ? 'rgba(255,255,255,0.05)'
+                                      : 'transparent',
+                                  color: isBrowsedH || isActiveH ? '#ffffff' : 'rgba(229, 231, 235, 0.80)',
+                                  fontSize: '12px',
+                                  fontWeight: isActiveH ? 650 : isBrowsedH ? 550 : 450,
+                                  cursor: 'pointer',
+                                  display: 'flex',
+                                  alignItems: 'center',
+                                  justifyContent: 'space-between',
+                                  gap: '6px',
+                                  opacity: isReady ? 1 : 0.52,
+                                  transition: 'background 0.12s ease, border-color 0.12s ease',
+                                },
+                              },
+                              h(
+                                'span',
+                                { style: { display: 'inline-flex', alignItems: 'center', gap: '7px', minWidth: 0, flex: 1 } },
+                                h('span', {
+                                  style: {
+                                    width: '7px',
+                                    height: '7px',
+                                    borderRadius: '999px',
+                                    background: isReady ? meta.accent : '#6b7280',
+                                    boxShadow: isActiveH || isBrowsedH ? '0 0 7px ' + meta.accent : 'none',
+                                    flexShrink: 0,
+                                  },
+                                }),
+                                h(
+                                  'span',
+                                  { style: { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } },
+                                  meta.label,
+                                ),
+                              ),
+                              h(
+                                'span',
+                                { style: { opacity: isBrowsedH ? 0.9 : 0.5, fontSize: '11.5px', flexShrink: 0 } },
+                                (isActiveH ? '● ' : '') + '›',
+                              ),
+                            );
+                          }),
+                    ),
+                    h('div', { style: { height: '1px', margin: '4px 2px', background: panelBorder } }),
+                    // Bottom pinned Settings button inside Level 1
+                    h(
+                      'button',
+                      {
+                        type: 'button',
+                        'data-dsb-settings-btn': '1',
+                        title: '插件与悬浮条设置',
+                        onClick: () => {
+                          refreshAppSettings();
+                          setSettingsView(true);
+                          if (typeof dsbRuntime.scheduleLayoutReport === 'function') {
+                            dsbRuntime.scheduleLayoutReport(240);
+                          }
+                        },
+                        style: {
+                          width: '100%',
+                          textAlign: 'left',
+                          padding: '5px 9px',
+                          borderRadius: '9px',
+                          border: 'none',
+                          background: 'rgba(255,255,255,0.03)',
+                          color: 'rgba(229,231,235,0.78)',
+                          fontSize: '11.5px',
+                          cursor: 'pointer',
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'space-between',
+                          gap: '6px',
+                        },
+                      },
+                      h(
+                        'span',
+                        { style: { display: 'inline-flex', alignItems: 'center', gap: '6px' } },
+                        h('span', { style: { fontSize: '12.5px', opacity: 0.85 } }, '⚙'),
+                        h('span', null, '设置'),
+                      ),
+                      h('span', { style: { fontSize: '10.5px', opacity: 0.45 } }, 'v' + (snap.version || '0.4.0')),
+                    ),
+                  ),
+
+                  // ===========================================================
+                  // Level 2 (Middle): Workspaces of hovered Harness
+                  // ===========================================================
+                  h(
+                    'div',
+                    {
+                      ref: wsPanelRef,
+                      'data-dsb-popup-panel': '1',
+                      'data-dsb-ws-col': '1',
+                      style: {
+                        width: col2W + 'px',
+                        maxHeight: '300px',
+                        borderRadius: '14px',
+                        padding: '6px',
+                        background: panelBg,
+                        border: '1px solid ' + panelBorder,
+                        boxShadow: '0 8px 24px rgba(0,0,0,0.35)',
+                        display: 'flex',
+                        flexDirection: 'column',
+                        gap: '2px',
+                        boxSizing: 'border-box',
+                      },
+                    },
+                    manualPathMode
+                      ? h(
+                          'div',
+                          { style: { padding: '4px', display: 'flex', flexDirection: 'column', gap: '4px' } },
+                          h('input', {
+                            type: 'text',
+                            autoFocus: true,
+                            placeholder: '输入工作区目录路径…',
+                            value: manualPathValue,
+                            onChange: (ev) => setManualPathValue(ev.target.value),
+                            onKeyDown: (ev) => {
+                              if (ev.key === 'Enter' && manualPathValue.trim()) {
+                                createWorkspaceAtPath(manualPathValue.trim(), browsedHarness).catch((err) => {
+                                  setPickerError(err instanceof Error ? err.message : String(err));
+                                });
+                              } else if (ev.key === 'Escape') {
+                                ev.stopPropagation();
+                                setManualPathMode(false);
+                              }
+                            },
+                            style: {
+                              width: '100%',
+                              boxSizing: 'border-box',
+                              padding: '4px 8px',
+                              borderRadius: '8px',
+                              fontSize: '12px',
+                              background: 'rgba(128,128,128,0.14)',
+                              border: '1px solid ' + browsedTheme.accentBorder,
+                              color: 'inherit',
+                              outline: 'none',
+                            },
+                          }),
+                          h(
+                            'div',
+                            { style: { display: 'flex', gap: '4px', justifyContent: 'flex-end' } },
+                            h(
+                              'button',
+                              {
+                                type: 'button',
+                                onClick: () => setManualPathMode(false),
+                                style: { fontSize: '11.5px', padding: '2px 8px', borderRadius: '6px', background: 'transparent', color: 'inherit', border: '1px solid rgba(128,128,128,0.25)', cursor: 'pointer' },
+                              },
+                              '取消',
+                            ),
+                            h(
+                              'button',
+                              {
+                                type: 'button',
+                                onClick: () => {
+                                  if (manualPathValue.trim()) {
+                                    createWorkspaceAtPath(manualPathValue.trim(), browsedHarness).catch((err) => {
+                                      setPickerError(err instanceof Error ? err.message : String(err));
+                                    });
+                                  }
+                                },
+                                style: { fontSize: '11.5px', padding: '2px 8px', borderRadius: '6px', background: browsedTheme.accentBg, color: browsedTheme.accent, border: '1px solid ' + browsedTheme.accentBorder, cursor: 'pointer' },
+                              },
+                              '确定',
+                            ),
+                          ),
+                        )
+                      : h(
+                          'div',
+                          { style: { display: 'flex', alignItems: 'center', gap: '4px' } },
+                          h(
                             'button',
                             {
-                              key: c.id,
                               type: 'button',
-                              onClick: () => handleOpenSession(c, hoveredGroup),
+                              onClick: handleCreateWorkspace,
                               style: {
-                                width: '100%',
+                                flex: 1,
+                                minWidth: 0,
                                 textAlign: 'left',
-                                padding: '6px 10px',
+                                padding: '6px 9px',
                                 borderRadius: '10px',
                                 fontSize: '12px',
-                                background: isSel ? harnessTheme.accentBg : 'transparent',
-                                color: 'inherit',
+                                fontWeight: 500,
+                                color: browsedTheme.accent,
+                                background: browsedTheme.accentBg,
                                 border: 'none',
                                 cursor: 'pointer',
                                 display: 'flex',
                                 alignItems: 'center',
-                                justifyContent: 'space-between',
-                                gap: '8px',
+                                gap: '5px',
                               },
                             },
+                            h('span', null, '＋'),
                             h(
                               'span',
-                              { style: { display: 'inline-flex', alignItems: 'center', gap: '6px', minWidth: 0, flex: 1 } },
-                              h('span', { style: { width: '12px', textAlign: 'center', color: harnessTheme.accent, flexShrink: 0 } }, isSel ? '✓' : ''),
-                              h('span', { style: { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, c.title),
+                              { style: { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } },
+                              browsedMeta.newWorkspaceLabel,
                             ),
-                            h('span', { style: { fontSize: '11.5px', opacity: 0.55, flexShrink: 0 } }, formatRelativeTime(c.updatedAt)),
-                          );
-                        }),
+                          ),
+                          !browsedMeta.useNativeComposer
+                            ? h(
+                                'button',
+                                {
+                                  type: 'button',
+                                  title: '刷新 ' + browsedMeta.label + ' 工作区与历史会话',
+                                  onClick: () => refreshExternalCatalog(browsedHarness, false),
+                                  style: {
+                                    width: '28px',
+                                    height: '28px',
+                                    borderRadius: '9px',
+                                    border: 'none',
+                                    background: 'rgba(255,255,255,0.06)',
+                                    color: 'rgba(229,231,235,0.85)',
+                                    fontSize: '13px',
+                                    cursor: 'pointer',
+                                    flexShrink: 0,
+                                    display: 'inline-flex',
+                                    alignItems: 'center',
+                                    justifyContent: 'center',
+                                    padding: 0,
+                                  },
+                                },
+                                '↻',
+                              )
+                            : null,
+                        ),
+                    pickerError
+                      ? h('div', { style: { fontSize: '11px', color: '#f87171', padding: '2px 8px' } }, pickerError)
+                      : null,
+                    h('div', { style: { height: '1px', margin: '4px 2px', background: panelBorder } }),
+                    h(
+                      'div',
+                      {
+                        'data-dsb-menu-scroll': '1',
+                        onScroll: recomputeSubmenuAlignment,
+                        style: { overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '2px', maxHeight: '220px' },
+                      },
+                      !browsedMeta.useNativeComposer && dsbRuntime.externalLoading[browsedHarness] && groups.length === 0
+                        ? h('div', { style: { padding: '12px 10px', fontSize: '12px', opacity: 0.65, textAlign: 'center' } }, '正在读取工作区…')
+                        : groups.length === 0
+                          ? h('div', { style: { padding: '12px 10px', fontSize: '12px', opacity: 0.65, textAlign: 'center' } }, '暂无工作区')
+                          : groups.map((g) => {
+                              const isHover = hoveredGroup && g.workspaceId === hoveredGroup.workspaceId;
+                              const isActiveWs = browsedHarness === activeHarness && g.workspaceId === browsedActiveWsId;
+                              return h(
+                                'button',
+                                {
+                                  key: g.workspaceId,
+                                  ref: (el) => {
+                                    if (el) wsRowRefs.current.set(g.workspaceId, el);
+                                    else wsRowRefs.current.delete(g.workspaceId);
+                                  },
+                                  type: 'button',
+                                  onMouseEnter: () => setHoveredWsId(g.workspaceId),
+                                  onClick: () => setHoveredWsId(g.workspaceId),
+                                  style: {
+                                    width: '100%',
+                                    textAlign: 'left',
+                                    padding: '6px 9px',
+                                    borderRadius: '10px',
+                                    fontSize: '12px',
+                                    fontWeight: isActiveWs ? 600 : 400,
+                                    background: isHover ? 'rgba(128,128,128,0.14)' : 'transparent',
+                                    color: 'inherit',
+                                    border: 'none',
+                                    cursor: 'pointer',
+                                    display: 'flex',
+                                    alignItems: 'center',
+                                    justifyContent: 'space-between',
+                                    gap: '6px',
+                                  },
+                                },
+                                h(
+                                  'span',
+                                  { style: { display: 'inline-flex', alignItems: 'center', gap: '6px', minWidth: 0, flex: 1 } },
+                                  renderFolderIcon(14),
+                                  h('span', { style: { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, g.label),
+                                ),
+                                h('span', { style: { opacity: 0.6, flexShrink: 0 } }, (isActiveWs ? '● ' : '') + '›'),
+                              );
+                            }),
+                    ),
                   ),
-                )
-              : null,
-            ),
+
+                  // ===========================================================
+                  // Level 3 (Right): Conversations in hovered Workspace
+                  // ===========================================================
+                  hoveredGroup
+                    ? h(
+                        'div',
+                        {
+                          ref: convPanelRef,
+                          'data-dsb-popup-panel': '1',
+                          'data-dsb-conv-col': '1',
+                          style: {
+                            width: col3W + 'px',
+                            maxHeight: '300px',
+                            marginBottom: submenuMarginBottom + 'px',
+                            borderRadius: '14px',
+                            padding: '6px',
+                            background: panelBg,
+                            border: '1px solid ' + panelBorder,
+                            boxShadow: '0 8px 24px rgba(0,0,0,0.35)',
+                            display: 'flex',
+                            flexDirection: 'column',
+                            gap: '2px',
+                            boxSizing: 'border-box',
+                            transition: 'margin-bottom 90ms ease-out',
+                          },
+                        },
+                        hoveredGroup.workspaceId !== '__ungrouped__'
+                          ? h(
+                              'button',
+                              {
+                                type: 'button',
+                                onClick: () => handleNewConversation(hoveredGroup, browsedHarness),
+                                style: {
+                                  width: '100%',
+                                  textAlign: 'left',
+                                  padding: '6px 10px',
+                                  borderRadius: '10px',
+                                  fontSize: '12px',
+                                  fontWeight: 500,
+                                  color: browsedTheme.accent,
+                                  background: browsedTheme.accentBg,
+                                  border: 'none',
+                                  cursor: 'pointer',
+                                  display: 'flex',
+                                  alignItems: 'center',
+                                  gap: '6px',
+                                },
+                              },
+                              h('span', null, '＋'),
+                              h('span', null, '新对话'),
+                            )
+                          : null,
+                        hoveredGroup.workspaceId !== '__ungrouped__'
+                          ? h('div', { style: { height: '1px', margin: '4px 2px', background: panelBorder } })
+                          : null,
+                        h(
+                          'div',
+                          {
+                            'data-dsb-menu-scroll': '1',
+                            style: { overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '2px', maxHeight: '220px' },
+                          },
+                          hoveredGroup.convs.length === 0
+                            ? h('div', { style: { padding: '12px 10px', fontSize: '12px', opacity: 0.6, textAlign: 'center' } }, '暂无对话')
+                            : hoveredGroup.convs.map((c) => {
+                                const isSel = browsedHarness === activeHarness && c.id === browsedSessionId;
+                                return h(
+                                  'button',
+                                  {
+                                    key: c.id,
+                                    type: 'button',
+                                    onClick: () => handleOpenSession(c, hoveredGroup, browsedHarness),
+                                    style: {
+                                      width: '100%',
+                                      textAlign: 'left',
+                                      padding: '6px 10px',
+                                      borderRadius: '10px',
+                                      fontSize: '12px',
+                                      background: isSel ? browsedTheme.accentBg : 'transparent',
+                                      color: 'inherit',
+                                      border: 'none',
+                                      cursor: 'pointer',
+                                      display: 'flex',
+                                      alignItems: 'center',
+                                      justifyContent: 'space-between',
+                                      gap: '8px',
+                                    },
+                                  },
+                                  h(
+                                    'span',
+                                    { style: { display: 'inline-flex', alignItems: 'center', gap: '6px', minWidth: 0, flex: 1 } },
+                                    h('span', { style: { width: '12px', textAlign: 'center', color: browsedTheme.accent, flexShrink: 0 } }, isSel ? '✓' : ''),
+                                    h('span', { style: { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, c.title),
+                                  ),
+                                  h('span', { style: { fontSize: '11.5px', opacity: 0.55, flexShrink: 0 } }, formatRelativeTime(c.updatedAt)),
+                                );
+                              }),
+                        ),
+                      )
+                    : null,
+                ),
           );
 
           if (ReactDOM && typeof ReactDOM.createPortal === 'function' && typeof document !== 'undefined' && document.body) {
@@ -6606,29 +6308,13 @@ window.__ModuleLoader__.load({
         };
 
         const activeAvail = availById[activeHarness] || null;
+        const activeAdapter = getHarnessAdapter(activeHarness);
 
         return h(
           React.Fragment,
           null,
-          activeHarness === 'codex'
-            ? h(
-                'span',
-                {
-                  title: 'Codex 沙箱权限（来自 ~/.codex/config.toml）',
-                  style: {
-                    fontSize: '12px',
-                    fontWeight: 500,
-                    color: '#fb6a33',
-                    padding: '0 6px 0 2px',
-                    display: 'inline-flex',
-                    alignItems: 'center',
-                    gap: '4px',
-                    flexShrink: 0,
-                    userSelect: 'none',
-                  },
-                },
-                (activeAvail && activeAvail.accessLabel) || '完全访问',
-              )
+          activeAdapter && typeof activeAdapter.renderChipPrefix === 'function'
+            ? activeAdapter.renderChipPrefix({ avail: activeAvail, manifest: activeMeta })
             : null,
           h(
             'button',
@@ -6645,18 +6331,15 @@ window.__ModuleLoader__.load({
                 height: (pillMetrics && pillMetrics.height) || '28px',
                 borderRadius: (pillMetrics && pillMetrics.borderRadius) || '9999px',
                 fontSize: (pillMetrics && pillMetrics.fontSize) || '12px',
-                background:
-                  activeHarness === 'dsh'
-                    ? (pillMetrics && pillMetrics.background) || 'var(--dsw-alias-bg-layer-3, rgba(128,128,128,0.12))'
-                    : 'rgba(255, 255, 255, 0.05)',
-                color:
-                  activeHarness === 'dsh'
-                    ? (pillMetrics && pillMetrics.color) || 'var(--dsw-alias-label-primary, inherit)'
-                    : 'rgba(243, 244, 246, 0.90)',
-                border:
-                  activeHarness === 'dsh'
-                    ? (pillMetrics && pillMetrics.border) || '1px solid var(--dsw-alias-border-l2, rgba(128,128,128,0.22))'
-                    : '1px solid rgba(255, 255, 255, 0.11)',
+                background: activeMeta.useNativeComposer
+                  ? (pillMetrics && pillMetrics.background) || 'var(--dsw-alias-bg-layer-3, rgba(128,128,128,0.12))'
+                  : 'rgba(255, 255, 255, 0.05)',
+                color: activeMeta.useNativeComposer
+                  ? (pillMetrics && pillMetrics.color) || 'var(--dsw-alias-label-primary, inherit)'
+                  : 'rgba(243, 244, 246, 0.90)',
+                border: activeMeta.useNativeComposer
+                  ? (pillMetrics && pillMetrics.border) || '1px solid var(--dsw-alias-border-l2, rgba(128,128,128,0.22))'
+                  : '1px solid rgba(255, 255, 255, 0.11)',
                 padding: '0 10px',
                 display: 'inline-flex',
                 alignItems: 'center',
@@ -6667,7 +6350,7 @@ window.__ModuleLoader__.load({
                 boxSizing: 'border-box',
               },
             },
-            activeHarness === 'dsh' || activeHarness === 'codex'
+            activeMeta.chipIconStyle === 'folder'
               ? renderFolderIcon(14)
               : h('span', {
                   style: {
@@ -6707,105 +6390,13 @@ window.__ModuleLoader__.load({
         }, []);
 
         const hId = dsbRuntime.activeHarness;
-        if (!IS_BAR || hId === 'dsh') return null;
+        const manifest = getHarnessMeta(hId);
+        if (!IS_BAR || manifest.useNativeComposer) return null;
         const avail = (dsbRuntime.harnessAvailability || []).find((a) => a && a.id === hId) || null;
-
-        if (hId === 'antigravity') {
-          const modelText = (avail && avail.modelLabel) || 'Gemini';
-          const effortText = (avail && avail.effortLabel) || 'High';
-          const accessText = (avail && avail.accessLabel) || '极速';
-          return h(
-            'div',
-            {
-              'data-dsb-harness-right': 'antigravity',
-              style: {
-                display: 'inline-flex',
-                alignItems: 'center',
-                gap: '10px',
-                fontSize: '12px',
-                color: 'rgba(229, 231, 235, 0.78)',
-                paddingRight: '4px',
-                userSelect: 'none',
-                flexShrink: 0,
-              },
-            },
-            h(
-              'span',
-              { style: { display: 'inline-flex', alignItems: 'center', gap: '4px' } },
-              h('span', { style: { color: 'rgba(243, 244, 246, 0.88)' } }, modelText),
-              h('span', { style: { opacity: 0.55 } }, effortText),
-            ),
-            h(
-              'span',
-              {
-                style: {
-                  display: 'inline-flex',
-                  alignItems: 'center',
-                  gap: '4px',
-                  color: 'rgba(209, 213, 219, 0.82)',
-                },
-              },
-              h('span', {
-                style: {
-                  width: '6px',
-                  height: '6px',
-                  borderRadius: '999px',
-                  background: '#38bdf8',
-                },
-              }),
-              accessText,
-            ),
-          );
+        const adapter = getHarnessAdapter(hId);
+        if (adapter && typeof adapter.renderRightControls === 'function') {
+          return adapter.renderRightControls({ avail, manifest });
         }
-
-        if (hId === 'codex') {
-          const modelText = (avail && avail.modelLabel) || 'GPT-6.1 Terra';
-          const effortText = (avail && avail.effortLabel) || '高';
-          return h(
-            'div',
-            {
-              'data-dsb-harness-right': 'codex',
-              style: {
-                display: 'inline-flex',
-                alignItems: 'center',
-                gap: '6px',
-                fontSize: '12px',
-                paddingRight: '4px',
-                userSelect: 'none',
-                flexShrink: 0,
-              },
-            },
-            h('span', { style: { color: 'rgba(244, 244, 245, 0.90)', fontWeight: 500 } }, modelText),
-            effortText
-              ? h('span', { style: { color: 'rgba(212, 212, 216, 0.58)' } }, effortText)
-              : null,
-          );
-        }
-
-        if (hId === 'claude_code') {
-          const modelText = (avail && avail.modelLabel) || 'Claude Opus';
-          const effortText = (avail && avail.effortLabel) || '高';
-          return h(
-            'div',
-            {
-              'data-dsb-harness-right': 'claude_code',
-              style: {
-                display: 'inline-flex',
-                alignItems: 'center',
-                gap: '6px',
-                fontSize: '12px',
-                paddingRight: '4px',
-                userSelect: 'none',
-                flexShrink: 0,
-              },
-            },
-            h('span', { style: { color: '#ECE9E2', fontWeight: 500 } }, modelText),
-            effortText
-              ? h('span', { style: { color: '#9E9A90' } }, effortText)
-              : null,
-          );
-        }
-
         return null;
       };
     }

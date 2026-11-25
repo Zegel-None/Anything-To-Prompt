@@ -6,6 +6,7 @@ pub mod dsh;
 pub mod elevation;
 pub mod everything_ipc;
 pub mod harness;
+pub mod harness_registry;
 pub mod harness_sync;
 pub mod hooks;
 pub mod mcp_sidecar;

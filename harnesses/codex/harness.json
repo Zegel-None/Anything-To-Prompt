@@ -1,0 +1,29 @@
+{
+  "id": "codex",
+  "order": 30,
+  "aliases": ["openai-codex", "openai_codex"],
+  "label": "Codex",
+  "fullLabel": "Codex",
+  "badge": "CX",
+  "syncHint": "app-server 共享历史",
+  "placeholder": "随心输入",
+  "accent": "#3b82f6",
+  "accentBg": "rgba(59, 130, 246, 0.16)",
+  "accentBorder": "rgba(255, 255, 255, 0.14)",
+  "surface": "#262628",
+  "border": "rgba(255, 255, 255, 0.13)",
+  "useNativeComposer": false,
+  "cornerRadius": 20,
+  "fallbackSlabHeight": 196,
+  "chipIconStyle": "folder",
+  "newWorkspaceLabel": "指定目录新开…",
+  "detailButtonTitle": "点击将 Codex 拉到最前并展示这个对话",
+  "emptyHistoryHint": "Codex (app-server) 已就绪 — 发消息后写入 ~/.codex 共享历史",
+  "emptyLipHint": "Codex · app-server 已就绪 · 双击 Ctrl 唤出输入框",
+  "defaultSelection": {
+    "workspaceId": "",
+    "workspacePath": "",
+    "sessionId": "",
+    "title": "Codex · 新对话"
+  }
+}
