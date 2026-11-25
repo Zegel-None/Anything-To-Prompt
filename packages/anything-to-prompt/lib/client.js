@@ -47,8 +47,16 @@ window.__ModuleLoader__.load({
     const STORAGE_KEY_BAR_WIDTH = 'dsh_card_dock:bar_width';
     const STORAGE_KEY_LAST_SESSION = 'dsh_card_dock:bar_last_session';
     const STORAGE_KEY_ACTIVE_HARNESS = 'dsh_card_dock:active_harness';
+    const STORAGE_KEY_CLAUDE_PERM = 'dsh_card_dock:claude_perm_mode';
 
-    const HARNESS_ORDER = ['dsh', 'antigravity', 'codex'];
+    const CLAUDE_PERM_MODES = [
+      { id: 'auto', label: '自动', title: 'Claude auto 模式（默认：智能自动执行并拦截高危操作）' },
+      { id: 'acceptEdits', label: '自动编辑', title: 'acceptEdits（自动允许文件编辑）' },
+      { id: 'plan', label: '仅规划', title: 'plan（只读分析与规划，不修改文件）' },
+      { id: 'dontAsk', label: '免询问', title: 'dontAsk（免交互确认提示）' },
+    ];
+
+    const HARNESS_ORDER = ['dsh', 'antigravity', 'codex', 'claude_code'];
     const HARNESS_META = {
       dsh: {
         id: 'dsh',
@@ -88,12 +96,26 @@ window.__ModuleLoader__.load({
         surface: '#262628',
         border: 'rgba(255, 255, 255, 0.13)',
       },
+      claude_code: {
+        id: 'claude_code',
+        label: 'Claude',
+        fullLabel: 'Claude Code',
+        badge: 'CC',
+        syncHint: 'CLI 同库共享历史',
+        placeholder: '今天想处理什么？支持按 Ctrl 圈选屏幕元素…',
+        accent: '#D97757',
+        accentBg: 'rgba(217, 119, 87, 0.17)',
+        accentBorder: 'rgba(217, 119, 87, 0.46)',
+        surface: '#2B2B29',
+        border: 'rgba(255, 248, 240, 0.12)',
+      },
     };
 
     function normalizeHarnessId(raw) {
       const s = String(raw || '').trim().toLowerCase();
       if (s === 'antigravity' || s === 'agy') return 'antigravity';
       if (s === 'codex') return 'codex';
+      if (s === 'claude_code' || s === 'claude-code' || s === 'claudecode' || s === 'claude') return 'claude_code';
       return 'dsh';
     }
 
@@ -176,17 +198,19 @@ window.__ModuleLoader__.load({
       scheduleLayoutReport: null,
       lastReportKeys: new Map(),
       listeners: new Set(),
-      // Multi-harness state (DSH + Antigravity + Codex)
+      // Multi-harness state (DSH + Antigravity + Codex + Claude Code)
       activeHarness: normalizeHarnessId(readStoredString(STORAGE_KEY_ACTIVE_HARNESS, 'dsh')),
       harnessAvailability: [],
-      externalCatalogs: { antigravity: null, codex: null },
+      externalCatalogs: { antigravity: null, codex: null, claude_code: null },
       externalSelection: {
         antigravity: { workspaceId: 'default-cli-project', workspacePath: '', sessionId: '', title: 'CLI Project · 新对话' },
         codex: { workspaceId: '', workspacePath: '', sessionId: '', title: 'Codex · 新对话' },
+        claude_code: { workspaceId: '', workspacePath: '', sessionId: '', title: 'Claude Code · 新对话' },
       },
-      externalMessages: { antigravity: [], codex: [] },
+      externalMessages: { antigravity: [], codex: [], claude_code: [] },
       externalActiveTurn: null,
-      externalLoading: { antigravity: false, codex: false },
+      externalLoading: { antigravity: false, codex: false, claude_code: false },
+      claudePermissionMode: readStoredString(STORAGE_KEY_CLAUDE_PERM, 'auto'),
       extDraftText: '',
       extCapsules: [],
       toggleHarnessMenu: null,
@@ -379,6 +403,7 @@ window.__ModuleLoader__.load({
           cwd: sel.workspacePath || null,
           projectId: hId === 'antigravity' ? (sel.workspaceId || 'default-cli-project') : null,
           sessionId: sel.sessionId || null,
+          permissionMode: hId === 'claude_code' ? (dsbRuntime.claudePermissionMode || 'auto') : null,
           prompt,
         },
       }).catch((err) => {
@@ -908,12 +933,13 @@ window.__ModuleLoader__.load({
         'html[data-dsh-bar-clone="1"] [data-dsb-menu-scroll]::-webkit-scrollbar { width: 4px; }',
         'html[data-dsh-bar-clone="1"] [data-dsb-menu-scroll]::-webkit-scrollbar-thumb { background: rgba(128,128,128,0.28); border-radius: 999px; }',
         // =====================================================================
-        // Multi-Harness 1:1 Native Composer Replicas (Antigravity & Codex)
-        // When targeting Antigravity or Codex, hide DSH's native [data-composer-card]
+        // Multi-Harness 1:1 Native Composer Replicas (Antigravity, Codex & Claude Code)
+        // When targeting an external CLI, hide DSH's native [data-composer-card]
         // and display the 1:1 replicated desktop composer ([data-dsb-external-composer]).
         // =====================================================================
         'html[data-dsh-bar-clone="1"][data-dsb-harness="antigravity"] [data-composer-card],',
-        'html[data-dsh-bar-clone="1"][data-dsb-harness="codex"] [data-composer-card] {',
+        'html[data-dsh-bar-clone="1"][data-dsb-harness="codex"] [data-composer-card],',
+        'html[data-dsh-bar-clone="1"][data-dsb-harness="claude_code"] [data-composer-card] {',
         '  display: none !important;',
         '}',
         'html[data-dsh-bar-clone="1"][data-dsb-mode="lip"] [data-dsb-external-composer] {',
@@ -945,8 +971,23 @@ window.__ModuleLoader__.load({
         'html[data-dsh-bar-clone="1"][data-dsb-harness="codex"] [data-dsb-divider] {',
         '  display: none !important;',
         '}',
+        'html[data-dsh-bar-clone="1"][data-dsb-harness="claude_code"] [data-dsb-card] {',
+        '  background: #242422 !important;',
+        '  box-shadow: 0 0 0 1px rgba(255, 248, 240, 0.08) inset !important;',
+        '  border-radius: 18px 18px 0 0 !important;',
+        '  color: #EDEBE6 !important;',
+        '}',
+        'html[data-dsh-bar-clone="1"][data-dsb-harness="claude_code"][data-dsb-mode="lip"] [data-dsb-card] {',
+        '  border-radius: 18px !important;',
+        '}',
+        'html[data-dsh-bar-clone="1"][data-dsb-harness="claude_code"] [data-dsb-divider] {',
+        '  display: none !important;',
+        '}',
         '[data-dsb-ext-input="1"]::placeholder {',
         '  color: rgba(255, 255, 255, 0.36);',
+        '}',
+        '[data-dsb-external-composer="claude_code"] [data-dsb-ext-input="1"]::placeholder {',
+        '  color: rgba(237, 235, 230, 0.42);',
         '}',
       ].join('\n');
       document.head.appendChild(styleEl);
@@ -1618,7 +1659,12 @@ window.__ModuleLoader__.load({
           if (!IS_BAR) return;
           const reportUi = () => {
             const activeEl = typeof document !== 'undefined' ? document.activeElement : null;
-            const composerEl = typeof document !== 'undefined' ? document.querySelector('[data-composer-card]') : null;
+            const composerEl =
+              typeof document !== 'undefined'
+                ? dsbRuntime.activeHarness !== 'dsh'
+                  ? document.querySelector('[data-dsb-external-composer]')
+                  : document.querySelector('[data-composer-card]')
+                : null;
             sendBarReport({
               kind: 'ui',
               hovered,
@@ -1716,7 +1762,9 @@ window.__ModuleLoader__.load({
               ? 16
               : dsbRuntime.activeHarness === 'codex'
                 ? 20
-                : CARD_RADIUS_PX;
+                : dsbRuntime.activeHarness === 'claude_code'
+                  ? 18
+                  : CARD_RADIUS_PX;
           if (hasSlab) {
             shapes.push({
               x: Math.round(slabLeft),
@@ -2828,7 +2876,7 @@ window.__ModuleLoader__.load({
 
         const submitExternalComposer = () => {
           if (isExtStreaming) {
-            cancelExternalTurn();
+            cancelActiveExternalTurn();
             return;
           }
           const parts = [];
@@ -2842,8 +2890,7 @@ window.__ModuleLoader__.load({
           dsbRuntime.extCapsules = [];
           sendBarReport({ kind: 'capsules', capsuleCount: 0, afterInsert: false });
           notifyBarRuntime();
-          sendExternalMessage(activeHarness, fullText);
-          sendBarReport({ kind: 'submitted' });
+          submitExternalHarnessPrompt(fullText);
         };
 
         const removeExtCapsule = (capId) => {
@@ -2994,6 +3041,14 @@ window.__ModuleLoader__.load({
             h('path', { d: 'M12 19V5M6 11l6-6 6 6' }),
           );
 
+        const renderClaudeSparkSvg = (sz = 14, col = '#D97757') =>
+          h(
+            'svg',
+            { width: sz, height: sz, viewBox: '0 0 24 24', fill: 'none', stroke: col, strokeWidth: 2, strokeLinecap: 'round' },
+            h('path', { d: 'M12 2.5v19M2.5 12h19M5.2 5.2l13.6 13.6M18.8 5.2L5.2 18.8' }),
+            h('circle', { cx: 12, cy: 12, r: 2.2, fill: col, stroke: 'none' }),
+          );
+
         const renderExternalNativeComposer = () => {
           if (!IS_BAR || barMode === 'lip' || activeHarness === 'dsh') return null;
 
@@ -3004,6 +3059,264 @@ window.__ModuleLoader__.load({
               dsbRuntime.toggleHarnessMenu(ev.currentTarget);
             }
           };
+
+          if (activeHarness === 'claude_code') {
+            const claudeModel = (activeAvail && activeAvail.modelLabel) || 'Claude Opus';
+            const claudeEffort = (activeAvail && activeAvail.effortLabel) || '高';
+            const currentPermId = dsbRuntime.claudePermissionMode || 'auto';
+            const currentPerm =
+              CLAUDE_PERM_MODES.find((m) => m.id === currentPermId) || CLAUDE_PERM_MODES[0];
+            const cycleClaudePerm = (ev) => {
+              ev.stopPropagation();
+              const idx = CLAUDE_PERM_MODES.findIndex((m) => m.id === currentPerm.id);
+              const next = CLAUDE_PERM_MODES[(idx + 1) % CLAUDE_PERM_MODES.length];
+              dsbRuntime.claudePermissionMode = next.id;
+              writeStoredString(STORAGE_KEY_CLAUDE_PERM, next.id);
+              notifyBarRuntime();
+            };
+            const claudeWsLabel =
+              (extSel.workspacePath ? workspaceBasename(extSel.workspacePath) : '') ||
+              extSel.title ||
+              'Claude Code';
+
+            // Claude Desktop (Code Mode) 1:1 Dark Replica:
+            // Warm charcoal #242422 shell + #30302E rounded-16px composer surface + warm ivory #F2EFE9 text
+            // + interactive permission pill + signature terracotta #D97757 rounded-square (9px) send button
+            return h(
+              'div',
+              {
+                'data-dsb-external-composer': 'claude_code',
+                style: {
+                  width: '100vw',
+                  padding: '5px 6px 6px',
+                  background: '#242422',
+                  borderRadius: '0 0 18px 18px',
+                  borderLeft: '1px solid rgba(255, 248, 240, 0.08)',
+                  borderRight: '1px solid rgba(255, 248, 240, 0.08)',
+                  borderBottom: '1px solid rgba(255, 248, 240, 0.08)',
+                  boxSizing: 'border-box',
+                  pointerEvents: 'auto',
+                  fontFamily: '"Segoe UI", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif',
+                },
+              },
+              h(
+                'div',
+                {
+                  style: {
+                    background: '#30302E',
+                    borderRadius: '15px',
+                    border: '1px solid rgba(255, 248, 240, 0.11)',
+                    padding: '13px 14px 10px 15px',
+                    display: 'flex',
+                    flexDirection: 'column',
+                    boxSizing: 'border-box',
+                    boxShadow: '0 4px 18px rgba(0, 0, 0, 0.28)',
+                  },
+                },
+                renderExtCapsulesRow(),
+                h('textarea', {
+                  'data-dsb-ext-input': '1',
+                  rows: 1,
+                  value: extDraft,
+                  onChange: handleExtInputChange,
+                  onKeyDown: handleExtInputKeyDown,
+                  placeholder: '今天想处理什么？支持按 Ctrl 圈选屏幕元素…',
+                  style: {
+                    width: '100%',
+                    minHeight: '26px',
+                    maxHeight: '140px',
+                    border: 'none',
+                    outline: 'none',
+                    resize: 'none',
+                    background: 'transparent',
+                    color: '#F2EFE9',
+                    fontSize: '14px',
+                    lineHeight: '22px',
+                    fontFamily: 'inherit',
+                    padding: 0,
+                    margin: 0,
+                    boxSizing: 'border-box',
+                  },
+                }),
+                h(
+                  'div',
+                  {
+                    style: {
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'space-between',
+                      marginTop: '12px',
+                      height: '32px',
+                      gap: '8px',
+                    },
+                  },
+                  h(
+                    'div',
+                    { style: { display: 'flex', alignItems: 'center', gap: '8px', minWidth: 0 } },
+                    h(
+                      'button',
+                      {
+                        type: 'button',
+                        title: '切换 Harness / 工作区 / 对话',
+                        onClick: openSwitcher,
+                        style: {
+                          width: '28px',
+                          height: '28px',
+                          borderRadius: '8px',
+                          border: '1px solid rgba(255, 248, 240, 0.10)',
+                          background: 'rgba(255, 248, 240, 0.04)',
+                          padding: 0,
+                          cursor: 'pointer',
+                          display: 'inline-flex',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          flexShrink: 0,
+                        },
+                      },
+                      renderPlusSvg(15, '#D8D4CA'),
+                    ),
+                    h(
+                      'button',
+                      {
+                        type: 'button',
+                        'data-dsb-claude-perm': currentPerm.id,
+                        title: currentPerm.title + '（点击切换）',
+                        onClick: cycleClaudePerm,
+                        style: {
+                          height: '28px',
+                          padding: '0 9px',
+                          borderRadius: '8px',
+                          border:
+                            currentPerm.id === 'plan'
+                              ? '1px solid rgba(147, 197, 253, 0.34)'
+                              : '1px solid rgba(217, 119, 87, 0.34)',
+                          background:
+                            currentPerm.id === 'plan'
+                              ? 'rgba(59, 130, 246, 0.12)'
+                              : 'rgba(217, 119, 87, 0.12)',
+                          color: currentPerm.id === 'plan' ? '#93c5fd' : '#E89B7E',
+                          fontSize: '12px',
+                          fontWeight: 500,
+                          cursor: 'pointer',
+                          display: 'inline-flex',
+                          alignItems: 'center',
+                          gap: '5px',
+                          flexShrink: 0,
+                        },
+                      },
+                      renderShieldSvg(currentPerm.id === 'plan' ? '#93c5fd' : '#D97757'),
+                      h('span', null, currentPerm.label),
+                    ),
+                    h(
+                      'button',
+                      {
+                        type: 'button',
+                        'data-dsb-session-chip': '1',
+                        title: '点击切换 Harness / 工作区 / 对话',
+                        onClick: openSwitcher,
+                        style: {
+                          height: '28px',
+                          border: '1px solid rgba(255, 248, 240, 0.09)',
+                          background: 'rgba(255, 248, 240, 0.04)',
+                          padding: '0 9px',
+                          borderRadius: '8px',
+                          cursor: 'pointer',
+                          display: 'inline-flex',
+                          alignItems: 'center',
+                          gap: '6px',
+                          fontSize: '12.5px',
+                          color: '#EAE6DF',
+                          fontWeight: 500,
+                          maxWidth: '250px',
+                        },
+                      },
+                      renderClaudeSparkSvg(13, '#D97757'),
+                      h(
+                        'span',
+                        {
+                          style: {
+                            overflow: 'hidden',
+                            textOverflow: 'ellipsis',
+                            whiteSpace: 'nowrap',
+                          },
+                        },
+                        claudeWsLabel,
+                      ),
+                      renderChevronDownSvg('rgba(234, 230, 223, 0.55)'),
+                    ),
+                  ),
+                  h(
+                    'div',
+                    { style: { display: 'flex', alignItems: 'center', gap: '10px', flexShrink: 0 } },
+                    h(
+                      'span',
+                      {
+                        title: '来自 ~/.claude/settings.json',
+                        style: {
+                          display: 'inline-flex',
+                          alignItems: 'center',
+                          gap: '5px',
+                          fontSize: '12.5px',
+                          whiteSpace: 'nowrap',
+                          userSelect: 'none',
+                        },
+                      },
+                      h('span', { style: { color: '#ECE9E2', fontWeight: 500 } }, claudeModel),
+                      claudeEffort
+                        ? h('span', { style: { color: '#9E9A90' } }, claudeEffort)
+                        : null,
+                      renderChevronDownSvg('#8A867C'),
+                    ),
+                    h(
+                      'button',
+                      {
+                        type: 'button',
+                        title: isExtStreaming ? '停止生成' : '发送到 Claude Code',
+                        onClick: submitExternalComposer,
+                        style: isExtStreaming
+                          ? {
+                              width: '30px',
+                              height: '30px',
+                              borderRadius: '9px',
+                              border: '1px solid rgba(217, 119, 87, 0.45)',
+                              background: '#262624',
+                              cursor: 'pointer',
+                              display: 'inline-flex',
+                              alignItems: 'center',
+                              justifyContent: 'center',
+                              padding: 0,
+                            }
+                          : {
+                              width: '30px',
+                              height: '30px',
+                              borderRadius: '9px',
+                              border: 'none',
+                              background: hasPayload ? '#D97757' : 'rgba(217, 119, 87, 0.46)',
+                              color: '#FFFDF9',
+                              cursor: 'pointer',
+                              display: 'inline-flex',
+                              alignItems: 'center',
+                              justifyContent: 'center',
+                              padding: 0,
+                              transition: 'background 0.14s ease',
+                            },
+                      },
+                      isExtStreaming
+                        ? h('span', {
+                            style: {
+                              width: '10px',
+                              height: '10px',
+                              borderRadius: '2px',
+                              background: '#D97757',
+                            },
+                          })
+                        : renderArrowUpSvg('#FFFDF9'),
+                    ),
+                  ),
+                ),
+              ),
+            );
+          }
 
           if (activeHarness === 'antigravity') {
             const modelName = (activeAvail && activeAvail.modelLabel) || 'Gemini 4 Neon';
@@ -3754,7 +4067,9 @@ window.__ModuleLoader__.load({
                             ? 'Antigravity 已就绪 — 发消息后自动同步到桌面端 CLI Project'
                             : activeHarness === 'codex'
                               ? 'Codex (app-server) 已就绪 — 发消息后写入 ~/.codex 共享历史'
-                              : '暂无历史消息 — 在下方输入框发消息后，对话流将在此实时展开',
+                              : activeHarness === 'claude_code'
+                                ? 'Claude Code CLI 已就绪 — 发消息后自动同步至 ~/.claude/projects 会话历史'
+                                : '暂无历史消息 — 在下方输入框发消息后，对话流将在此实时展开',
                         )
                       : entries.map((item, idx) => {
                           const isUser = item.role === 'user';
@@ -3890,7 +4205,9 @@ window.__ModuleLoader__.load({
                         ? 'Antigravity · CLI Project 已就绪 · 双击 Ctrl 唤出输入框'
                         : activeHarness === 'codex'
                           ? 'Codex · app-server 已就绪 · 双击 Ctrl 唤出输入框'
-                          : '暂无消息 · 双击 Ctrl 唤出输入框'),
+                          : activeHarness === 'claude_code'
+                            ? 'Claude Code · CLI 已就绪 · 双击 Ctrl 唤出输入框'
+                            : '暂无消息 · 双击 Ctrl 唤出输入框'),
                   ),
                 ),
             !(IS_BAR && barMode === 'lip')
@@ -4188,7 +4505,10 @@ window.__ModuleLoader__.load({
           if (activeHarness !== 'dsh') {
             const label = workspaceBasename(pickedPath);
             startNewExternalConversation(activeHarness, {
-              workspaceId: activeHarness === 'codex' ? pickedPath : 'default-cli-project',
+              workspaceId:
+                activeHarness === 'codex' || activeHarness === 'claude_code'
+                  ? pickedPath
+                  : 'default-cli-project',
               label,
               path: pickedPath,
             });
@@ -4262,7 +4582,12 @@ window.__ModuleLoader__.load({
           let slabTop = null;
           if (isValidRect(cr)) slabTop = cr.top;
           if (isValidRect(ir)) slabTop = slabTop === null ? ir.top : Math.min(slabTop, ir.top);
-          const fallbackSlabH = dsbRuntime.activeHarness === 'codex' ? 196 : 158;
+          const fallbackSlabH =
+            dsbRuntime.activeHarness === 'codex'
+              ? 196
+              : dsbRuntime.activeHarness === 'claude_code'
+                ? 174
+                : 158;
           const slabHeight =
             slabTop !== null
               ? Math.max(56, Math.min(380, Math.round(window.innerHeight - slabTop)))
@@ -4844,6 +5169,30 @@ window.__ModuleLoader__.load({
             h('span', { style: { color: 'rgba(244, 244, 245, 0.90)', fontWeight: 500 } }, modelText),
             effortText
               ? h('span', { style: { color: 'rgba(212, 212, 216, 0.58)' } }, effortText)
+              : null,
+          );
+        }
+
+        if (hId === 'claude_code') {
+          const modelText = (avail && avail.modelLabel) || 'Claude Opus';
+          const effortText = (avail && avail.effortLabel) || '高';
+          return h(
+            'div',
+            {
+              'data-dsb-harness-right': 'claude_code',
+              style: {
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: '6px',
+                fontSize: '12px',
+                paddingRight: '4px',
+                userSelect: 'none',
+                flexShrink: 0,
+              },
+            },
+            h('span', { style: { color: '#ECE9E2', fontWeight: 500 } }, modelText),
+            effortText
+              ? h('span', { style: { color: '#9E9A90' } }, effortText)
               : null,
           );
         }

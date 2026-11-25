@@ -7,20 +7,21 @@
 > **桌面万物直通 AI Prompt —— 面向 Windows 11 的极简无打扰悬浮条、多 Harness 1:1 原生复刻输入框、全局蓝/红双笔拾取与 Listary 级全盘瞬时搜索。**  
 > **Pick anything on your Windows desktop, straight into your AI prompt.**
 
-**Anything-to-Prompt** 基于 Tauri v2 + Rust（Win32 / UI Automation / NTFS USN MFT / 中完整性 Broker）构建。它以极简圆角悬浮条常驻桌面，默认不侵入你正在使用的任何软件，只需一个 `Ctrl` 键即可完成 **唤出 → 指哪选哪 / 框圈选 / 红线涂鸦 / 瞬时搜文件 → 编号胶囊入框 → 发送到 DeepSeek Harness / Antigravity / Codex** 的完整闭环。
+**Anything-to-Prompt** 基于 Tauri v2 + Rust（Win32 / UI Automation / NTFS USN MFT / 中完整性 Broker）构建。它以极简圆角悬浮条常驻桌面，默认不侵入你正在使用的任何软件，只需一个 `Ctrl` 键即可完成 **唤出 → 指哪选哪 / 框圈选 / 红线涂鸦 / 瞬时搜文件 → 编号胶囊入框 → 发送到 DeepSeek Harness / Antigravity / Codex / Claude Code** 的完整闭环。
 
 ---
 
 ## 核心特性
 
 ### 1. 多 Harness 一键切换 + 1:1 原生桌面输入框复刻
-点击左下角工作区/对话胶囊，在顶部一级切换栏即可无缝切换 **DeepSeek Harness / Antigravity / Codex**，不修改任何原软件安装目录，所有外部 CLI 均通过 **中完整性（Medium Integrity）Broker** 非提权运行，绝不污染用户目录 ACL：
+点击左下角工作区/对话胶囊，在顶部一级切换栏即可无缝切换 **DeepSeek Harness / Antigravity / Codex / Claude Code**，不修改任何原软件安装目录，所有外部 CLI 均通过 **中完整性（Medium Integrity）Broker** 非提权运行，绝不污染用户目录 ACL：
 
 | Harness | 视觉与输入框形态 | 对话历史与桌面端同步 |
 | :--- | :--- | :--- |
 | **DeepSeek Harness (`dsh`)** | 原生 DSH 浮条输入卡 | 本地 WebUI 毫秒级双向实时孪生（零侵入浏览器正常页面） |
 | **Antigravity (`agy.exe`)** | **1:1 复刻 Antigravity 桌面版输入框**（双层暗黑圆角、`Gemini 4 Neon High`、盾牌 `极速`、银白圆形发送键 / 红方块停止键） | 只读同步本地 `conversation_summaries.db` 与 `transcript.jsonl`，新消息通过 `agy --print --output-format stream-json` **原生同步到 Antigravity 桌面端 `CLI Project`** |
 | **Codex (`codex.exe`)** | **1:1 复刻 Codex 桌面版堆叠输入框**（内缩 `#1f1f1f`「此计算机 / 工作区」卡槽、`20px` 大圆角石墨灰输入卡、橙红 `完全访问`、自动读取 `~/.codex/config.toml` 模型/推理档位、钴蓝圆形发送键） | 只读同步 `~/.codex/state_5.sqlite` 与 `rollout-*.jsonl`，经由 `codex app-server` JSON-RPC 2.0 写入同库共享历史（桌面端刷新可见） |
+| **Claude Code (`claude.exe`)** | **1:1 复刻 Claude Desktop（Code 模式）暗色输入框**（暖炭灰 `#30302E` 圆角卡、Anthropic 星芒工作区胶囊、一键切换 `自动 / 自动编辑 / 仅规划 / 免询问` 权限模式、自动读取 `~/.claude/settings.json` 模型/档位、陶土橙 `#D97757` 圆角矩形发送键） | 只读扫描 `~/.claude/projects/*/*.jsonl` 共享会话，经由 `claude -p --output-format stream-json --include-partial-messages --resume <id>` 实时流式执行，与终端 `claude --resume` 同库互通 |
 
 ### 2. 纯 `Ctrl` 单键闭环 + 蓝/红双键画笔（CAD 级框选↔圈选无缝切换）
 - **纯 `Ctrl` 键态控制（8ms OS 物理键态驱动，零 Alt / 组合键冲突）**：
@@ -85,12 +86,12 @@ anything-to-prompt/
 
 ### 直接下载使用（推荐）
 
-前往 GitHub **Releases** 下载 `v0.2.0` 最新版本：
+前往 GitHub **Releases** 下载最新版本（如 `v0.2.5`）：
 - `anything-to-prompt.exe`（免安装绿色便携版）
-- `Anything-to-Prompt_0.2.0_x64-setup.exe`（Windows NSIS 安装包）
-- `Anything-to-Prompt_0.2.0_x64_en-US.msi`（Windows MSI 安装包）
+- `Anything-to-Prompt_<version>_x64-setup.exe`（Windows NSIS 安装包）
+- `Anything-to-Prompt_<version>_x64_en-US.msi`（Windows MSI 安装包）
 
-首次启动会自动同步内置插件 `@local/anything-to-prompt` 并连接本机 DSH（默认端口 `3080`），同时自动探测本机 `agy.exe`（Antigravity）与 `codex.exe`（Codex）。
+首次启动会自动同步内置插件 `@local/anything-to-prompt` 并连接本机 DSH（默认端口 `3080`），同时自动探测本机 `agy.exe`（Antigravity）、`codex.exe`（Codex）与 `claude.exe`（Claude Code）。
 
 ### 从源码自行构建
 
@@ -115,7 +116,7 @@ npm --prefix .\apps\desktop run build
 
 | 字段 | 默认值 | 说明 |
 | :--- | :--- | :--- |
-| `activeHarness` | `"dsh"` | 当前激活的 Harness：`dsh` / `antigravity` / `codex` |
+| `activeHarness` | `"dsh"` | 当前激活的 Harness：`dsh` / `antigravity` / `codex` / `claude_code` |
 | `preferredPort` | `3080` | 优先连接的 DSH 端口 |
 | `dshUrl` | `null` | 自定义 DSH 地址（留空自动探测） |
 | `preferAdmin` | `true` | 启动时优先请求管理员权限（支持全盘 NTFS MFT 枚举与高权限窗口拾取；所有外部 CLI 与 COM 严格通过中完整性 Broker 非提权运行） |

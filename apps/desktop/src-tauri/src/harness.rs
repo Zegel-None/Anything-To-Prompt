@@ -18,6 +18,7 @@ pub enum HarnessKind {
     Dsh,
     Antigravity,
     Codex,
+    ClaudeCode,
 }
 
 impl HarnessKind {
@@ -26,6 +27,7 @@ impl HarnessKind {
             HarnessKind::Dsh => "dsh",
             HarnessKind::Antigravity => "antigravity",
             HarnessKind::Codex => "codex",
+            HarnessKind::ClaudeCode => "claude_code",
         }
     }
 
@@ -33,6 +35,7 @@ impl HarnessKind {
         match raw.trim().to_ascii_lowercase().as_str() {
             "antigravity" | "agy" => HarnessKind::Antigravity,
             "codex" => HarnessKind::Codex,
+            "claude_code" | "claude-code" | "claudecode" | "claude" => HarnessKind::ClaudeCode,
             _ => HarnessKind::Dsh,
         }
     }
@@ -183,6 +186,143 @@ pub fn resolve_codex_exe() -> Option<PathBuf> {
     find_in_path("codex.exe").or_else(|| find_in_path("codex.cmd"))
 }
 
+pub fn resolve_claude_exe() -> Option<PathBuf> {
+    if let Some(home) = dirs::home_dir() {
+        for candidate in [
+            home.join(".local").join("bin").join("claude.exe"),
+            home.join(".claude").join("local").join("claude.exe"),
+        ] {
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+    if let Some(appdata) = dirs::data_dir() {
+        let npm_exe = appdata.join("npm").join("claude.cmd");
+        if npm_exe.is_file() {
+            return Some(npm_exe);
+        }
+    }
+    find_in_path("claude.exe").or_else(|| find_in_path("claude.cmd"))
+}
+
+fn format_claude_model_label(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return "Claude Opus".to_string();
+    }
+    let clean = trimmed.split('[').next().unwrap_or(trimmed).trim();
+    let lower = clean.to_ascii_lowercase();
+    if lower == "opus" {
+        return "Claude Opus".to_string();
+    }
+    if lower == "sonnet" {
+        return "Claude Sonnet".to_string();
+    }
+    if lower == "haiku" {
+        return "Claude Haiku".to_string();
+    }
+    let parts: Vec<&str> = clean.split('-').filter(|p| !p.is_empty()).collect();
+    if parts.is_empty() {
+        return "Claude".to_string();
+    }
+    let mut out: Vec<String> = Vec::new();
+    for (idx, part) in parts.iter().enumerate() {
+        // Drop 8-digit release date suffixes like 20250514
+        if part.len() == 8 && part.chars().all(|c| c.is_ascii_digit()) {
+            continue;
+        }
+        if idx == 0 && part.eq_ignore_ascii_case("claude") {
+            out.push("Claude".to_string());
+            continue;
+        }
+        if part.chars().all(|c| c.is_ascii_digit() || c == '.') {
+            if let Some(last) = out.last_mut() {
+                if last.chars().all(|c| c.is_ascii_digit() || c == '.') {
+                    last.push('.');
+                    last.push_str(part);
+                    continue;
+                }
+            }
+            out.push((*part).to_string());
+        } else {
+            let mut chars = part.chars();
+            if let Some(first) = chars.next() {
+                out.push(format!("{}{}", first.to_ascii_uppercase(), chars.as_str()));
+            }
+        }
+    }
+    let joined = out.join(" ");
+    if joined.is_empty() {
+        "Claude".to_string()
+    } else {
+        joined
+    }
+}
+
+fn read_claude_code_config_display() -> (String, String, String) {
+    let mut model_raw = String::new();
+    let mut effort_raw = String::new();
+    let mut perm_raw = String::new();
+
+    if let Some(home) = dirs::home_dir() {
+        let claude_dir = home.join(".claude");
+        for file_name in ["settings.local.json", "settings.json"] {
+            let path = claude_dir.join(file_name);
+            let Ok(text) = fs::read_to_string(&path) else {
+                continue;
+            };
+            let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else {
+                continue;
+            };
+            if model_raw.is_empty() {
+                if let Some(m) = v.get("model").and_then(|s| s.as_str()) {
+                    model_raw = m.trim().to_string();
+                }
+            }
+            if effort_raw.is_empty() {
+                if let Some(e) = v
+                    .get("effortLevel")
+                    .or_else(|| v.get("effort"))
+                    .and_then(|s| s.as_str())
+                {
+                    effort_raw = e.trim().to_string();
+                }
+            }
+            if perm_raw.is_empty() {
+                if let Some(p) = v
+                    .get("permissions")
+                    .and_then(|p| p.get("defaultMode"))
+                    .and_then(|s| s.as_str())
+                {
+                    perm_raw = p.trim().to_string();
+                }
+            }
+        }
+    }
+
+    let model_label = format_claude_model_label(&model_raw);
+    let effort_label = match effort_raw.to_ascii_lowercase().as_str() {
+        "max" => "Max".to_string(),
+        "xhigh" => "极高".to_string(),
+        "high" => "高".to_string(),
+        "medium" => "中".to_string(),
+        "low" => "低".to_string(),
+        other if !other.is_empty() => other.to_string(),
+        _ => "高".to_string(),
+    };
+    let access_label = match perm_raw.as_str() {
+        "acceptEdits" => "自动编辑".to_string(),
+        "plan" => "仅规划".to_string(),
+        "dontAsk" => "免询问".to_string(),
+        "bypassPermissions" => "完全访问".to_string(),
+        "manual" => "手动确认".to_string(),
+        _ => "自动".to_string(),
+    };
+
+    (model_label, effort_label, access_label)
+}
+
 fn find_in_path(binary: &str) -> Option<PathBuf> {
     let path_var = std::env::var_os("PATH")?;
     for dir in std::env::split_paths(&path_var) {
@@ -277,7 +417,9 @@ fn read_codex_config_display() -> (String, String, String) {
 pub fn list_harness_availability(dsh_connected: bool) -> Vec<HarnessAvailability> {
     let agy = resolve_agy_exe();
     let codex = resolve_codex_exe();
+    let claude = resolve_claude_exe();
     let (codex_model, codex_effort, codex_access) = read_codex_config_display();
+    let (claude_model, claude_effort, claude_access) = read_claude_code_config_display();
     vec![
         HarnessAvailability {
             id: "dsh".to_string(),
@@ -315,6 +457,17 @@ pub fn list_harness_availability(dsh_connected: bool) -> Vec<HarnessAvailability
             model_label: codex_model,
             effort_label: codex_effort,
             access_label: codex_access,
+        },
+        HarnessAvailability {
+            id: "claude_code".to_string(),
+            label: "Claude Code".to_string(),
+            subtitle: "CLI 原生流式 & 同库共享历史".to_string(),
+            available: claude.is_some(),
+            exe_path: claude.map(|p| p.to_string_lossy().to_string()),
+            sync_note: "与 ~/.claude/projects 共享会话历史".to_string(),
+            model_label: claude_model,
+            effort_label: claude_effort,
+            access_label: claude_access,
         },
     ]
 }
@@ -673,6 +826,256 @@ pub fn load_codex_catalog() -> ExternalHarnessCatalog {
     }
 }
 
+fn extract_claude_content_text(content: &serde_json::Value) -> String {
+    if let Some(s) = content.as_str() {
+        return s.trim().to_string();
+    }
+    let Some(arr) = content.as_array() else {
+        return String::new();
+    };
+    let mut parts: Vec<String> = Vec::new();
+    for item in arr {
+        if item.get("type").and_then(|t| t.as_str()) != Some("text") {
+            continue;
+        }
+        if let Some(txt) = item.get("text").and_then(|t| t.as_str()) {
+            let trimmed = txt.trim();
+            if !trimmed.is_empty() {
+                parts.push(trimmed.to_string());
+            }
+        }
+    }
+    parts.join("\n")
+}
+
+fn is_claude_internal_user_text(text: &str) -> bool {
+    let t = text.trim();
+    t.is_empty()
+        || t.starts_with("<local-command-")
+        || t.starts_with("<command-name>")
+        || t.starts_with("<command-message>")
+        || t.starts_with("<system-reminder>")
+}
+
+fn file_mtime_ms(path: &Path) -> i64 {
+    fs::metadata(path)
+        .ok()
+        .and_then(|m| m.modified().ok())
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+fn decode_claude_project_dir_fallback(dir_name: &str) -> String {
+    // e.g. "D--AI-Ollama-Claude" -> "D:\AI-Ollama-Claude" (fallback only if jsonl lacks cwd)
+    let bytes = dir_name.as_bytes();
+    if bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b'-'
+        && bytes[2] == b'-'
+    {
+        let drive = (bytes[0] as char).to_ascii_uppercase();
+        let rest = &dir_name[3..];
+        return format!(r"{drive}:\{rest}");
+    }
+    dir_name.to_string()
+}
+
+fn inspect_claude_session_file(path: &Path, fallback_cwd: &str) -> Option<ExternalConversation> {
+    let stem = path.file_stem()?.to_string_lossy().to_string();
+    if stem.is_empty() || stem.starts_with("agent-") {
+        return None;
+    }
+
+    let file = fs::File::open(path).ok()?;
+    let reader = BufReader::new(file);
+
+    let mut session_id = stem.clone();
+    let mut cwd = String::new();
+    let mut custom_title = String::new();
+    let mut summary_title = String::new();
+    let mut first_user_text = String::new();
+
+    // Read up to 240 lines to extract metadata quickly without blocking on giant transcripts
+    for (idx, line) in reader.lines().map_while(Result::ok).enumerate() {
+        if idx >= 240 {
+            break;
+        }
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed) else {
+            continue;
+        };
+        if v.get("isSidechain").and_then(|b| b.as_bool()) == Some(true) {
+            continue;
+        }
+        if cwd.is_empty() {
+            if let Some(c) = v.get("cwd").and_then(|s| s.as_str()) {
+                if !c.trim().is_empty() {
+                    cwd = clean_windows_path(c);
+                }
+            }
+        }
+        if let Some(sid) = v.get("sessionId").and_then(|s| s.as_str()) {
+            if !sid.trim().is_empty() {
+                session_id = sid.trim().to_string();
+            }
+        }
+        let kind = v.get("type").and_then(|s| s.as_str()).unwrap_or("");
+        match kind {
+            "custom-title" => {
+                if let Some(t) = v.get("customTitle").and_then(|s| s.as_str()) {
+                    if !t.trim().is_empty() {
+                        custom_title = t.trim().to_string();
+                    }
+                }
+            }
+            "summary" => {
+                if summary_title.is_empty() {
+                    if let Some(s) = v.get("summary").and_then(|s| s.as_str()) {
+                        if !s.trim().is_empty() {
+                            summary_title = s.trim().to_string();
+                        }
+                    }
+                }
+            }
+            "user" if first_user_text.is_empty() => {
+                if v.get("isMeta").and_then(|b| b.as_bool()) == Some(true) {
+                    continue;
+                }
+                if let Some(content) = v.get("message").and_then(|m| m.get("content")) {
+                    let txt = extract_claude_content_text(content);
+                    if !is_claude_internal_user_text(&txt) {
+                        first_user_text = txt;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    if first_user_text.is_empty() && custom_title.is_empty() && summary_title.is_empty() {
+        return None;
+    }
+
+    let final_cwd = if cwd.is_empty() {
+        fallback_cwd.to_string()
+    } else {
+        cwd
+    };
+    let display_title = if !custom_title.is_empty() {
+        sanitize_title(&custom_title, "Claude 会话")
+    } else if !summary_title.is_empty() {
+        sanitize_title(&summary_title, "Claude 会话")
+    } else {
+        sanitize_title(&first_user_text, "Claude 会话")
+    };
+
+    Some(ExternalConversation {
+        id: session_id,
+        title: display_title,
+        updated_at: file_mtime_ms(path),
+        source: "claude_code".to_string(),
+        cwd: final_cwd,
+        rollout_path: Some(path.to_string_lossy().to_string()),
+    })
+}
+
+pub fn load_claude_code_catalog() -> ExternalHarnessCatalog {
+    let exe = resolve_claude_exe();
+    let Some(home) = dirs::home_dir() else {
+        return ExternalHarnessCatalog {
+            harness: "claude_code".to_string(),
+            available: exe.is_some(),
+            exe_path: exe.map(|p| p.to_string_lossy().to_string()),
+            groups: Vec::new(),
+            error: Some("无法定位用户目录".to_string()),
+        };
+    };
+
+    let projects_root = home.join(".claude").join("projects");
+    let mut by_cwd: BTreeMap<String, Vec<ExternalConversation>> = BTreeMap::new();
+
+    if let Ok(proj_dirs) = fs::read_dir(&projects_root) {
+        let mut session_files: Vec<(i64, PathBuf, String)> = Vec::new();
+        for proj in proj_dirs.flatten() {
+            let proj_path = proj.path();
+            if !proj_path.is_dir() {
+                continue;
+            }
+            let dir_name = proj.file_name().to_string_lossy().to_string();
+            let fallback_cwd = decode_claude_project_dir_fallback(&dir_name);
+            let Ok(files) = fs::read_dir(&proj_path) else {
+                continue;
+            };
+            for f in files.flatten() {
+                let fp = f.path();
+                if !fp.is_file() {
+                    continue;
+                }
+                if fp.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+                    continue;
+                }
+                session_files.push((file_mtime_ms(&fp), fp, fallback_cwd.clone()));
+            }
+        }
+
+        // Only inspect the most recent 160 sessions for snappy popup open
+        session_files.sort_by_key(|(ts, _, _)| std::cmp::Reverse(*ts));
+        session_files.truncate(160);
+
+        for (_, fp, fallback_cwd) in session_files {
+            if let Some(conv) = inspect_claude_session_file(&fp, &fallback_cwd) {
+                let key = if conv.cwd.is_empty() {
+                    home.to_string_lossy().to_string()
+                } else {
+                    conv.cwd.clone()
+                };
+                by_cwd.entry(key).or_default().push(conv);
+            }
+        }
+    }
+
+    let mut groups: Vec<ExternalWorkspaceGroup> = by_cwd
+        .into_iter()
+        .map(|(path, mut convs)| {
+            convs.sort_by_key(|c| std::cmp::Reverse(c.updated_at));
+            ExternalWorkspaceGroup {
+                workspace_id: path.clone(),
+                label: basename_of_path(&path),
+                path,
+                convs,
+            }
+        })
+        .collect();
+
+    groups.sort_by(|a, b| {
+        let a_ts = a.convs.first().map(|c| c.updated_at).unwrap_or(0);
+        let b_ts = b.convs.first().map(|c| c.updated_at).unwrap_or(0);
+        b_ts.cmp(&a_ts)
+    });
+
+    if groups.is_empty() {
+        let default_dir = home.to_string_lossy().to_string();
+        groups.push(ExternalWorkspaceGroup {
+            workspace_id: default_dir.clone(),
+            label: basename_of_path(&default_dir),
+            path: default_dir,
+            convs: Vec::new(),
+        });
+    }
+
+    ExternalHarnessCatalog {
+        harness: "claude_code".to_string(),
+        available: exe.is_some(),
+        exe_path: exe.map(|p| p.to_string_lossy().to_string()),
+        groups,
+        error: None,
+    }
+}
+
 pub fn load_external_messages(harness: HarnessKind, session_id: &str) -> Vec<ExternalChatMessage> {
     if session_id.trim().is_empty() {
         return Vec::new();
@@ -681,6 +1084,7 @@ pub fn load_external_messages(harness: HarnessKind, session_id: &str) -> Vec<Ext
         HarnessKind::Dsh => Vec::new(),
         HarnessKind::Antigravity => load_antigravity_transcript(session_id),
         HarnessKind::Codex => load_codex_transcript(session_id),
+        HarnessKind::ClaudeCode => load_claude_code_transcript(session_id),
     }
 }
 
@@ -849,6 +1253,100 @@ fn load_codex_transcript(session_id: &str) -> Vec<ExternalChatMessage> {
     Vec::new()
 }
 
+pub fn parse_claude_code_transcript_lines(raw: &str) -> Vec<ExternalChatMessage> {
+    let mut out: Vec<ExternalChatMessage> = Vec::new();
+    for (idx, line) in raw.lines().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed) else {
+            continue;
+        };
+        if v.get("isSidechain").and_then(|b| b.as_bool()) == Some(true)
+            || v.get("isMeta").and_then(|b| b.as_bool()) == Some(true)
+            || v.get("isApiErrorMessage").and_then(|b| b.as_bool()) == Some(true)
+        {
+            continue;
+        }
+        let kind = v.get("type").and_then(|t| t.as_str()).unwrap_or("");
+        if kind != "user" && kind != "assistant" {
+            continue;
+        }
+        let Some(msg) = v.get("message") else {
+            continue;
+        };
+        let Some(content) = msg.get("content") else {
+            continue;
+        };
+        let text = extract_claude_content_text(content);
+        if text.is_empty() {
+            continue;
+        }
+        if kind == "user" && is_claude_internal_user_text(&text) {
+            continue;
+        }
+        // Merge consecutive assistant text blocks from the same assistant message id
+        if kind == "assistant" {
+            if let Some(last) = out.last_mut() {
+                if last.role == "assistant" {
+                    if let Some(msg_id) = msg.get("id").and_then(|s| s.as_str()) {
+                        if !msg_id.is_empty() && last.id == format!("cc-{msg_id}") {
+                            if !last.text.ends_with(&text) {
+                                last.text.push_str("\n\n");
+                                last.text.push_str(&text);
+                            }
+                            continue;
+                        }
+                    }
+                }
+            }
+        }
+        let id = msg
+            .get("id")
+            .and_then(|s| s.as_str())
+            .filter(|s| !s.is_empty())
+            .map(|s| format!("cc-{s}"))
+            .or_else(|| {
+                v.get("uuid")
+                    .and_then(|s| s.as_str())
+                    .filter(|s| !s.is_empty())
+                    .map(|s| format!("cc-{s}"))
+            })
+            .unwrap_or_else(|| format!("cc-{kind}-{idx}"));
+        out.push(ExternalChatMessage {
+            id,
+            role: kind.to_string(),
+            text,
+            streaming: false,
+        });
+    }
+    if out.len() > 40 {
+        out.drain(0..out.len() - 40);
+    }
+    out
+}
+
+fn load_claude_code_transcript(session_id: &str) -> Vec<ExternalChatMessage> {
+    let Some(home) = dirs::home_dir() else {
+        return Vec::new();
+    };
+    let projects_root = home.join(".claude").join("projects");
+    let target_name = format!("{}.jsonl", session_id.trim());
+    let Ok(proj_dirs) = fs::read_dir(&projects_root) else {
+        return Vec::new();
+    };
+    for proj in proj_dirs.flatten() {
+        let candidate = proj.path().join(&target_name);
+        if candidate.is_file() {
+            if let Ok(raw) = fs::read_to_string(&candidate) {
+                return parse_claude_code_transcript_lines(&raw);
+            }
+        }
+    }
+    Vec::new()
+}
+
 fn emit_stream_event(writer: &mut impl Write, evt: &HarnessStreamEvent) {
     if let Ok(line) = serde_json::to_string(evt) {
         let _ = writeln!(writer, "{line}");
@@ -864,6 +1362,7 @@ pub struct MediumTurnParams {
     pub cwd: Option<String>,
     pub project_id: Option<String>,
     pub session_id: Option<String>,
+    pub permission_mode: Option<String>,
     pub prompt: String,
     pub out_pipe: String,
 }
@@ -899,6 +1398,17 @@ pub fn execute_harness_turn_in_medium(params: MediumTurnParams) {
                 &params.exe,
                 params.cwd.as_deref(),
                 params.session_id.as_deref(),
+                &params.prompt,
+                &mut pipe_writer,
+            );
+        }
+        HarnessKind::ClaudeCode => {
+            run_claude_code_turn_in_medium(
+                &params.turn_id,
+                &params.exe,
+                params.cwd.as_deref(),
+                params.session_id.as_deref(),
+                params.permission_mode.as_deref(),
                 &params.prompt,
                 &mut pipe_writer,
             );
@@ -1574,6 +2084,348 @@ fn run_codex_app_server_turn_in_medium(
     }
 }
 
+fn sanitize_claude_permission_mode(raw: Option<&str>) -> &'static str {
+    match raw.map(|s| s.trim()).unwrap_or("auto") {
+        "acceptEdits" => "acceptEdits",
+        "plan" => "plan",
+        "dontAsk" => "dontAsk",
+        "bypassPermissions" => "bypassPermissions",
+        "manual" => "manual",
+        _ => "auto",
+    }
+}
+
+#[derive(Default)]
+struct ClaudeStreamParseState {
+    session_id: Option<String>,
+    emitted_any_delta: bool,
+    emitted_text_in_current_msg: bool,
+    completed: bool,
+}
+
+fn parse_claude_stream_json_line(
+    turn_id: &str,
+    line: &str,
+    state: &mut ClaudeStreamParseState,
+) -> Vec<HarnessStreamEvent> {
+    let mut events = Vec::new();
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return events;
+    }
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed) else {
+        return events;
+    };
+
+    if let Some(sid) = v.get("session_id").and_then(|s| s.as_str()) {
+        let clean_sid = sid.trim();
+        if !clean_sid.is_empty() && state.session_id.as_deref() != Some(clean_sid) {
+            state.session_id = Some(clean_sid.to_string());
+            events.push(HarnessStreamEvent {
+                turn_id: turn_id.to_string(),
+                harness: "claude_code".to_string(),
+                kind: "session".to_string(),
+                session_id: state.session_id.clone(),
+                text: None,
+                tool_name: None,
+                error: None,
+            });
+        }
+    }
+
+    let event_type = v.get("type").and_then(|s| s.as_str()).unwrap_or("");
+    match event_type {
+        "stream_event" => {
+            let Some(ev) = v.get("event") else {
+                return events;
+            };
+            let ev_type = ev.get("type").and_then(|s| s.as_str()).unwrap_or("");
+            match ev_type {
+                "message_start" => {
+                    if state.emitted_text_in_current_msg {
+                        // Separate multi-step assistant turns cleanly
+                        events.push(HarnessStreamEvent {
+                            turn_id: turn_id.to_string(),
+                            harness: "claude_code".to_string(),
+                            kind: "delta".to_string(),
+                            session_id: state.session_id.clone(),
+                            text: Some("\n\n".to_string()),
+                            tool_name: None,
+                            error: None,
+                        });
+                    }
+                    state.emitted_text_in_current_msg = false;
+                }
+                "content_block_start" => {
+                    if let Some(cb) = ev.get("content_block") {
+                        if cb.get("type").and_then(|s| s.as_str()) == Some("tool_use") {
+                            if let Some(name) = cb.get("name").and_then(|s| s.as_str()) {
+                                events.push(HarnessStreamEvent {
+                                    turn_id: turn_id.to_string(),
+                                    harness: "claude_code".to_string(),
+                                    kind: "tool".to_string(),
+                                    session_id: state.session_id.clone(),
+                                    text: None,
+                                    tool_name: Some(name.to_string()),
+                                    error: None,
+                                });
+                            }
+                        }
+                    }
+                }
+                "content_block_delta" => {
+                    if let Some(delta) = ev.get("delta") {
+                        if delta.get("type").and_then(|s| s.as_str()) == Some("text_delta") {
+                            if let Some(txt) = delta.get("text").and_then(|s| s.as_str()) {
+                                if !txt.is_empty() {
+                                    state.emitted_any_delta = true;
+                                    state.emitted_text_in_current_msg = true;
+                                    events.push(HarnessStreamEvent {
+                                        turn_id: turn_id.to_string(),
+                                        harness: "claude_code".to_string(),
+                                        kind: "delta".to_string(),
+                                        session_id: state.session_id.clone(),
+                                        text: Some(txt.to_string()),
+                                        tool_name: None,
+                                        error: None,
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        "assistant" => {
+            if v.get("is_api_error_message").and_then(|b| b.as_bool()) == Some(true) {
+                return events;
+            }
+            if let Some(arr) = v
+                .get("message")
+                .and_then(|m| m.get("content"))
+                .and_then(|c| c.as_array())
+            {
+                for item in arr {
+                    if item.get("type").and_then(|s| s.as_str()) == Some("tool_use") {
+                        if let Some(name) = item.get("name").and_then(|s| s.as_str()) {
+                            events.push(HarnessStreamEvent {
+                                turn_id: turn_id.to_string(),
+                                harness: "claude_code".to_string(),
+                                kind: "tool".to_string(),
+                                session_id: state.session_id.clone(),
+                                text: None,
+                                tool_name: Some(name.to_string()),
+                                error: None,
+                            });
+                        }
+                    }
+                }
+                if !state.emitted_any_delta {
+                    if let Some(content) = v.get("message").and_then(|m| m.get("content")) {
+                        let txt = extract_claude_content_text(content);
+                        if !txt.is_empty() {
+                            state.emitted_any_delta = true;
+                            state.emitted_text_in_current_msg = true;
+                            events.push(HarnessStreamEvent {
+                                turn_id: turn_id.to_string(),
+                                harness: "claude_code".to_string(),
+                                kind: "replace".to_string(),
+                                session_id: state.session_id.clone(),
+                                text: Some(txt),
+                                tool_name: None,
+                                error: None,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        "result" => {
+            state.completed = true;
+            let is_err = v.get("is_error").and_then(|b| b.as_bool()).unwrap_or(false)
+                || v.get("subtype")
+                    .and_then(|s| s.as_str())
+                    .map(|s| s.starts_with("error"))
+                    .unwrap_or(false);
+            let result_text = v
+                .get("result")
+                .and_then(|s| s.as_str())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty());
+            if is_err {
+                let err_msg = result_text.unwrap_or_else(|| "Claude Code 执行失败".to_string());
+                events.push(HarnessStreamEvent {
+                    turn_id: turn_id.to_string(),
+                    harness: "claude_code".to_string(),
+                    kind: "error".to_string(),
+                    session_id: state.session_id.clone(),
+                    text: None,
+                    tool_name: None,
+                    error: Some(err_msg),
+                });
+            } else {
+                if !state.emitted_any_delta {
+                    if let Some(ref txt) = result_text {
+                        events.push(HarnessStreamEvent {
+                            turn_id: turn_id.to_string(),
+                            harness: "claude_code".to_string(),
+                            kind: "replace".to_string(),
+                            session_id: state.session_id.clone(),
+                            text: Some(txt.clone()),
+                            tool_name: None,
+                            error: None,
+                        });
+                    }
+                }
+                events.push(HarnessStreamEvent {
+                    turn_id: turn_id.to_string(),
+                    harness: "claude_code".to_string(),
+                    kind: "completed".to_string(),
+                    session_id: state.session_id.clone(),
+                    text: result_text,
+                    tool_name: None,
+                    error: None,
+                });
+            }
+        }
+        _ => {}
+    }
+    events
+}
+
+fn run_claude_code_turn_in_medium(
+    turn_id: &str,
+    exe: &str,
+    cwd: Option<&str>,
+    session_id: Option<&str>,
+    permission_mode: Option<&str>,
+    prompt: &str,
+    pipe_writer: &mut impl Write,
+) {
+    let perm = sanitize_claude_permission_mode(permission_mode);
+    let mut cmd = if exe.to_ascii_lowercase().ends_with(".cmd") {
+        let mut c = Command::new("cmd.exe");
+        c.args(["/C", exe]);
+        c
+    } else {
+        Command::new(exe)
+    };
+    cmd.args([
+        "-p",
+        "--output-format",
+        "stream-json",
+        "--verbose",
+        "--include-partial-messages",
+        "--permission-mode",
+        perm,
+    ]);
+    if let Some(sid) = session_id.filter(|s| !s.trim().is_empty()) {
+        cmd.args(["--resume", sid.trim()]);
+    }
+
+    let cleaned_cwd = cwd
+        .map(clean_windows_path)
+        .filter(|p| !p.trim().is_empty() && Path::new(p).is_dir())
+        .or_else(|| dirs::home_dir().map(|h| h.to_string_lossy().to_string()));
+    if let Some(ref dir) = cleaned_cwd {
+        cmd.current_dir(dir);
+    }
+
+    cmd.creation_flags(CREATE_NO_WINDOW.0)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => {
+            emit_stream_event(
+                pipe_writer,
+                &HarnessStreamEvent {
+                    turn_id: turn_id.to_string(),
+                    harness: "claude_code".to_string(),
+                    kind: "error".to_string(),
+                    session_id: None,
+                    text: None,
+                    tool_name: None,
+                    error: Some(format!("启动 claude.exe 失败: {e}")),
+                },
+            );
+            return;
+        }
+    };
+
+    register_turn_pid(turn_id, child.id());
+
+    if let Some(mut stdin) = child.stdin.take() {
+        let _ = stdin.write_all(prompt.as_bytes());
+        let _ = stdin.flush();
+        drop(stdin);
+    }
+
+    let Some(stdout) = child.stdout.take() else {
+        let _ = child.kill();
+        return;
+    };
+
+    let reader = BufReader::new(stdout);
+    let mut state = ClaudeStreamParseState {
+        session_id: session_id
+            .filter(|s| !s.trim().is_empty())
+            .map(|s| s.trim().to_string()),
+        ..Default::default()
+    };
+
+    for line in reader.lines().map_while(Result::ok) {
+        let evts = parse_claude_stream_json_line(turn_id, &line, &mut state);
+        for evt in evts {
+            emit_stream_event(pipe_writer, &evt);
+        }
+    }
+
+    let status = child.wait();
+    if !state.completed {
+        let mut stderr_text = String::new();
+        if let Some(mut se) = child.stderr.take() {
+            let _ = std::io::Read::read_to_string(&mut se, &mut stderr_text);
+        }
+        let ok = status.map(|s| s.success()).unwrap_or(false);
+        if ok {
+            emit_stream_event(
+                pipe_writer,
+                &HarnessStreamEvent {
+                    turn_id: turn_id.to_string(),
+                    harness: "claude_code".to_string(),
+                    kind: "completed".to_string(),
+                    session_id: state.session_id,
+                    text: None,
+                    tool_name: None,
+                    error: None,
+                },
+            );
+        } else {
+            let err = if stderr_text.trim().is_empty() {
+                "Claude Code 进程异常退出".to_string()
+            } else {
+                stderr_text.trim().chars().take(280).collect()
+            };
+            emit_stream_event(
+                pipe_writer,
+                &HarnessStreamEvent {
+                    turn_id: turn_id.to_string(),
+                    harness: "claude_code".to_string(),
+                    kind: "error".to_string(),
+                    session_id: state.session_id,
+                    text: None,
+                    tool_name: None,
+                    error: Some(err),
+                },
+            );
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ExternalTurnRequest {
     pub harness: HarnessKind,
@@ -1581,6 +2433,7 @@ pub struct ExternalTurnRequest {
     pub cwd: Option<String>,
     pub project_id: Option<String>,
     pub session_id: Option<String>,
+    pub permission_mode: Option<String>,
     pub prompt: String,
 }
 
@@ -1600,6 +2453,9 @@ pub fn start_external_harness_turn(
         HarnessKind::Codex => {
             resolve_codex_exe().ok_or_else(|| "未检测到本机 Codex (codex.exe)".to_string())?
         }
+        HarnessKind::ClaudeCode => {
+            resolve_claude_exe().ok_or_else(|| "未检测到本机 Claude Code CLI (claude.exe)".to_string())?
+        }
         HarnessKind::Dsh => return Err("DSH 请使用原生 WebView 发送".to_string()),
     };
 
@@ -1614,6 +2470,7 @@ pub fn start_external_harness_turn(
         cwd: req_in.cwd,
         project_id: req_in.project_id,
         session_id: req_in.session_id,
+        permission_mode: req_in.permission_mode,
         prompt: req_in.prompt,
         out_pipe: pipe_short,
     };
@@ -1720,9 +2577,80 @@ mod tests {
     }
 
     #[test]
+    fn parses_claude_code_transcript_and_skips_thinking_and_sidechain() {
+        let sample = concat!(
+            r#"{"type":"user","isMeta":true,"message":{"role":"user","content":"<local-command-caveat>ignored</local-command-caveat>"}}"#,
+            "\n",
+            r#"{"type":"user","uuid":"u1","isSidechain":false,"message":{"role":"user","content":"检查一下 harness.rs 的接口"}}"#,
+            "\n",
+            r#"{"type":"assistant","uuid":"a1","isSidechain":false,"message":{"id":"msg_1","role":"assistant","content":[{"type":"thinking","thinking":"internal"}]}}"#,
+            "\n",
+            r#"{"type":"assistant","uuid":"a2","isSidechain":false,"message":{"id":"msg_1","role":"assistant","content":[{"type":"text","text":"已完成接口检查，所有类型匹配。"}]}}"#,
+            "\n",
+            r#"{"type":"assistant","uuid":"a3","isSidechain":true,"message":{"id":"msg_2","role":"assistant","content":[{"type":"text","text":"subagent noise"}]}}"#,
+            "\n"
+        );
+        let msgs = parse_claude_code_transcript_lines(sample);
+        assert_eq!(msgs.len(), 2);
+        assert_eq!(msgs[0].role, "user");
+        assert_eq!(msgs[0].text, "检查一下 harness.rs 的接口");
+        assert_eq!(msgs[1].role, "assistant");
+        assert_eq!(msgs[1].text, "已完成接口检查，所有类型匹配。");
+    }
+
+    #[test]
+    fn parses_claude_code_stream_json_deltas_tools_and_errors() {
+        let mut st = ClaudeStreamParseState::default();
+        let e1 = parse_claude_stream_json_line(
+            "t1",
+            r#"{"type":"system","subtype":"init","session_id":"sess-cc-1","model":"claude-opus-5[1m]"}"#,
+            &mut st,
+        );
+        assert_eq!(e1.len(), 1);
+        assert_eq!(e1[0].kind, "session");
+        assert_eq!(e1[0].session_id.as_deref(), Some("sess-cc-1"));
+
+        let e2 = parse_claude_stream_json_line(
+            "t1",
+            r#"{"type":"stream_event","event":{"type":"content_block_start","content_block":{"type":"tool_use","name":"Read"}}}"#,
+            &mut st,
+        );
+        assert_eq!(e2.len(), 1);
+        assert_eq!(e2[0].kind, "tool");
+        assert_eq!(e2[0].tool_name.as_deref(), Some("Read"));
+
+        let e3 = parse_claude_stream_json_line(
+            "t1",
+            r#"{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"你好，"}}}"#,
+            &mut st,
+        );
+        assert_eq!(e3.len(), 1);
+        assert_eq!(e3[0].kind, "delta");
+        assert_eq!(e3[0].text.as_deref(), Some("你好，"));
+
+        let e4 = parse_claude_stream_json_line(
+            "t1",
+            r#"{"type":"result","is_error":false,"result":"你好，世界","session_id":"sess-cc-1"}"#,
+            &mut st,
+        );
+        assert_eq!(e4.len(), 1);
+        assert_eq!(e4[0].kind, "completed");
+
+        // Error case (e.g. unauthenticated)
+        let mut st_err = ClaudeStreamParseState::default();
+        let e_err = parse_claude_stream_json_line(
+            "t2",
+            r#"{"type":"result","is_error":true,"result":"Not logged in · Please run /login","session_id":"sess-err"}"#,
+            &mut st_err,
+        );
+        assert!(e_err.iter().any(|e| e.kind == "error" && e.error.as_deref() == Some("Not logged in · Please run /login")));
+    }
+
+    #[test]
     fn readonly_catalog_loaders_succeed_without_mutating_local_dbs() {
         let avail = list_harness_availability(true);
-        assert_eq!(avail.len(), 3);
+        assert_eq!(avail.len(), 4);
+        assert!(avail.iter().any(|a| a.id == "claude_code"));
         let ag = load_antigravity_catalog();
         assert_eq!(ag.harness, "antigravity");
         assert!(ag.error.is_none());
@@ -1750,6 +2678,19 @@ mod tests {
             eprintln!(
                 "[LIVE-VERIFY] Codex: {} groups, first_conv={}, msgs={}",
                 cx.groups.len(),
+                first_conv.title,
+                msgs.len()
+            );
+        }
+
+        let cc = load_claude_code_catalog();
+        assert_eq!(cc.harness, "claude_code");
+        assert!(cc.error.is_none());
+        if let Some(first_conv) = cc.groups.iter().flat_map(|g| g.convs.iter()).next() {
+            let msgs = load_external_messages(HarnessKind::ClaudeCode, &first_conv.id);
+            eprintln!(
+                "[LIVE-VERIFY] ClaudeCode: {} groups, first_conv={}, msgs={}",
+                cc.groups.len(),
                 first_conv.title,
                 msgs.len()
             );

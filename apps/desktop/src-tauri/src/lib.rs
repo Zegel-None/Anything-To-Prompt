@@ -417,6 +417,7 @@ struct HarnessSendPayload {
     cwd: Option<String>,
     project_id: Option<String>,
     session_id: Option<String>,
+    permission_mode: Option<String>,
     prompt: String,
 }
 
@@ -455,6 +456,7 @@ fn harness_load_catalog(harness: String) -> harness::ExternalHarnessCatalog {
     match harness::HarnessKind::parse(&harness) {
         harness::HarnessKind::Antigravity => harness::load_antigravity_catalog(),
         harness::HarnessKind::Codex => harness::load_codex_catalog(),
+        harness::HarnessKind::ClaudeCode => harness::load_claude_code_catalog(),
         harness::HarnessKind::Dsh => harness::ExternalHarnessCatalog {
             harness: "dsh".to_string(),
             available: true,
@@ -487,6 +489,7 @@ fn harness_send_message(app: AppHandle, payload: HarnessSendPayload) -> Result<(
             cwd: payload.cwd,
             project_id: payload.project_id,
             session_id: payload.session_id,
+            permission_mode: payload.permission_mode,
             prompt: payload.prompt,
         },
     )

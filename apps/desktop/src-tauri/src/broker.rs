@@ -57,6 +57,8 @@ pub enum BrokerRequest {
         cwd: Option<String>,
         project_id: Option<String>,
         session_id: Option<String>,
+        #[serde(default)]
+        permission_mode: Option<String>,
         prompt: String,
         out_pipe: String,
     },
@@ -267,6 +269,7 @@ foreach ($w in $sh.Windows()) {{
             cwd,
             project_id,
             session_id,
+            permission_mode,
             prompt,
             out_pipe,
         } => {
@@ -281,6 +284,7 @@ foreach ($w in $sh.Windows()) {{
                             cwd,
                             project_id,
                             session_id,
+                            permission_mode,
                             prompt,
                             out_pipe,
                         },
