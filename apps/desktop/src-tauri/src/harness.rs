@@ -845,6 +845,64 @@ fn is_antigravity_cli_conversation(session_id: &str) -> bool {
     false
 }
 
+fn load_codex_session_index_names(home: &Path) -> HashMap<String, String> {
+    let mut map = HashMap::new();
+    let idx_path = home.join(".codex").join("session_index.jsonl");
+    let Ok(raw) = fs::read_to_string(&idx_path) else {
+        return map;
+    };
+    for line in raw.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed) else {
+            continue;
+        };
+        let id = v.get("id").and_then(|s| s.as_str()).unwrap_or("").trim();
+        let name = v
+            .get("thread_name")
+            .and_then(|s| s.as_str())
+            .unwrap_or("")
+            .trim();
+        if !id.is_empty() && !name.is_empty() {
+            map.insert(id.to_string(), name.to_string());
+        }
+    }
+    map
+}
+
+/// Read-only authoritative title lookup for a Codex thread (`threads.name` -> `session_index.jsonl`).
+pub fn lookup_codex_thread_name(thread_id: &str) -> Option<String> {
+    let tid = thread_id.trim();
+    if tid.is_empty() {
+        return None;
+    }
+    let home = dirs::home_dir()?;
+    let db_path = home.join(".codex").join("state_5.sqlite");
+    if let Some(conn) = open_sqlite_readonly(&db_path) {
+        if let Ok(name) = conn.query_row(
+            "SELECT COALESCE(name, '') FROM threads WHERE id = ?1 LIMIT 1",
+            [tid],
+            |r| r.get::<_, String>(0),
+        ) {
+            if !name.trim().is_empty() {
+                return Some(sanitize_title(&name, "Codex 会话"));
+            }
+        }
+    }
+    let idx = load_codex_session_index_names(&home);
+    idx.get(tid).map(|n| sanitize_title(n, "Codex 会话"))
+}
+
+fn normalize_win_path_key(p: &str) -> String {
+    clean_windows_path(p)
+        .trim()
+        .trim_end_matches(['\\', '/'])
+        .replace('/', "\\")
+        .to_ascii_lowercase()
+}
+
 pub fn load_codex_catalog() -> ExternalHarnessCatalog {
     let exe = resolve_codex_exe();
     let Some(home) = dirs::home_dir() else {
@@ -873,11 +931,111 @@ pub fn load_codex_catalog() -> ExternalHarnessCatalog {
         };
     };
 
-    let mut by_cwd: BTreeMap<String, Vec<ExternalConversation>> = BTreeMap::new();
+    // 1. Read Codex Desktop's `.codex-global-state.json` (read-only) for exact Projects / Assignments / Projectless IDs
+    struct CodexProjectDef {
+        id: String,
+        name: String,
+        root_paths: Vec<String>,
+        root_keys: Vec<String>,
+    }
+    let mut local_projects: Vec<CodexProjectDef> = Vec::new();
+    let mut thread_proj_assign: HashMap<String, String> = HashMap::new();
+    let mut projectless_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    let gs_path = home.join(".codex").join(".codex-global-state.json");
+    if let Ok(raw_gs) = fs::read_to_string(&gs_path) {
+        if let Ok(gs) = serde_json::from_str::<serde_json::Value>(&raw_gs) {
+            let order: Vec<String> = gs
+                .get("project-order")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            if let Some(proj_obj) = gs.get("local-projects").and_then(|v| v.as_object()) {
+                let mut seen_pids = std::collections::HashSet::new();
+                let mut ordered_keys: Vec<String> = Vec::new();
+                for pid in order {
+                    if proj_obj.contains_key(&pid) && seen_pids.insert(pid.clone()) {
+                        ordered_keys.push(pid);
+                    }
+                }
+                for pid in proj_obj.keys() {
+                    if seen_pids.insert(pid.clone()) {
+                        ordered_keys.push(pid.clone());
+                    }
+                }
+                for pid in ordered_keys {
+                    if let Some(entry) = proj_obj.get(&pid).and_then(|v| v.as_object()) {
+                        let name = entry
+                            .get("name")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .trim()
+                            .to_string();
+                        let roots: Vec<String> = entry
+                            .get("rootPaths")
+                            .and_then(|v| v.as_array())
+                            .map(|arr| {
+                                arr.iter()
+                                    .filter_map(|x| x.as_str().map(clean_windows_path))
+                                    .filter(|s| !s.is_empty())
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        let label = if !name.is_empty() {
+                            name
+                        } else if let Some(first) = roots.first() {
+                            basename_of_path(first)
+                        } else {
+                            continue;
+                        };
+                        let root_keys: Vec<String> =
+                            roots.iter().map(|r| normalize_win_path_key(r)).collect();
+                        local_projects.push(CodexProjectDef {
+                            id: pid,
+                            name: label,
+                            root_paths: roots,
+                            root_keys,
+                        });
+                    }
+                }
+            }
+
+            if let Some(assigns) = gs
+                .get("thread-project-assignments")
+                .and_then(|v| v.as_object())
+            {
+                for (tid, val) in assigns {
+                    if let Some(pid) = val.get("projectId").and_then(|x| x.as_str()) {
+                        if !pid.trim().is_empty() {
+                            thread_proj_assign.insert(tid.clone(), pid.trim().to_string());
+                        }
+                    }
+                }
+            }
+
+            if let Some(pless) = gs.get("projectless-thread-ids").and_then(|v| v.as_array()) {
+                for v in pless {
+                    if let Some(tid) = v.as_str() {
+                        projectless_ids.insert(tid.to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    let index_names = load_codex_session_index_names(&home);
+    let mut all_threads: Vec<(ExternalConversation, String)> = Vec::new(); // (conv, db_project_id)
+
     if let Ok(mut stmt) = conn.prepare(
-        "SELECT id, COALESCE(source, ''), COALESCE(cwd, ''), COALESCE(title, ''), \
-         COALESCE(first_user_message, ''), COALESCE(updated_at_ms, updated_at * 1000, 0), \
-         COALESCE(rollout_path, '') \
+        "SELECT id, COALESCE(source, ''), COALESCE(cwd, ''), COALESCE(name, ''), \
+         COALESCE(title, ''), COALESCE(first_user_message, ''), \
+         COALESCE(updated_at_ms, updated_at * 1000, 0), COALESCE(rollout_path, ''), \
+         COALESCE(tokens_used, 0), COALESCE(project_id, '') \
          FROM threads \
          WHERE COALESCE(archived, 0) = 0 \
            AND source NOT LIKE '{%' \
@@ -891,59 +1049,129 @@ pub fn load_codex_catalog() -> ExternalHarnessCatalog {
                 row.get::<_, String>(2)?,
                 row.get::<_, String>(3)?,
                 row.get::<_, String>(4)?,
-                row.get::<_, i64>(5)?,
-                row.get::<_, String>(6)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, i64>(6)?,
+                row.get::<_, String>(7)?,
+                row.get::<_, i64>(8)?,
+                row.get::<_, String>(9)?,
             ))
         }) {
             for row in rows.flatten() {
-                let (id, source, raw_cwd, title, first_msg, updated_ms, rollout) = row;
+                let (id, source, raw_cwd, name, title, first_msg, updated_ms, rollout, tokens_used, db_pid) =
+                    row;
+                // Skip empty / unstarted ghost threads (0 tokens & no user content) hidden by Codex Desktop
+                if tokens_used == 0 && title.trim().is_empty() && first_msg.trim().is_empty() {
+                    continue;
+                }
                 let cwd = clean_windows_path(&raw_cwd);
-                let key = if cwd.is_empty() {
-                    home.to_string_lossy().to_string()
-                } else {
-                    cwd.clone()
-                };
-                let display_title = if !title.trim().is_empty() {
+                let display_title = if !name.trim().is_empty() {
+                    sanitize_title(&name, "Codex 会话")
+                } else if let Some(idx_name) = index_names.get(&id) {
+                    sanitize_title(idx_name, "Codex 会话")
+                } else if !title.trim().is_empty() {
                     sanitize_title(&title, "Codex 会话")
                 } else if !first_msg.trim().is_empty() {
                     sanitize_title(&first_msg, "Codex 会话")
                 } else {
                     format!("会话 {}", &id[..id.len().min(8)])
                 };
-                by_cwd.entry(key).or_default().push(ExternalConversation {
-                    id,
-                    title: display_title,
-                    updated_at: updated_ms,
-                    source,
-                    cwd,
-                    rollout_path: if rollout.trim().is_empty() {
-                        None
-                    } else {
-                        Some(clean_windows_path(&rollout))
+                all_threads.push((
+                    ExternalConversation {
+                        id,
+                        title: display_title,
+                        updated_at: updated_ms,
+                        source,
+                        cwd,
+                        rollout_path: if rollout.trim().is_empty() {
+                            None
+                        } else {
+                            Some(clean_windows_path(&rollout))
+                        },
                     },
-                });
+                    db_pid,
+                ));
             }
         }
     }
 
-    let mut groups: Vec<ExternalWorkspaceGroup> = by_cwd
-        .into_iter()
-        .map(|(path, mut convs)| {
-            convs.sort_by_key(|c| std::cmp::Reverse(c.updated_at));
-            ExternalWorkspaceGroup {
-                workspace_id: path.clone(),
-                label: basename_of_path(&path),
-                path,
-                convs,
+    let mut groups: Vec<ExternalWorkspaceGroup> = Vec::new();
+    if !local_projects.is_empty() {
+        // Match Codex Desktop 1:1: show exact `local-projects` first, then `最近` (all recent threads)
+        for proj in &local_projects {
+            let mut convs: Vec<ExternalConversation> = Vec::new();
+            for (conv, db_pid) in &all_threads {
+                if projectless_ids.contains(&conv.id) {
+                    continue;
+                }
+                let assigned = thread_proj_assign
+                    .get(&conv.id)
+                    .map(|p| p == &proj.id)
+                    .unwrap_or(false)
+                    || db_pid == &proj.id;
+                let cwd_key = normalize_win_path_key(&conv.cwd);
+                let path_match = !cwd_key.is_empty()
+                    && proj
+                        .root_keys
+                        .iter()
+                        .any(|rk| cwd_key == *rk || cwd_key.starts_with(&format!("{rk}\\")));
+                if assigned || path_match {
+                    convs.push(conv.clone());
+                }
             }
-        })
-        .collect();
+            convs.sort_by_key(|c| std::cmp::Reverse(c.updated_at));
+            let primary_path = proj.root_paths.first().cloned().unwrap_or_default();
+            groups.push(ExternalWorkspaceGroup {
+                workspace_id: if primary_path.is_empty() {
+                    proj.id.clone()
+                } else {
+                    primary_path.clone()
+                },
+                label: proj.name.clone(),
+                path: primary_path,
+                convs,
+            });
+        }
 
-    groups.sort_by(|a, b| {
-        let a_ts = a.convs.first().map(|c| c.updated_at).unwrap_or(0);
-        let b_ts = b.convs.first().map(|c| c.updated_at).unwrap_or(0);
-        b_ts.cmp(&a_ts)
-    });
+        if !all_threads.is_empty() {
+            let mut recent_convs: Vec<ExternalConversation> =
+                all_threads.into_iter().map(|(c, _)| c).collect();
+            recent_convs.sort_by_key(|c| std::cmp::Reverse(c.updated_at));
+            groups.push(ExternalWorkspaceGroup {
+                workspace_id: "__codex_recent__".to_string(),
+                label: "最近".to_string(),
+                path: String::new(),
+                convs: recent_convs,
+            });
+        }
+    } else {
+        // Fallback for CLI-only Codex installations without Codex Desktop global state
+        let mut by_cwd: BTreeMap<String, Vec<ExternalConversation>> = BTreeMap::new();
+        for (conv, _) in all_threads {
+            let key = if conv.cwd.is_empty() {
+                home.to_string_lossy().to_string()
+            } else {
+                conv.cwd.clone()
+            };
+            by_cwd.entry(key).or_default().push(conv);
+        }
+        groups = by_cwd
+            .into_iter()
+            .map(|(path, mut convs)| {
+                convs.sort_by_key(|c| std::cmp::Reverse(c.updated_at));
+                ExternalWorkspaceGroup {
+                    workspace_id: path.clone(),
+                    label: basename_of_path(&path),
+                    path,
+                    convs,
+                }
+            })
+            .collect();
+        groups.sort_by(|a, b| {
+            let a_ts = a.convs.first().map(|c| c.updated_at).unwrap_or(0);
+            let b_ts = b.convs.first().map(|c| c.updated_at).unwrap_or(0);
+            b_ts.cmp(&a_ts)
+        });
+    }
 
     if groups.is_empty() {
         let default_dir = home.to_string_lossy().to_string();
@@ -1144,6 +1372,11 @@ pub fn load_claude_code_catalog() -> ExternalHarnessCatalog {
                 continue;
             }
             let dir_name = proj.file_name().to_string_lossy().to_string();
+            let dir_lower = dir_name.to_ascii_lowercase();
+            // Skip ephemeral OS temp scratch directories (e.g. AppData\Local\Temp\...)
+            if dir_lower.contains("appdata-local-temp-") || dir_lower.contains("windows-temp-") {
+                continue;
+            }
             let fallback_cwd = decode_claude_project_dir_fallback(&dir_name);
             let Ok(files) = fs::read_dir(&proj_path) else {
                 continue;

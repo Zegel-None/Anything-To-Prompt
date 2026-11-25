@@ -1105,14 +1105,18 @@ pub fn start_live_sync_services(app: AppHandle, enabled_flag: Arc<AtomicBool>) {
                                 } else {
                                     basename_of_path(&cwd)
                                 };
+                                let db_name = crate::harness::lookup_codex_thread_name(&sid);
+                                let title_authoritative = db_name.is_some();
+                                let title = db_name
+                                    .unwrap_or_else(|| title_from_messages(&msgs, &label));
                                 let payload = HarnessSyncPayload {
                                     harness: "codex".to_string(),
                                     workspace_id: cwd.clone(),
                                     workspace_path: cwd,
                                     workspace_label: label.clone(),
                                     session_id: sid,
-                                    title: title_from_messages(&msgs, &label),
-                                    title_authoritative: false,
+                                    title,
+                                    title_authoritative,
                                     messages: msgs,
                                     running: false,
                                     source: "watch".to_string(),
