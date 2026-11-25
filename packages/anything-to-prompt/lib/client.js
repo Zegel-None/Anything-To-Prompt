@@ -270,6 +270,41 @@ window.__ModuleLoader__.load({
       } catch {}
     }
 
+    const STORAGE_KEY_EXT_SEL_PREFIX = 'dsh_card_dock:ext_sel:';
+
+    function readStoredExtSelection(hId) {
+      const fallback = { ...getHarnessMeta(hId).defaultSelection };
+      try {
+        const raw = localStorage.getItem(STORAGE_KEY_EXT_SEL_PREFIX + hId);
+        if (!raw) return fallback;
+        const parsed = JSON.parse(raw);
+        if (parsed && typeof parsed === 'object') {
+          return {
+            workspaceId: String(parsed.workspaceId || fallback.workspaceId || ''),
+            workspacePath: String(parsed.workspacePath || fallback.workspacePath || ''),
+            sessionId: String(parsed.sessionId || ''),
+            title: String(parsed.title || fallback.title || ''),
+          };
+        }
+      } catch {}
+      return fallback;
+    }
+
+    function writeStoredExtSelection(hId, sel) {
+      try {
+        if (!hId || !sel) return;
+        localStorage.setItem(
+          STORAGE_KEY_EXT_SEL_PREFIX + hId,
+          JSON.stringify({
+            workspaceId: sel.workspaceId || '',
+            workspacePath: sel.workspacePath || '',
+            sessionId: sel.sessionId || '',
+            title: sel.title || '',
+          }),
+        );
+      } catch {}
+    }
+
     // Shared runtime handles between Dock, Picker Chip, and Tauri Bridge
     const dsbRuntime = {
       barMode: INITIAL_BAR_MODE,
@@ -300,7 +335,7 @@ window.__ModuleLoader__.load({
       externalSelection: Object.fromEntries(
         HARNESS_ORDER.filter((id) => !getHarnessMeta(id).useNativeComposer).map((id) => [
           id,
-          { ...getHarnessMeta(id).defaultSelection },
+          readStoredExtSelection(id),
         ]),
       ),
       externalMessages: Object.fromEntries(
@@ -399,6 +434,10 @@ window.__ModuleLoader__.load({
                   sessionId: cur.sessionId,
                   title: matched.conv.title || cur.title || matched.ws.label || '新对话',
                 };
+                writeStoredExtSelection(hId, dsbRuntime.externalSelection[hId]);
+                if (!Array.isArray(dsbRuntime.externalMessages[hId]) || dsbRuntime.externalMessages[hId].length === 0) {
+                  loadExternalConversationMessages(hId, cur.sessionId);
+                }
               }
             } else if (autoSelectIfEmpty && groups.length > 0) {
               const firstWs = groups[0];
@@ -457,6 +496,7 @@ window.__ModuleLoader__.load({
         sessionId: conv.id,
         title: conv.title || '新对话',
       };
+      writeStoredExtSelection(hId, dsbRuntime.externalSelection[hId]);
       notifyBarRuntime();
       loadExternalConversationMessages(hId, conv.id);
     }
@@ -473,6 +513,7 @@ window.__ModuleLoader__.load({
         sessionId: '',
         title: wsLabel + ' · 新对话',
       };
+      writeStoredExtSelection(hId, dsbRuntime.externalSelection[hId]);
       dsbRuntime.externalMessages[hId] = [];
       notifyBarRuntime();
     }
@@ -4876,13 +4917,16 @@ window.__ModuleLoader__.load({
         const [manualPathValue, setManualPathValue] = useState('');
         const [pickerError, setPickerError] = useState('');
         const [pillMetrics, setPillMetrics] = useState(null);
+        const [wsMarginBottom, setWsMarginBottom] = useState(0);
         const [submenuMarginBottom, setSubmenuMarginBottom] = useState(0);
 
         const btnRef = useRef(null);
         const extAnchorRef = useRef(null);
         const menuRef = useRef(null);
+        const harnessPanelRef = useRef(null);
         const wsPanelRef = useRef(null);
         const convPanelRef = useRef(null);
+        const harnessRowRefs = useRef(new Map());
         const wsRowRefs = useRef(new Map());
 
         useEffect(() => {
@@ -5316,37 +5360,89 @@ window.__ModuleLoader__.load({
           groups.find((g) => g.workspaceId === hoveredWsId) || groups[0] || null;
 
         const recomputeSubmenuAlignment = useCallback(() => {
-          if (!menuOpen || settingsView || !hoveredGroup) {
+          if (!menuOpen || settingsView) {
+            setWsMarginBottom(0);
             setSubmenuMarginBottom(0);
             return;
           }
-          const panelEl = wsPanelRef.current;
+          const hPanelEl = harnessPanelRef.current;
+          const wsPanelEl = wsPanelRef.current;
+          const hRowEl = harnessRowRefs.current.get(browsedHarness);
+          if (!hPanelEl || !wsPanelEl) {
+            setWsMarginBottom(0);
+            setSubmenuMarginBottom(0);
+            return;
+          }
+          const hr = hPanelEl.getBoundingClientRect();
+          const wr = wsPanelEl.getBoundingClientRect();
+          if (hr.height < 12 || wr.height < 12) {
+            setWsMarginBottom(0);
+            setSubmenuMarginBottom(0);
+            return;
+          }
+
+          // Level 1 (`harnessPanelRef`) always sits at marginBottom=0, so `hr.bottom` is
+          // the exact bottom baseline of the 3-column flex container.
+          const baseBottom = hr.bottom;
+
+          // 1. Align Level 2 (Workspaces) with the hovered Harness row in Level 1
+          let nextWsBottom = 0;
+          if (hRowEl) {
+            const hrr = hRowEl.getBoundingClientRect();
+            if (hrr.height >= 8) {
+              const desiredWsTop = Math.max(hr.top, hrr.top - 7);
+              const maxWsBottom = Math.max(0, Math.round(hr.height - wr.height));
+              const desiredWsBottom = Math.round(baseBottom - (desiredWsTop + wr.height));
+              nextWsBottom = Math.max(0, Math.min(maxWsBottom, desiredWsBottom));
+            }
+          }
+
+          // 2. Align Level 3 (Conversations) with the hovered Workspace row in Level 2
+          //    (accounting for Level 2's lifted position `nextWsBottom`)
+          let nextConvBottom = 0;
           const convEl = convPanelRef.current;
-          const rowEl = wsRowRefs.current.get(hoveredGroup.workspaceId);
-          if (!panelEl || !convEl || !rowEl) {
-            setSubmenuMarginBottom(0);
-            return;
+          const wRowEl = hoveredGroup ? wsRowRefs.current.get(hoveredGroup.workspaceId) : null;
+          if (convEl && wRowEl) {
+            const cr = convEl.getBoundingClientRect();
+            const wrr = wRowEl.getBoundingClientRect();
+            if (cr.height >= 12 && wrr.height >= 8) {
+              const wsNewTop = baseBottom - nextWsBottom - wr.height;
+              const rowOffsetInWs = wrr.top - wr.top;
+              const wsRowNewTop = wsNewTop + rowOffsetInWs;
+              const desiredConvTop = Math.max(wsNewTop, wsRowNewTop - 7);
+              const maxConvBottom = Math.max(0, Math.round(baseBottom - (wsNewTop + cr.height)));
+              const desiredConvBottom = Math.round(baseBottom - (desiredConvTop + cr.height));
+              nextConvBottom = Math.max(0, Math.min(maxConvBottom, desiredConvBottom));
+            }
           }
-          const pr = panelEl.getBoundingClientRect();
-          const cr = convEl.getBoundingClientRect();
-          const rr = rowEl.getBoundingClientRect();
-          if (pr.height < 12 || cr.height < 12 || rr.height < 8) {
-            setSubmenuMarginBottom(0);
-            return;
+
+          let changed = false;
+          setWsMarginBottom((prev) => {
+            if (prev !== nextWsBottom) changed = true;
+            return prev === nextWsBottom ? prev : nextWsBottom;
+          });
+          setSubmenuMarginBottom((prev) => {
+            if (prev !== nextConvBottom) changed = true;
+            return prev === nextConvBottom ? prev : nextConvBottom;
+          });
+          if (changed && typeof dsbRuntime.scheduleLayoutReport === 'function') {
+            dsbRuntime.scheduleLayoutReport(180);
           }
-          const targetTop = Math.max(0, Math.round(rr.top - pr.top - 7));
-          const maxBottomOffset = Math.max(0, Math.round(pr.height - cr.height));
-          const desiredBottomOffset = Math.round(pr.height - (targetTop + cr.height));
-          const clamped = Math.max(0, Math.min(maxBottomOffset, desiredBottomOffset));
-          setSubmenuMarginBottom((prev) => (prev === clamped ? prev : clamped));
-        }, [menuOpen, settingsView, hoveredGroup ? hoveredGroup.workspaceId : '', hoveredGroup ? hoveredGroup.convs.length : 0]);
+        }, [
+          menuOpen,
+          settingsView,
+          browsedHarness,
+          groups.length,
+          hoveredGroup ? hoveredGroup.workspaceId : '',
+          hoveredGroup ? hoveredGroup.convs.length : 0,
+        ]);
 
         useLayoutEffect(() => {
           recomputeSubmenuAlignment();
           if (!menuOpen || settingsView) return undefined;
           const raf = window.requestAnimationFrame(recomputeSubmenuAlignment);
           return () => window.cancelAnimationFrame(raf);
-        }, [recomputeSubmenuAlignment, menuOpen, settingsView, browsedHarness, groups.length]);
+        }, [recomputeSubmenuAlignment, menuOpen, settingsView, browsedHarness, groups.length, harnessQuery]);
 
         const availById = useMemo(() => {
           const map = {};
@@ -5808,6 +5904,7 @@ window.__ModuleLoader__.load({
                   h(
                     'div',
                     {
+                      ref: harnessPanelRef,
                       'data-dsb-popup-panel': '1',
                       'data-dsb-harness-col': '1',
                       style: {
@@ -5919,6 +6016,7 @@ window.__ModuleLoader__.load({
                       'div',
                       {
                         'data-dsb-menu-scroll': '1',
+                        onScroll: recomputeSubmenuAlignment,
                         style: {
                           overflowY: 'auto',
                           display: 'flex',
@@ -5943,6 +6041,10 @@ window.__ModuleLoader__.load({
                               'button',
                               {
                                 key: hid,
+                                ref: (el) => {
+                                  if (el) harnessRowRefs.current.set(hid, el);
+                                  else harnessRowRefs.current.delete(hid);
+                                },
                                 type: 'button',
                                 'data-dsb-harness-opt': hid,
                                 title: meta.fullLabel + ' · ' + meta.syncHint,
@@ -6047,7 +6149,7 @@ window.__ModuleLoader__.load({
                   ),
 
                   // ===========================================================
-                  // Level 2 (Middle): Workspaces of hovered Harness
+                  // Level 2 (Middle): Workspaces of hovered Harness (follows hovered Harness row)
                   // ===========================================================
                   h(
                     'div',
@@ -6058,6 +6160,7 @@ window.__ModuleLoader__.load({
                       style: {
                         width: col2W + 'px',
                         maxHeight: '300px',
+                        marginBottom: wsMarginBottom + 'px',
                         borderRadius: '14px',
                         padding: '6px',
                         background: panelBg,
@@ -6067,6 +6170,7 @@ window.__ModuleLoader__.load({
                         flexDirection: 'column',
                         gap: '2px',
                         boxSizing: 'border-box',
+                        transition: 'margin-bottom 90ms ease-out',
                       },
                     },
                     manualPathMode
