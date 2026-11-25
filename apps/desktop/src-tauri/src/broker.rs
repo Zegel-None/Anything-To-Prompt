@@ -59,6 +59,16 @@ pub enum BrokerRequest {
         session_id: Option<String>,
         #[serde(default)]
         permission_mode: Option<String>,
+        #[serde(default)]
+        model: Option<String>,
+        #[serde(default)]
+        effort: Option<String>,
+        #[serde(default)]
+        sandbox_mode: Option<String>,
+        #[serde(default)]
+        execution_mode: Option<String>,
+        #[serde(default)]
+        attachments: Vec<crate::harness::TurnAttachment>,
         prompt: String,
         out_pipe: String,
     },
@@ -270,6 +280,11 @@ foreach ($w in $sh.Windows()) {{
             project_id,
             session_id,
             permission_mode,
+            model,
+            effort,
+            sandbox_mode,
+            execution_mode,
+            attachments,
             prompt,
             out_pipe,
         } => {
@@ -285,6 +300,11 @@ foreach ($w in $sh.Windows()) {{
                             project_id,
                             session_id,
                             permission_mode,
+                            model,
+                            effort,
+                            sandbox_mode,
+                            execution_mode,
+                            attachments,
                             prompt,
                             out_pipe,
                         },

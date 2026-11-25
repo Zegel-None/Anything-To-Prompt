@@ -115,6 +115,36 @@ pub struct ExternalChatMessage {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct TurnAttachment {
+    pub kind: String, // "image" | "file" | "folder"
+    pub path: String,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HarnessOptionItem {
+    pub id: String,
+    pub label: String,
+    pub desc: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HarnessComposerOptions {
+    pub harness: String,
+    pub models: Vec<HarnessOptionItem>,
+    pub efforts: Vec<HarnessOptionItem>,
+    pub modes: Vec<HarnessOptionItem>,
+    pub plugins: Vec<HarnessOptionItem>,
+    pub actions: Vec<HarnessOptionItem>,
+    pub default_model: String,
+    pub default_effort: String,
+    pub default_mode: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct HarnessStreamEvent {
     pub turn_id: String,
     pub harness: String,
@@ -1157,6 +1187,191 @@ pub fn focus_harness_desktop(
     });
 
     Ok(format!("正在切换到 {}", kind.as_str()))
+}
+
+fn read_codex_enabled_plugins() -> Vec<HarnessOptionItem> {
+    let mut out = Vec::new();
+    let Some(home) = dirs::home_dir() else {
+        return out;
+    };
+    let path = home.join(".codex").join("config.toml");
+    let Ok(raw) = fs::read_to_string(&path) else {
+        return out;
+    };
+    let mut cur_plugin: Option<String> = None;
+    let mut seen = HashSet::new();
+    for line in raw.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') && trimmed.ends_with(']') {
+            cur_plugin = None;
+            if let Some(rest) = trimmed.strip_prefix("[plugins.\"") {
+                if let Some((raw_id, _)) = rest.split_once('"') {
+                    let short = raw_id.split('@').next().unwrap_or(raw_id).trim();
+                    if !short.is_empty() && !short.contains("anything-to-prompt") {
+                        cur_plugin = Some(short.to_string());
+                    }
+                }
+            }
+            continue;
+        }
+        if let Some(ref pid) = cur_plugin {
+            if let Some((k, v)) = trimmed.split_once('=') {
+                if k.trim() == "enabled" && v.trim() == "true" && seen.insert(pid.clone()) {
+                    let (label, desc) = match pid.as_str() {
+                        "documents" => ("Documents", "Create and edit documents"),
+                        "pdf" => ("PDF", "Read, create, and verify PDFs"),
+                        "spreadsheets" => ("Spreadsheets", "Create and edit spreadsheets"),
+                        "presentations" => ("Presentations", "Create and edit presentations"),
+                        "browser" => ("Browser", "Browse and automate web pages"),
+                        "visualize" => ("Visualize", "Generate charts and diagrams"),
+                        "template-creator" => ("Templates", "Create reusable templates"),
+                        "computer-use" | "unified-computer-use" => ("Computer Use", "Control desktop apps"),
+                        "codex-app-tools" => ("App Tools", "Codex desktop integration tools"),
+                        _ => (pid.as_str(), "Codex enabled plugin"),
+                    };
+                    out.push(HarnessOptionItem {
+                        id: pid.clone(),
+                        label: label.to_string(),
+                        desc: desc.to_string(),
+                    });
+                }
+            }
+        }
+    }
+    out
+}
+
+pub fn load_harness_composer_options(kind: HarnessKind) -> HarnessComposerOptions {
+    match kind {
+        HarnessKind::Antigravity => HarnessComposerOptions {
+            harness: "antigravity".to_string(),
+            models: vec![
+                HarnessOptionItem { id: "gemini-4-neon".into(), label: "Gemini 4 Neon".into(), desc: "最新旗舰多模态模型".into() },
+                HarnessOptionItem { id: "gemini-3.5-pro".into(), label: "Gemini 3.5 Pro".into(), desc: "深度推理与工程代码".into() },
+                HarnessOptionItem { id: "claude-opus-4-6".into(), label: "Claude Opus".into(), desc: "长上下文深度思考".into() },
+                HarnessOptionItem { id: "claude-sonnet-4-6".into(), label: "Claude Sonnet".into(), desc: "高速均衡编程模型".into() },
+            ],
+            efforts: vec![
+                HarnessOptionItem { id: "low".into(), label: "Low".into(), desc: "极速低延迟".into() },
+                HarnessOptionItem { id: "medium".into(), label: "Medium".into(), desc: "日常均衡推理".into() },
+                HarnessOptionItem { id: "high".into(), label: "High".into(), desc: "深度复杂推理".into() },
+                HarnessOptionItem { id: "max".into(), label: "Max".into(), desc: "最高算力思考".into() },
+            ],
+            modes: vec![
+                HarnessOptionItem { id: "auto".into(), label: "极速".into(), desc: "Fast · 自动执行常规操作".into() },
+                HarnessOptionItem { id: "plan".into(), label: "规划".into(), desc: "Planning · 先拆解方案再执行".into() },
+                HarnessOptionItem { id: "accept-edits".into(), label: "自动编辑".into(), desc: "Accept Edits · 自动写入代码修改".into() },
+            ],
+            plugins: Vec::new(),
+            actions: vec![
+                HarnessOptionItem { id: "/plan".into(), label: "/plan".into(), desc: "先制定分步执行计划".into() },
+                HarnessOptionItem { id: "/goal".into(), label: "/goal".into(), desc: "开启长周期目标模式".into() },
+                HarnessOptionItem { id: "/browser".into(), label: "/browser".into(), desc: "使用内置浏览器查验网页".into() },
+                HarnessOptionItem { id: "/compact".into(), label: "/compact".into(), desc: "压缩上下文释放窗口".into() },
+                HarnessOptionItem { id: "/boost".into(), label: "/boost".into(), desc: "深度多视角思考与验证".into() },
+                HarnessOptionItem { id: "/grill-me".into(), label: "/grill-me".into(), desc: "通过追问澄清设计决策".into() },
+            ],
+            default_model: "gemini-4-neon".to_string(),
+            default_effort: "high".to_string(),
+            default_mode: "auto".to_string(),
+        },
+        HarnessKind::Codex => {
+            let (cfg_model_label, cfg_effort_label, _cfg_access) = read_codex_config_display();
+            let mut models = vec![
+                HarnessOptionItem { id: "gpt-6-luna".into(), label: "GPT-6.1 Terra".into(), desc: "Codex 默认旗舰编程模型".into() },
+                HarnessOptionItem { id: "gpt-5.4".into(), label: "GPT-5.4".into(), desc: "稳健高速代码模型".into() },
+                HarnessOptionItem { id: "o3".into(), label: "o3".into(), desc: "高强度数学与系统推理".into() },
+            ];
+            if !cfg_model_label.is_empty() && !models.iter().any(|m| m.label.eq_ignore_ascii_case(&cfg_model_label)) {
+                models.insert(0, HarnessOptionItem {
+                    id: cfg_model_label.to_ascii_lowercase().replace(' ', "-"),
+                    label: cfg_model_label,
+                    desc: "来自 ~/.codex/config.toml".into(),
+                });
+            }
+            let default_effort = match cfg_effort_label.as_str() {
+                "低" => "low",
+                "中" => "medium",
+                "极高" => "xhigh",
+                _ => "high",
+            }
+            .to_string();
+            HarnessComposerOptions {
+                harness: "codex".to_string(),
+                models,
+                efforts: vec![
+                    HarnessOptionItem { id: "low".into(), label: "低".into(), desc: "快速轻量推理".into() },
+                    HarnessOptionItem { id: "medium".into(), label: "中".into(), desc: "平衡速度与质量".into() },
+                    HarnessOptionItem { id: "high".into(), label: "高".into(), desc: "深度工程推理".into() },
+                    HarnessOptionItem { id: "xhigh".into(), label: "极高".into(), desc: "拉满思考预算".into() },
+                ],
+                modes: vec![
+                    HarnessOptionItem { id: "danger-full-access".into(), label: "完全访问".into(), desc: "无沙箱限制，直接读写与执行".into() },
+                    HarnessOptionItem { id: "workspace-write".into(), label: "工作区写入".into(), desc: "仅允许在当前工作区目录写入".into() },
+                    HarnessOptionItem { id: "read-only".into(), label: "只读模式".into(), desc: "只读分析，不修改任何文件".into() },
+                ],
+                plugins: read_codex_enabled_plugins(),
+                actions: vec![
+                    HarnessOptionItem { id: "/plan".into(), label: "计划模式".into(), desc: "开启计划模式，先出方案再动手".into() },
+                    HarnessOptionItem { id: "/goal".into(), label: "目标".into(), desc: "设置要持续追求的长期目标".into() },
+                ],
+                default_model: "gpt-6-luna".to_string(),
+                default_effort,
+                default_mode: "danger-full-access".to_string(),
+            }
+        }
+        HarnessKind::ClaudeCode => {
+            let (_m_label, e_label, _) = read_claude_code_config_display();
+            let default_effort = match e_label.as_str() {
+                "低" => "low",
+                "中" => "medium",
+                "极高" => "max",
+                _ => "high",
+            }
+            .to_string();
+            HarnessComposerOptions {
+                harness: "claude_code".to_string(),
+                models: vec![
+                    HarnessOptionItem { id: "claude-opus-4-6".into(), label: "Claude Opus".into(), desc: "最强深度架构与复杂重构".into() },
+                    HarnessOptionItem { id: "claude-sonnet-4-6".into(), label: "Claude Sonnet".into(), desc: "日常高速编码主力".into() },
+                    HarnessOptionItem { id: "claude-haiku-4-5".into(), label: "Claude Haiku".into(), desc: "极速轻量问答与脚本".into() },
+                ],
+                efforts: vec![
+                    HarnessOptionItem { id: "low".into(), label: "低".into(), desc: "快速响应".into() },
+                    HarnessOptionItem { id: "medium".into(), label: "中".into(), desc: "常规推理".into() },
+                    HarnessOptionItem { id: "high".into(), label: "高".into(), desc: "深度推理".into() },
+                    HarnessOptionItem { id: "max".into(), label: "极高".into(), desc: "最大思考深度".into() },
+                ],
+                modes: vec![
+                    HarnessOptionItem { id: "auto".into(), label: "自动".into(), desc: "智能自动执行并拦截高危操作".into() },
+                    HarnessOptionItem { id: "acceptEdits".into(), label: "自动编辑".into(), desc: "自动允许文件编辑".into() },
+                    HarnessOptionItem { id: "plan".into(), label: "仅规划".into(), desc: "只读分析与规划，不修改文件".into() },
+                    HarnessOptionItem { id: "dontAsk".into(), label: "免询问".into(), desc: "免交互确认提示".into() },
+                ],
+                plugins: Vec::new(),
+                actions: vec![
+                    HarnessOptionItem { id: "/plan".into(), label: "/plan".into(), desc: "进入只读规划模式".into() },
+                    HarnessOptionItem { id: "/compact".into(), label: "/compact".into(), desc: "压缩当前会话历史".into() },
+                    HarnessOptionItem { id: "/review".into(), label: "/review".into(), desc: "审查当前代码变更".into() },
+                    HarnessOptionItem { id: "/clear".into(), label: "/clear".into(), desc: "清空上下文重新开始".into() },
+                ],
+                default_model: "claude-opus-4-6".to_string(),
+                default_effort,
+                default_mode: "auto".to_string(),
+            }
+        }
+        HarnessKind::Dsh => HarnessComposerOptions {
+            harness: "dsh".to_string(),
+            models: Vec::new(),
+            efforts: Vec::new(),
+            modes: Vec::new(),
+            plugins: Vec::new(),
+            actions: Vec::new(),
+            default_model: String::new(),
+            default_effort: String::new(),
+            default_mode: String::new(),
+        },
+    }
 }
 
 pub fn list_harness_availability(dsh_connected: bool) -> Vec<HarnessAvailability> {
@@ -2509,8 +2724,42 @@ pub struct MediumTurnParams {
     pub project_id: Option<String>,
     pub session_id: Option<String>,
     pub permission_mode: Option<String>,
+    pub model: Option<String>,
+    pub effort: Option<String>,
+    pub sandbox_mode: Option<String>,
+    pub execution_mode: Option<String>,
+    pub attachments: Vec<TurnAttachment>,
     pub prompt: String,
     pub out_pipe: String,
+}
+
+fn build_prompt_with_file_attachments(
+    prompt: &str,
+    attachments: &[TurnAttachment],
+    include_images_as_paths: bool,
+) -> String {
+    let mut lines = Vec::new();
+    for att in attachments {
+        if att.path.trim().is_empty() {
+            continue;
+        }
+        if att.kind == "image" && !include_images_as_paths {
+            continue;
+        }
+        let label = match att.kind.as_str() {
+            "image" => "附加图片",
+            "folder" => "附加文件夹",
+            _ => "附加文件",
+        };
+        lines.push(format!("[{label}: {}]", att.path.trim()));
+    }
+    if lines.is_empty() {
+        prompt.to_string()
+    } else if prompt.trim().is_empty() {
+        lines.join("\n")
+    } else {
+        format!("{}\n\n{}", lines.join("\n"), prompt)
+    }
 }
 
 /// Runs strictly inside the medium-integrity broker process (or directly when app is already medium).
@@ -2534,6 +2783,10 @@ pub fn execute_harness_turn_in_medium(params: MediumTurnParams) {
                 params.cwd.as_deref(),
                 params.project_id.as_deref(),
                 params.session_id.as_deref(),
+                params.model.as_deref(),
+                params.effort.as_deref(),
+                params.execution_mode.as_deref(),
+                &params.attachments,
                 &params.prompt,
                 &mut pipe_writer,
             );
@@ -2544,6 +2797,10 @@ pub fn execute_harness_turn_in_medium(params: MediumTurnParams) {
                 &params.exe,
                 params.cwd.as_deref(),
                 params.session_id.as_deref(),
+                params.model.as_deref(),
+                params.effort.as_deref(),
+                params.sandbox_mode.as_deref(),
+                &params.attachments,
                 &params.prompt,
                 &mut pipe_writer,
             );
@@ -2555,6 +2812,9 @@ pub fn execute_harness_turn_in_medium(params: MediumTurnParams) {
                 params.cwd.as_deref(),
                 params.session_id.as_deref(),
                 params.permission_mode.as_deref(),
+                params.model.as_deref(),
+                params.effort.as_deref(),
+                &params.attachments,
                 &params.prompt,
                 &mut pipe_writer,
             );
@@ -2844,9 +3104,14 @@ fn run_antigravity_turn_in_medium(
     cwd: Option<&str>,
     project_id: Option<&str>,
     session_id: Option<&str>,
+    model: Option<&str>,
+    effort: Option<&str>,
+    execution_mode: Option<&str>,
+    attachments: &[TurnAttachment],
     prompt: &str,
     pipe_writer: &mut impl Write,
 ) {
+    let full_prompt = build_prompt_with_file_attachments(prompt, attachments, true);
     // Route existing Antigravity Desktop conversations (and Desktop projects) silently
     // through the official Plugin Sidecar (`agentapi`) — zero CLI, zero foreground stealing!
     let is_cli_target = match (session_id, project_id) {
@@ -2855,13 +3120,30 @@ fn run_antigravity_turn_in_medium(
         _ => false,
     };
     if !is_cli_target {
-        if try_run_antigravity_via_desktop_sidecar(turn_id, session_id, prompt, pipe_writer) {
+        if try_run_antigravity_via_desktop_sidecar(turn_id, session_id, &full_prompt, pipe_writer) {
             return;
         }
     }
 
     let mut cmd = Command::new(exe);
     cmd.args(["--output-format", "stream-json"]);
+    if let Some(m) = model.map(|s| s.trim()).filter(|s| !s.is_empty()) {
+        cmd.args(["--model", m]);
+    }
+    if let Some(e) = effort.map(|s| s.trim()).filter(|s| !s.is_empty()) {
+        cmd.args(["--effort", e]);
+    }
+    if let Some(mode) = execution_mode
+        .map(|s| s.trim())
+        .filter(|s| matches!(*s, "auto" | "plan" | "accept-edits"))
+    {
+        cmd.args(["--mode", mode]);
+    }
+    for att in attachments {
+        if att.kind == "folder" && !att.path.trim().is_empty() && Path::new(att.path.trim()).is_dir() {
+            cmd.args(["--add-dir", att.path.trim()]);
+        }
+    }
     if let Some(sid) = session_id.filter(|s| !s.trim().is_empty()) {
         cmd.args(["--conversation", sid.trim()]);
     } else if let Some(pid) =
@@ -2871,7 +3153,7 @@ fn run_antigravity_turn_in_medium(
             cmd.args(["--project", pid.trim()]);
         }
     }
-    cmd.arg(format!("--print={prompt}"));
+    cmd.arg(format!("--print={full_prompt}"));
     if let Some(dir) = cwd.filter(|s| !s.trim().is_empty()) {
         let cleaned = clean_windows_path(dir);
         if Path::new(&cleaned).is_dir() {
@@ -3103,6 +3385,10 @@ fn run_codex_app_server_turn_in_medium(
     exe: &str,
     cwd: Option<&str>,
     session_id: Option<&str>,
+    model: Option<&str>,
+    effort: Option<&str>,
+    sandbox_mode: Option<&str>,
+    attachments: &[TurnAttachment],
     prompt: &str,
     pipe_writer: &mut impl Write,
 ) {
@@ -3307,14 +3593,51 @@ fn run_codex_app_server_turn_in_medium(
                     finished = true;
                     break;
                 };
+                let mut input_items: Vec<serde_json::Value> = Vec::new();
+                for att in attachments {
+                    if att.kind == "image" && !att.path.trim().is_empty() {
+                        input_items.push(serde_json::json!({
+                            "type": "localImage",
+                            "path": att.path.trim()
+                        }));
+                    }
+                }
+                let final_text = build_prompt_with_file_attachments(prompt, attachments, false);
+                if !final_text.trim().is_empty() || input_items.is_empty() {
+                    input_items.push(serde_json::json!({
+                        "type": "text",
+                        "text": final_text
+                    }));
+                }
+                let mut turn_params = serde_json::Map::new();
+                turn_params.insert("threadId".to_string(), serde_json::json!(tid));
+                turn_params.insert("input".to_string(), serde_json::Value::Array(input_items));
+                if let Some(m) = model.map(|s| s.trim()).filter(|s| !s.is_empty()) {
+                    turn_params.insert("model".to_string(), serde_json::json!(m));
+                }
+                if let Some(e) = effort.map(|s| s.trim()).filter(|s| !s.is_empty()) {
+                    turn_params.insert("effort".to_string(), serde_json::json!(e));
+                }
+                if let Some(sb) = sandbox_mode.map(|s| s.trim()).filter(|s| !s.is_empty()) {
+                    match sb {
+                        "danger-full-access" => {
+                            turn_params.insert("approvalPolicy".to_string(), serde_json::json!("never"));
+                            turn_params.insert("sandboxPolicy".to_string(), serde_json::json!({ "type": "dangerFullAccess" }));
+                        }
+                        "workspace-write" => {
+                            turn_params.insert("sandboxPolicy".to_string(), serde_json::json!({ "type": "workspaceWrite" }));
+                        }
+                        "read-only" => {
+                            turn_params.insert("sandboxPolicy".to_string(), serde_json::json!({ "type": "readOnly" }));
+                        }
+                        _ => {}
+                    }
+                }
                 let turn_req = serde_json::json!({
                     "jsonrpc": "2.0",
                     "id": 3,
                     "method": "turn/start",
-                    "params": {
-                        "threadId": tid,
-                        "input": [{ "type": "text", "text": prompt }]
-                    }
+                    "params": serde_json::Value::Object(turn_params)
                 });
                 if let Err(e) = send_jsonrpc_line(&mut stdin, &turn_req) {
                     emit_stream_event(
@@ -3716,10 +4039,14 @@ fn run_claude_code_turn_in_medium(
     cwd: Option<&str>,
     session_id: Option<&str>,
     permission_mode: Option<&str>,
+    model: Option<&str>,
+    effort: Option<&str>,
+    attachments: &[TurnAttachment],
     prompt: &str,
     pipe_writer: &mut impl Write,
 ) {
     let perm = sanitize_claude_permission_mode(permission_mode);
+    let full_prompt = build_prompt_with_file_attachments(prompt, attachments, true);
     let mut cmd = if exe.to_ascii_lowercase().ends_with(".cmd") {
         let mut c = Command::new("cmd.exe");
         c.args(["/C", exe]);
@@ -3736,6 +4063,17 @@ fn run_claude_code_turn_in_medium(
         "--permission-mode",
         perm,
     ]);
+    if let Some(m) = model.map(|s| s.trim()).filter(|s| !s.is_empty()) {
+        cmd.args(["--model", m]);
+    }
+    if let Some(e) = effort.map(|s| s.trim()).filter(|s| !s.is_empty()) {
+        cmd.args(["--effort", e]);
+    }
+    for att in attachments {
+        if att.kind == "folder" && !att.path.trim().is_empty() && Path::new(att.path.trim()).is_dir() {
+            cmd.args(["--add-dir", att.path.trim()]);
+        }
+    }
     if let Some(sid) = session_id.filter(|s| !s.trim().is_empty()) {
         cmd.args(["--resume", sid.trim()]);
     }
@@ -3775,7 +4113,7 @@ fn run_claude_code_turn_in_medium(
     register_turn_pid(turn_id, child.id());
 
     if let Some(mut stdin) = child.stdin.take() {
-        let _ = stdin.write_all(prompt.as_bytes());
+        let _ = stdin.write_all(full_prompt.as_bytes());
         let _ = stdin.flush();
         drop(stdin);
     }
@@ -3850,6 +4188,11 @@ pub struct ExternalTurnRequest {
     pub project_id: Option<String>,
     pub session_id: Option<String>,
     pub permission_mode: Option<String>,
+    pub model: Option<String>,
+    pub effort: Option<String>,
+    pub sandbox_mode: Option<String>,
+    pub execution_mode: Option<String>,
+    pub attachments: Vec<TurnAttachment>,
     pub prompt: String,
 }
 
@@ -3887,6 +4230,11 @@ pub fn start_external_harness_turn(
         project_id: req_in.project_id,
         session_id: req_in.session_id,
         permission_mode: req_in.permission_mode,
+        model: req_in.model,
+        effort: req_in.effort,
+        sandbox_mode: req_in.sandbox_mode,
+        execution_mode: req_in.execution_mode,
+        attachments: req_in.attachments,
         prompt: req_in.prompt,
         out_pipe: pipe_short,
     };

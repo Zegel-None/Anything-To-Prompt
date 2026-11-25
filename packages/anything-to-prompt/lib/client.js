@@ -271,6 +271,27 @@ window.__ModuleLoader__.load({
     }
 
     const STORAGE_KEY_EXT_SEL_PREFIX = 'dsh_card_dock:ext_sel:';
+    const STORAGE_KEY_HARNESS_PREFS_PREFIX = 'dsh_card_dock:prefs:';
+    const DETACHED_GAP_PX = 8;
+
+    function readStoredHarnessPrefs(harnessId) {
+      try {
+        const hId = normalizeHarnessId(harnessId);
+        const raw = localStorage.getItem(STORAGE_KEY_HARNESS_PREFS_PREFIX + hId);
+        if (!raw) return {};
+        const parsed = JSON.parse(raw);
+        return parsed && typeof parsed === 'object' ? parsed : {};
+      } catch {
+        return {};
+      }
+    }
+
+    function writeStoredHarnessPrefs(harnessId, prefs) {
+      try {
+        const hId = normalizeHarnessId(harnessId);
+        localStorage.setItem(STORAGE_KEY_HARNESS_PREFS_PREFIX + hId, JSON.stringify(prefs || {}));
+      } catch {}
+    }
 
     function readStoredExtSelection(hId) {
       const fallback = { ...getHarnessMeta(hId).defaultSelection };
@@ -358,9 +379,71 @@ window.__ModuleLoader__.load({
       claudePermissionMode: readStoredString(STORAGE_KEY_CLAUDE_PERM, 'auto'),
       extDraftText: '',
       extCapsules: [],
+      extAttachments: [],
+      harnessOptions: {},
+      harnessPrefs: Object.fromEntries(
+        HARNESS_ORDER.filter((id) => !getHarnessMeta(id).useNativeComposer).map((id) => [
+          id,
+          readStoredHarnessPrefs(id),
+        ]),
+      ),
+      unreadCount: 0,
+      unreadPreview: '',
       toggleHarnessMenu: null,
       openSettingsMenu: null,
     };
+
+    function refreshHarnessOptions(harnessId) {
+      const hId = normalizeHarnessId(harnessId);
+      if (!IS_BAR || hId === 'dsh') return Promise.resolve(null);
+      return tauriInvoke('harness_list_options', { harness: hId })
+        .then((opts) => {
+          if (opts && typeof opts === 'object') {
+            dsbRuntime.harnessOptions[hId] = opts;
+            notifyBarRuntime();
+          }
+          return opts;
+        })
+        .catch(() => null);
+    }
+
+    function updateHarnessPrefs(harnessId, patch) {
+      const hId = normalizeHarnessId(harnessId);
+      const next = Object.assign({}, dsbRuntime.harnessPrefs[hId] || {}, patch || {});
+      dsbRuntime.harnessPrefs[hId] = next;
+      writeStoredHarnessPrefs(hId, next);
+      if (hId === 'claude_code' && next.mode) {
+        dsbRuntime.claudePermissionMode = next.mode;
+        writeStoredString(STORAGE_KEY_CLAUDE_PERM, next.mode);
+      }
+      notifyBarRuntime();
+      return next;
+    }
+
+    function addExtAttachments(items) {
+      if (!Array.isArray(items) || items.length === 0) return;
+      const existing = dsbRuntime.extAttachments || [];
+      const seen = new Set(existing.map((a) => a && a.path));
+      const merged = existing.slice();
+      for (const it of items) {
+        if (!it || !it.path || seen.has(it.path)) continue;
+        seen.add(it.path);
+        merged.push(it);
+      }
+      dsbRuntime.extAttachments = merged;
+      notifyBarRuntime();
+      if (typeof dsbRuntime.scheduleLayoutReport === 'function') {
+        dsbRuntime.scheduleLayoutReport(240);
+      }
+    }
+
+    function removeExtAttachment(attId) {
+      dsbRuntime.extAttachments = (dsbRuntime.extAttachments || []).filter((a) => a && a.id !== attId);
+      notifyBarRuntime();
+      if (typeof dsbRuntime.scheduleLayoutReport === 'function') {
+        dsbRuntime.scheduleLayoutReport(200);
+      }
+    }
 
     function applyHarnessThemeAttribute(harnessId) {
       const norm = normalizeHarnessId(harnessId);
@@ -540,11 +623,12 @@ window.__ModuleLoader__.load({
       notifyBarRuntime();
     }
 
-    function submitExternalHarnessPrompt(rawText) {
+    function submitExternalHarnessPrompt(rawText, attachmentsInput) {
       const hId = dsbRuntime.activeHarness;
       if (hId === 'dsh') return false;
       const prompt = String(rawText || '').trim();
-      if (!prompt) return false;
+      const atts = Array.isArray(attachmentsInput) ? attachmentsInput : [];
+      if (!prompt && atts.length === 0) return false;
       if (dsbRuntime.externalActiveTurn && dsbRuntime.externalActiveTurn.harness === hId) {
         cancelActiveExternalTurn();
       }
@@ -552,9 +636,20 @@ window.__ModuleLoader__.load({
       const userMsgId = 'ext-u-' + turnId;
       const asstMsgId = 'ext-a-' + turnId;
       const sel = dsbRuntime.externalSelection[hId] || {};
+      const opts = dsbRuntime.harnessOptions[hId] || {};
+      const prefs = dsbRuntime.harnessPrefs[hId] || {};
+      const resolvedModel = prefs.model || opts.defaultModel || null;
+      const resolvedEffort = prefs.effort || opts.defaultEffort || null;
+      const resolvedMode = prefs.mode || opts.defaultMode || null;
+
+      const attNames = atts.map((a) => (a.kind === 'image' ? '🖼 ' : a.kind === 'folder' ? '📁 ' : '📎 ') + a.name);
+      const displayUserText = attNames.length > 0
+        ? attNames.join('  ') + (prompt ? '\n' + prompt : '')
+        : prompt;
+
       const prevList = Array.isArray(dsbRuntime.externalMessages[hId]) ? dsbRuntime.externalMessages[hId] : [];
       dsbRuntime.externalMessages[hId] = prevList.concat([
-        { id: userMsgId, role: 'user', text: prompt, streaming: false },
+        { id: userMsgId, role: 'user', text: displayUserText, streaming: false },
         { id: asstMsgId, role: 'assistant', text: '', streaming: true },
       ]);
       dsbRuntime.externalActiveTurn = {
@@ -564,10 +659,11 @@ window.__ModuleLoader__.load({
         toolNote: '',
       };
       if (!sel.sessionId) {
-        const snippet = prompt.replace(/\s+/g, ' ').slice(0, 22);
+        const seed = prompt || (atts[0] && atts[0].name) || '新对话';
+        const snippet = seed.replace(/\s+/g, ' ').slice(0, 22);
         dsbRuntime.externalSelection[hId] = {
           ...sel,
-          title: snippet + (prompt.length > 22 ? '…' : ''),
+          title: snippet + (seed.length > 22 ? '…' : ''),
         };
       }
       notifyBarRuntime();
@@ -580,7 +676,12 @@ window.__ModuleLoader__.load({
           cwd: sel.workspacePath || null,
           projectId: hId === 'antigravity' ? (sel.workspaceId || 'default-cli-project') : null,
           sessionId: sel.sessionId || null,
-          permissionMode: hId === 'claude_code' ? (dsbRuntime.claudePermissionMode || 'auto') : null,
+          permissionMode: hId === 'claude_code' ? (resolvedMode || dsbRuntime.claudePermissionMode || 'auto') : null,
+          model: resolvedModel,
+          effort: resolvedEffort,
+          sandboxMode: hId === 'codex' ? (resolvedMode || 'danger-full-access') : null,
+          executionMode: hId === 'antigravity' ? (resolvedMode || 'auto') : null,
+          attachments: atts.map((a) => ({ kind: a.kind || 'file', path: a.path, name: a.name })),
           prompt,
         },
       }).catch((err) => {
@@ -1165,7 +1266,7 @@ window.__ModuleLoader__.load({
         '  background: rgba(128, 128, 128, 0.28);',
         '  border-radius: 999px;',
         '}',
-        '[data-composer-card] {',
+        'html:not([data-dsh-bar-clone="1"]) [data-composer-card] {',
         '  position: relative !important;',
         '  z-index: 2 !important;',
         '  border-radius: 0 0 24px 24px !important;',
@@ -1175,7 +1276,7 @@ window.__ModuleLoader__.load({
         '  border: none !important;',
         '}',
         '[data-dsb-card] {',
-        '  box-shadow: 0 -12px 30px rgba(0, 0, 0, 0.34) !important;',
+        '  box-shadow: 0 18px 46px rgba(0, 0, 0, 0.48), 0 0 0 0.5px var(--dsw-alias-border-l2, rgba(255, 255, 255, 0.10)) inset !important;',
         '  border: none !important;',
         '}',
         '[data-dsb-card], [data-dsb-card] *:not([data-dsb-md]):not([data-dsb-md] *) {',
@@ -1188,27 +1289,16 @@ window.__ModuleLoader__.load({
         '[data-width-handle] {',
         '  z-index: 12 !important;',
         '}',
-        '[data-queue-dock] {',
-        '  padding: 0 !important;',
+        '@keyframes dsbUnreadPulse {',
+        '  0%, 100% { box-shadow: 0 0 0 0 rgba(56, 189, 248, 0.55); opacity: 1; }',
+        '  50% { box-shadow: 0 0 0 5px rgba(56, 189, 248, 0); opacity: 0.85; }',
         '}',
-        '[data-queue-dock] > div {',
-        '  border-radius: 0 !important;',
-        '  padding: 0 !important;',
+        '[data-dsb-drag-handle="1"]:hover > span:first-child {',
+        '  background: rgba(226, 232, 240, 0.78) !important;',
+        '  width: 46px !important;',
         '}',
-        '[data-queue-dock] > div::before {',
-        '  background: var(--dsb-surface, var(--dsw-alias-bg-layer-2)) !important;',
-        '  backdrop-filter: none !important;',
-        '}',
-        '[data-queue-dock] > div::after {',
-        '  border: none !important;',
-        '  border-bottom: 1px solid var(--dsb-divider-line, rgba(0, 0, 0, 0.32)) !important;',
-        '  box-shadow: inset 0 -2px 3px var(--dsb-divider-glow, rgba(0, 0, 0, 0.10)) !important;',
-        '}',
-        '[data-queue-dock] button {',
-        '  border-radius: 0 !important;',
-        '  color: var(--dsb-text, var(--dsw-alias-label-primary)) !important;',
-        '  font-weight: var(--dsb-weight, 400) !important;',
-        '  font-size: var(--dsb-fontsize, 13px) !important;',
+        '[data-dsb-drag-handle="1"]:active {',
+        '  cursor: grabbing !important;',
         '}',
         '[data-composer-card] span[class*="chip"],',
         '[data-composer-card] [data-quote-chip],',
@@ -1219,7 +1309,7 @@ window.__ModuleLoader__.load({
         '  white-space: nowrap !important;',
         '}',
         // =====================================================================
-        // ?dsh_bar_clone=1 — Bar Mode (transparent shell + zero-shadow clip)
+        // ?dsh_bar_clone=1 — Bar Mode (100% Untouched Native DSH Composer + Native Queue Dock!)
         // =====================================================================
         'html[data-dsh-bar-clone="1"],',
         'html[data-dsh-bar-clone="1"] body {',
@@ -1230,7 +1320,7 @@ window.__ModuleLoader__.load({
         '  overflow: hidden !important;',
         '  background: transparent !important;',
         '}',
-        'html[data-dsh-bar-clone="1"] body *:not(:has([data-composer-seat])):not([data-composer-seat]):not([data-composer-seat] *):not([data-dsb-popup]):not([data-dsb-popup] *):not([role="menu"]):not([role="menu"] *):not([role="listbox"]):not([role="listbox"] *):not([role="dialog"]):not([role="dialog"] *):not([data-radix-popper-content-wrapper]):not([data-radix-popper-content-wrapper] *):not([data-floating-ui-portal]):not([data-floating-ui-portal] *) {',
+        'html[data-dsh-bar-clone="1"] body *:not(:has([data-composer-seat])):not([data-composer-seat]):not([data-composer-seat] *):not([data-dsb-popup]):not([data-dsb-popup] *):not([role="menu"]):not([role="menu"] *):not([role="listbox"]):not([role="listbox"] *):not([role="dialog"]):not([role="dialog"] *):not([data-radix-popper-content-wrapper]):not([data-radix-popper-content-wrapper] *):not([data-floating-ui-portal]):not([data-floating-ui-portal] *):not([data-popover]):not([data-popover] *):not([data-dsw-popover]):not([data-dsw-popover] *) {',
         '  display: none !important;',
         '}',
         'html[data-dsh-bar-clone="1"] body *:has([data-composer-seat]) {',
@@ -2520,6 +2610,11 @@ window.__ModuleLoader__.load({
         const [pinned, setPinned] = useState(() =>
           IS_BAR ? false : readStoredBool(STORAGE_KEY_PINNED, false),
         );
+        const [historyOpen, setHistoryOpen] = useState(false);
+        const [hoverPeek, setHoverPeek] = useState(false);
+        const [composerPopover, setComposerPopover] = useState(null);
+        const hoverPeekTimerRef = useRef(null);
+        const lastKnownAsstRef = useRef({ sessionKey: '', asstId: '' });
         const [expandedHeight, setExpandedHeight] = useState(() =>
           readStoredNumber(STORAGE_KEY_HEIGHT, DEFAULT_EXPANDED_PX, MIN_EXPANDED_PX, MAX_EXPANDED_PX),
         );
@@ -2669,8 +2764,11 @@ window.__ModuleLoader__.load({
           dsbRuntime.setModeListener = (nextMode, wantExpanded = false) => {
             setBarModeState(nextMode);
             setPreviewExpanded(Boolean(wantExpanded));
+            setComposerPopover(null);
+            setHoverPeek(false);
             if (nextMode === 'lip') {
               setHovered(false);
+              setHistoryOpen(false);
               setPinned((prev) => {
                 if (prev) {
                   try { localStorage.setItem(STORAGE_KEY_PINNED, '0'); } catch {}
@@ -2680,6 +2778,9 @@ window.__ModuleLoader__.load({
               if (typeof dsbRuntime.setPopupCloseListener === 'function') {
                 dsbRuntime.setPopupCloseListener();
               }
+            } else if (wantExpanded) {
+              setHistoryOpen(true);
+              dsbRuntime.unreadCount = 0;
             }
           };
           return () => {
@@ -2772,7 +2873,49 @@ window.__ModuleLoader__.load({
           return count;
         }, [entries]);
 
-        const isExpanded = !dsbRuntime.popupOpen && (pinned || hovered || previewExpanded);
+        const isExpanded = IS_BAR
+          ? !dsbRuntime.popupOpen && (pinned || historyOpen || previewExpanded)
+          : !dsbRuntime.popupOpen && (pinned || hovered || previewExpanded);
+
+        // Load real composer options (models, efforts, modes, Codex plugins, slash actions) per Harness
+        useEffect(() => {
+          if (!IS_BAR || activeHarness === 'dsh') return;
+          if (!dsbRuntime.harnessOptions[activeHarness]) {
+            refreshHarnessOptions(activeHarness);
+          }
+          setComposerPopover(null);
+        }, [activeHarness]);
+
+        // Close composer popover on outside click or Esc
+        useEffect(() => {
+          if (!composerPopover || typeof document === 'undefined') return undefined;
+          const onDown = (e) => {
+            const target = e.target;
+            if (
+              target instanceof Element &&
+              (target.closest('[data-dsb-composer-popover="1"]') ||
+                target.closest('[data-dsb-plus-btn="1"]') ||
+                target.closest('[data-dsb-model-btn="1"]') ||
+                target.closest('[data-dsb-mode-btn="1"]'))
+            ) {
+              return;
+            }
+            setComposerPopover(null);
+          };
+          const onKey = (e) => {
+            if (e.key === 'Escape') {
+              e.preventDefault();
+              e.stopPropagation();
+              setComposerPopover(null);
+            }
+          };
+          document.addEventListener('mousedown', onDown, true);
+          document.addEventListener('keydown', onKey, true);
+          return () => {
+            document.removeEventListener('mousedown', onDown, true);
+            document.removeEventListener('keydown', onKey, true);
+          };
+        }, [composerPopover]);
 
         // Track explicit user submit intent inside [data-composer-card] (prevents async session hydration from misfiring 'submitted')
         // Also intercepts Enter / Send clicks when targeting Antigravity or Codex so messages never leak to DSH!
@@ -2885,6 +3028,31 @@ window.__ModuleLoader__.load({
           userMessageCount,
         ]);
 
+        // Scheme B: track unread replies arriving while Bar is Summoned with History Sheet closed
+        useEffect(() => {
+          if (!IS_BAR) return;
+          const sKey = activeHarness + ':' + effectiveSessionId;
+          const curId = latestAssistantHasText ? String(latestAssistant.id) : '';
+          const prev = lastKnownAsstRef.current;
+          if (prev.sessionKey !== sKey) {
+            lastKnownAsstRef.current = { sessionKey: sKey, asstId: curId };
+            return;
+          }
+          if (curId && prev.asstId && curId !== prev.asstId) {
+            lastKnownAsstRef.current = { sessionKey: sKey, asstId: curId };
+            if (barMode !== 'lip' && !isExpanded) {
+              dsbRuntime.unreadCount = (dsbRuntime.unreadCount || 0) + 1;
+              dsbRuntime.unreadPreview = stripMarkdownForLip(latestAssistant.text || '');
+              notifyBarRuntime();
+              if (typeof dsbRuntime.scheduleLayoutReport === 'function') {
+                dsbRuntime.scheduleLayoutReport(260);
+              }
+            }
+          } else if (curId && !prev.asstId) {
+            lastKnownAsstRef.current = { sessionKey: sKey, asstId: curId };
+          }
+        }, [activeHarness, effectiveSessionId, latestAssistantHasText ? String(latestAssistant.id) : '', barMode, isExpanded]);
+
         // Also detect queued message submission while streaming in Bar mode
         useEffect(() => {
           if (!IS_BAR || typeof document === 'undefined') return undefined;
@@ -2974,72 +3142,110 @@ window.__ModuleLoader__.load({
           };
         }, []);
 
-        // Measure and report Bar layout + shapes to Tauri
+        // Measure and report Bar layout + SEPARATE detached Win32 rounded-rect shapes to Tauri
         const measureAndReportLayout = useCallback(() => {
           if (!IS_BAR || typeof document === 'undefined') return;
           const cardEl = document.querySelector('[data-dsb-card]');
+          const peekEl = document.querySelector('[data-dsb-floating-peek="1"]');
+          const toastEl = document.querySelector('[data-dsb-floating-toast="1"]');
           const composerEl =
             barMode === 'lip'
               ? null
               : dsbRuntime.activeHarness !== 'dsh'
                 ? document.querySelector('[data-dsb-external-composer]')
                 : document.querySelector('[data-composer-card]');
+          const queueEl =
+            barMode === 'lip' || dsbRuntime.activeHarness !== 'dsh'
+              ? null
+              : document.querySelector('[data-queue-dock]');
+
           const cr = cardEl ? cardEl.getBoundingClientRect() : null;
+          const prPeek = peekEl ? peekEl.getBoundingClientRect() : null;
+          const prToast = toastEl ? toastEl.getBoundingClientRect() : null;
           const ir = composerEl ? composerEl.getBoundingClientRect() : null;
-
-          let slabLeft = 0;
-          let slabTop = 0;
-          let slabRight = barWidth;
-          let slabBottom = window.innerHeight;
-          let hasSlab = false;
-
-          if (cr && cr.width > 10 && cr.height > 10) {
-            slabLeft = cr.left;
-            slabTop = cr.top;
-            slabRight = cr.right;
-            slabBottom = cr.bottom;
-            hasSlab = true;
-          }
-          if (ir && ir.width > 10 && ir.height > 10) {
-            if (hasSlab) {
-              slabLeft = Math.min(slabLeft, ir.left);
-              slabTop = Math.min(slabTop, ir.top);
-              slabRight = Math.max(slabRight, ir.right);
-              slabBottom = Math.max(slabBottom, ir.bottom);
-            } else {
-              slabLeft = ir.left;
-              slabTop = ir.top;
-              slabRight = ir.right;
-              slabBottom = ir.bottom;
-              hasSlab = true;
-            }
-          }
+          const qr = queueEl ? queueEl.getBoundingClientRect() : null;
+          const hasQueue = Boolean(qr && qr.width > 12 && qr.height > 4);
 
           const shapes = [];
           const cornerRadius = getHarnessMeta(dsbRuntime.activeHarness).cornerRadius || CARD_RADIUS_PX;
-          if (hasSlab) {
+
+          // 1. Composer shape (100% pure native silhouette)
+          if (ir && ir.width > 10 && ir.height > 10) {
             shapes.push({
-              x: Math.round(slabLeft),
-              y: Math.round(slabTop),
-              w: Math.round(slabRight - slabLeft),
-              h: Math.round(slabBottom - slabTop),
+              x: Math.round(ir.left),
+              y: Math.round(ir.top),
+              w: Math.round(ir.width),
+              h: Math.round(ir.height),
               r: cornerRadius,
             });
           }
 
-          const cardTarget = isExpanded ? expandedHeight : COLLAPSED_LIP_PX;
-          const queueEl = barMode === 'lip' ? null : document.querySelector('[data-queue-dock]');
-          const qr = queueEl ? queueEl.getBoundingClientRect() : null;
-          const hasQueue = !!(qr && qr.height > 1);
-          let targetHeight = cardTarget;
-          if (ir && ir.height > 0 && barMode !== 'lip') {
-            const anchorTop = hasQueue ? Math.min(ir.top, qr.top) : ir.top;
-            const composerSpan = Math.max(ir.height, ir.bottom - anchorTop);
-            targetHeight = cardTarget + Math.ceil(composerSpan);
+          // 2. Native DSH Queue Dock shape (untouched native rounded top cap!)
+          if (hasQueue && qr) {
+            shapes.push({
+              x: Math.round(qr.left),
+              y: Math.round(qr.top),
+              w: Math.round(qr.width),
+              h: Math.round(qr.height),
+              r: 14,
+            });
           }
 
+          // 3. Detached Floating History Sheet / Lip Pill (with transparent 8px click-through gap!)
+          if (cr && cr.width > 10 && cr.height > 10) {
+            shapes.push({
+              x: Math.round(cr.left),
+              y: Math.round(cr.top),
+              w: Math.round(cr.width),
+              h: Math.round(cr.height),
+              r: barMode === 'lip' ? 24 : cornerRadius,
+            });
+          }
+
+          // 4. Detached Hover Peek or Unread Toast
+          if (prPeek && prPeek.width > 12 && prPeek.height > 12) {
+            shapes.push({
+              x: Math.round(prPeek.left),
+              y: Math.round(prPeek.top),
+              w: Math.round(prPeek.width),
+              h: Math.round(prPeek.height),
+              r: 16,
+            });
+          }
+          if (prToast && prToast.width > 12 && prToast.height > 12) {
+            shapes.push({
+              x: Math.round(prToast.left),
+              y: Math.round(prToast.top),
+              w: Math.round(prToast.width),
+              h: Math.round(prToast.height),
+              r: 20,
+            });
+          }
+
+          // Compute exact bottom-up window height (zero dead Lip height when History is closed!)
+          let targetHeight = COLLAPSED_LIP_PX;
+          if (barMode === 'lip') {
+            targetHeight = COLLAPSED_LIP_PX;
+          } else {
+            let baseSpan = 0;
+            if (ir && ir.height > 0) {
+              const anchorTop = hasQueue && qr ? Math.min(ir.top, qr.top) : ir.top;
+              baseSpan = Math.ceil(Math.max(ir.height, ir.bottom - anchorTop));
+            }
+            let detachedTop = 0;
+            if (isExpanded) {
+              detachedTop = expandedHeight + DETACHED_GAP_PX;
+            } else if (prToast && prToast.height > 4) {
+              detachedTop = Math.ceil(prToast.height) + DETACHED_GAP_PX;
+            } else if (prPeek && prPeek.height > 4) {
+              detachedTop = Math.ceil(prPeek.height) + DETACHED_GAP_PX;
+            }
+            targetHeight = Math.max(COLLAPSED_LIP_PX, baseSpan + detachedTop);
+          }
+
+          // 5. All open popups (Harness 3-level switcher, composer +/model/mode menus, AND DSH native popups!)
           const popupEls = document.querySelectorAll(
-            '[data-dsb-popup], [role="menu"], [role="listbox"], [role="dialog"], [data-radix-popper-content-wrapper], [data-floating-ui-portal]',
+            '[data-dsb-popup], [role="menu"], [role="listbox"], [role="dialog"], [data-radix-popper-content-wrapper], [data-floating-ui-portal], [data-popover], [data-dsw-popover]',
           );
           for (const el of popupEls) {
             if (!(el instanceof HTMLElement)) continue;
@@ -3076,16 +3282,13 @@ window.__ModuleLoader__.load({
             const neededForPopup =
               Number.isFinite(explicitBottom) && explicitBottom > 0
                 ? Math.ceil(explicitBottom + pr.height + 8)
-                : Math.ceil(window.innerHeight - pr.top + 6);
+                : Math.ceil(window.innerHeight - pr.top + 8);
             if (neededForPopup > targetHeight) {
               targetHeight = neededForPopup;
             }
           }
 
           targetHeight = Math.max(COLLAPSED_LIP_PX, Math.min(880, Math.ceil(targetHeight)));
-          // Because the Tauri window is bottom-anchored, any pending vertical resize shifts
-          // every bottom-anchored element's viewport `top` by `deltaY = targetHeight - innerHeight`.
-          // Pre-adjusting `shape.y` keeps Win32 SetWindowRgn pixel-exact even on Frame 1!
           const deltaY = Math.round(targetHeight - window.innerHeight);
           const adjustedShapes =
             deltaY !== 0
@@ -3103,7 +3306,7 @@ window.__ModuleLoader__.load({
             width: Math.round(barWidth),
             shapes: adjustedShapes,
           });
-        }, [barMode, barWidth, isExpanded, expandedHeight, activeHarness]);
+        }, [barMode, barWidth, isExpanded, expandedHeight, activeHarness, hoverPeek, composerPopover]);
 
         const scheduleLayoutReport = useCallback(
           (durationMs = 280) => {
@@ -3200,32 +3403,12 @@ window.__ModuleLoader__.load({
             }
           };
 
-          const syncQueueDock = (rect, cs) => {
+          // Read-only Queue Dock rect inspection in Bar mode (NEVER mutates native DSH [data-queue-dock] styles!)
+          const readQueueDockRect = () => {
+            if (dsbRuntime.activeHarness !== 'dsh') return null;
             const queueDock = document.querySelector('[data-queue-dock]');
             const qr = queueDock ? queueDock.getBoundingClientRect() : null;
-            const hasQueue = !!(qr && qr.height > 1);
-            if (hasQueue && queueDock) {
-              const panel = queueDock.firstElementChild;
-              if (panel) panel.style.borderRadius = '0px';
-              queueDock.style.width = rect.width + 'px';
-              queueDock.style.maxWidth = rect.width + 'px';
-              queueDock.style.transform = 'none';
-              const qrr = queueDock.getBoundingClientRect();
-              const qdx = Math.round((rect.left - qrr.left) * 100) / 100;
-              if (Math.abs(qdx) > 0.01) queueDock.style.transform = 'translateX(' + qdx + 'px)';
-              queueDock.style.setProperty('--dsb-surface', cs.backgroundColor);
-              queueDock.style.setProperty('--dsb-text', cs.color);
-              queueDock.style.setProperty('--dsb-weight', cs.fontWeight);
-              queueDock.style.setProperty('--dsb-fontsize', cs.fontSize);
-              let isDark = true;
-              const m = String(cs.backgroundColor || '').match(/rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/i);
-              if (m) {
-                isDark = (0.299 * Number(m[1]) + 0.587 * Number(m[2]) + 0.114 * Number(m[3])) / 255 < 0.5;
-              }
-              queueDock.style.setProperty('--dsb-divider-line', isDark ? 'rgba(0,0,0,0.32)' : 'rgba(0,0,0,0.075)');
-              queueDock.style.setProperty('--dsb-divider-glow', isDark ? 'rgba(0,0,0,0.10)' : 'rgba(0,0,0,0.025)');
-            }
-            return hasQueue ? qr : null;
+            return qr && qr.height > 4 ? qr : null;
           };
 
           const syncWidth = () => {
@@ -3233,6 +3416,8 @@ window.__ModuleLoader__.load({
             const wrap = wrapRef.current;
             if (!wrap) return;
             const cardEl = wrap.querySelector('[data-dsb-card]');
+            const floatAnchorEl =
+              wrap.querySelector('[data-dsb-floating-anchor="1"]') || cardEl;
 
             if (IS_BAR) {
               if (composerCard && barMode !== 'lip') {
@@ -3269,16 +3454,17 @@ window.__ModuleLoader__.load({
                   cardEl.style.fontFamily = cs.fontFamily;
                   applyDividerTheme(cardEl, cs.backgroundColor);
                 }
-
+              }
+              if (composerCard && floatAnchorEl) {
                 if (barMode !== 'lip') {
                   const rect = composerCard.getBoundingClientRect();
-                  const qr = syncQueueDock(rect, cs);
+                  const qr = readQueueDockRect();
                   const anchorTop = qr ? Math.min(rect.top, qr.top) : rect.top;
                   const wr = wrap.getBoundingClientRect();
                   const gap = Math.round((anchorTop - wr.bottom) * 100) / 100;
-                  cardEl.style.bottom = (-gap) + 'px';
+                  floatAnchorEl.style.bottom = (-gap + DETACHED_GAP_PX) + 'px';
                 } else {
-                  cardEl.style.bottom = '0px';
+                  floatAnchorEl.style.bottom = '0px';
                 }
               }
               setMatchedCardWidth(barWidth);
@@ -3308,7 +3494,7 @@ window.__ModuleLoader__.load({
               cardEl.style.fontFamily = cs.fontFamily;
               applyDividerTheme(cardEl, cs.backgroundColor);
 
-              const qr = syncQueueDock(rect, cs);
+              const qr = readQueueDockRect();
               const anchorTop = qr ? Math.min(rect.top, qr.top) : rect.top;
               const wr = wrap.getBoundingClientRect();
               const gap = Math.round((anchorTop - wr.bottom) * 100) / 100;
@@ -3676,32 +3862,81 @@ window.__ModuleLoader__.load({
           );
         };
 
-        const handleStartDragWindow = useCallback((e) => {
-          if (!IS_BAR || e.button !== 0) return;
-          e.preventDefault();
-          e.stopPropagation();
-          let active = true;
-          let rafId = 0;
-          tauriInvoke('bar_drag_begin').catch(() => {});
-          const step = () => {
-            rafId = 0;
-            if (!active) return;
-            tauriInvoke('bar_drag_step').catch(() => {});
-          };
-          const onMove = () => {
-            if (!active || rafId) return;
-            rafId = requestAnimationFrame(step);
-          };
-          const onUp = () => {
-            active = false;
-            if (rafId) cancelAnimationFrame(rafId);
-            tauriInvoke('bar_drag_end').catch(() => {});
-            window.removeEventListener('mousemove', onMove);
-            window.removeEventListener('mouseup', onUp);
-          };
-          window.addEventListener('mousemove', onMove);
-          window.addEventListener('mouseup', onUp);
-        }, []);
+        // Scheme B 3-in-1 Top-Inside Handle: Drag (>4px) moves window | Click (<=4px) toggles Detached History | Hover (240ms) peeks latest reply | Double-click resets center
+        const toggleHistorySheet = useCallback(() => {
+          if (hoverPeekTimerRef.current) {
+            clearTimeout(hoverPeekTimerRef.current);
+            hoverPeekTimerRef.current = null;
+          }
+          setHoverPeek(false);
+          setHistoryOpen((prev) => {
+            const next = !prev;
+            if (next) {
+              dsbRuntime.unreadCount = 0;
+              dsbRuntime.unreadPreview = '';
+            } else {
+              setPreviewExpanded(false);
+              setPinned((wasPin) => {
+                if (wasPin) {
+                  try { localStorage.setItem(STORAGE_KEY_PINNED, '0'); } catch {}
+                }
+                return false;
+              });
+            }
+            notifyBarRuntime();
+            scheduleLayoutReport(300);
+            return next;
+          });
+        }, [scheduleLayoutReport]);
+
+        const handleStartDragOrToggle = useCallback(
+          (e) => {
+            if (!IS_BAR || e.button !== 0) return;
+            e.preventDefault();
+            e.stopPropagation();
+            if (hoverPeekTimerRef.current) {
+              clearTimeout(hoverPeekTimerRef.current);
+              hoverPeekTimerRef.current = null;
+            }
+            const startX = e.screenX;
+            const startY = e.screenY;
+            let dragged = false;
+            let dragStarted = false;
+            let active = true;
+            let rafId = 0;
+            const step = () => {
+              rafId = 0;
+              if (!active || !dragStarted) return;
+              tauriInvoke('bar_drag_step').catch(() => {});
+            };
+            const onMove = (mv) => {
+              if (!active) return;
+              if (!dragged && (Math.abs(mv.screenX - startX) > 4 || Math.abs(mv.screenY - startY) > 4)) {
+                dragged = true;
+                dragStarted = true;
+                setHoverPeek(false);
+                tauriInvoke('bar_drag_begin').catch(() => {});
+              }
+              if (dragStarted && !rafId) {
+                rafId = requestAnimationFrame(step);
+              }
+            };
+            const onUp = () => {
+              active = false;
+              if (rafId) cancelAnimationFrame(rafId);
+              if (dragStarted) {
+                tauriInvoke('bar_drag_end').catch(() => {});
+              } else {
+                toggleHistorySheet();
+              }
+              window.removeEventListener('mousemove', onMove);
+              window.removeEventListener('mouseup', onUp);
+            };
+            window.addEventListener('mousemove', onMove);
+            window.addEventListener('mouseup', onUp);
+          },
+          [toggleHistorySheet],
+        );
 
         const handleResetWindowPos = useCallback((e) => {
           if (!IS_BAR) return;
@@ -3710,27 +3945,54 @@ window.__ModuleLoader__.load({
           tauriInvoke('bar_drag_reset').catch(() => {});
         }, []);
 
+        const handleHandleMouseEnter = useCallback(() => {
+          if (!IS_BAR || barMode === 'lip' || isExpanded || (dsbRuntime.unreadCount || 0) > 0) return;
+          if (!latestSingleLine) return;
+          if (hoverPeekTimerRef.current) clearTimeout(hoverPeekTimerRef.current);
+          hoverPeekTimerRef.current = setTimeout(() => {
+            setHoverPeek(true);
+            scheduleLayoutReport(220);
+          }, 240);
+        }, [barMode, isExpanded, latestSingleLine, scheduleLayoutReport]);
+
+        const handleHandleMouseLeave = useCallback(() => {
+          if (hoverPeekTimerRef.current) {
+            clearTimeout(hoverPeekTimerRef.current);
+            hoverPeekTimerRef.current = null;
+          }
+          setHoverPeek((prev) => {
+            if (prev) scheduleLayoutReport(180);
+            return false;
+          });
+        }, [scheduleLayoutReport]);
+
         const renderDragHandle = (extraStyle) => {
           if (!IS_BAR || barMode === 'lip') return null;
+          const hasUnread = !isExpanded && (dsbRuntime.unreadCount || 0) > 0;
           return h(
             'div',
             {
               'data-dsb-drag-handle': '1',
-              title: '按住拖动移动窗口位置 · 双击恢复底部居中',
-              onMouseDown: handleStartDragWindow,
+              title: isExpanded
+                ? '单击收起聊天记录 · 按住拖动窗口 · 双击复位居中'
+                : '单击展开聊天记录 · 悬停轻瞥最新回复 · 按住拖动窗口 · 双击复位',
+              onMouseDown: handleStartDragOrToggle,
               onDoubleClick: handleResetWindowPos,
+              onMouseEnter: handleHandleMouseEnter,
+              onMouseLeave: handleHandleMouseLeave,
               style: Object.assign(
                 {
                   position: 'absolute',
-                  top: '2px',
+                  top: '1px',
                   left: '50%',
                   transform: 'translateX(-50%)',
-                  width: '56px',
-                  height: '12px',
+                  width: '72px',
+                  height: '13px',
                   display: 'flex',
                   alignItems: 'center',
                   justifyContent: 'center',
-                  cursor: 'grab',
+                  gap: '5px',
+                  cursor: 'pointer',
                   zIndex: 25,
                   userSelect: 'none',
                 },
@@ -3742,11 +4004,26 @@ window.__ModuleLoader__.load({
                 width: '36px',
                 height: '3.5px',
                 borderRadius: '999px',
-                background: 'rgba(165, 172, 186, 0.36)',
+                background: isExpanded
+                  ? 'rgba(125, 211, 252, 0.72)'
+                  : 'rgba(165, 172, 186, 0.36)',
                 pointerEvents: 'none',
-                transition: 'background 0.14s ease',
+                transition: 'all 0.16s ease',
               },
             }),
+            hasUnread
+              ? h('span', {
+                  style: {
+                    width: '6px',
+                    height: '6px',
+                    borderRadius: '999px',
+                    background: '#38bdf8',
+                    animation: 'dsbUnreadPulse 2s infinite',
+                    pointerEvents: 'none',
+                    flexShrink: 0,
+                  },
+                })
+              : null,
           );
         };
 
@@ -4285,17 +4562,261 @@ window.__ModuleLoader__.load({
         };
 
         const cardBorderRadius =
-          IS_BAR && barMode === 'lip'
-            ? CARD_RADIUS_PX + 'px'
+          IS_BAR
+            ? (barMode === 'lip' ? CARD_RADIUS_PX : getHarnessMeta(activeHarness).cornerRadius || CARD_RADIUS_PX) + 'px'
             : CARD_RADIUS_PX + 'px ' + CARD_RADIUS_PX + 'px 0 0';
 
         const extCapsules = dsbRuntime.extCapsules || [];
+        const extAttachments = dsbRuntime.extAttachments || [];
         const extDraft = dsbRuntime.extDraftText || '';
         const activeTurn = dsbRuntime.externalActiveTurn;
         const isExtStreaming = Boolean(activeTurn && activeTurn.harness === activeHarness);
         const activeAvail =
           (dsbRuntime.harnessAvailability || []).find((a) => a && a.id === activeHarness) || null;
         const extSel = dsbRuntime.externalSelection[activeHarness] || {};
+        const activeHarnessOpts = dsbRuntime.harnessOptions[activeHarness] || null;
+        const activeHarnessPrefs = dsbRuntime.harnessPrefs[activeHarness] || {};
+
+        const insertTextIntoExtComposer = (snippet) => {
+          const prev = dsbRuntime.extDraftText || '';
+          const sep = prev && !/\s$/.test(prev) ? ' ' : '';
+          dsbRuntime.extDraftText = prev + sep + snippet;
+          notifyBarRuntime();
+          focusComposerElement();
+          scheduleLayoutReport(200);
+        };
+
+        const pickFilesForExtComposer = (imagesOnly) => {
+          const initDir = (extSel && extSel.workspacePath) || '';
+          tauriInvoke('app_pick_files', { initialDir: initDir || null, imagesOnly: Boolean(imagesOnly) })
+            .then((list) => {
+              if (Array.isArray(list) && list.length > 0) addExtAttachments(list);
+              focusComposerElement();
+            })
+            .catch(() => {});
+        };
+
+        const pickFolderForExtComposer = () => {
+          const initDir = (extSel && extSel.workspacePath) || '';
+          tauriInvoke('app_pick_folder', { initialDir: initDir || null })
+            .then((picked) => {
+              if (typeof picked === 'string' && picked.trim()) {
+                return tauriInvoke('app_describe_paths', { paths: [picked.trim()] }).then((list) => {
+                  if (Array.isArray(list) && list.length > 0) addExtAttachments(list);
+                });
+              }
+              return null;
+            })
+            .then(() => focusComposerElement())
+            .catch(() => {});
+        };
+
+        const handleExtPaste = (ev) => {
+          const cd = ev.clipboardData;
+          if (!cd) return;
+          const items = cd.items ? Array.from(cd.items) : [];
+          const imageItems = items.filter((it) => it && it.kind === 'file' && /^image\//i.test(it.type || ''));
+          if (imageItems.length > 0) {
+            ev.preventDefault();
+            for (const imgItem of imageItems) {
+              const file = imgItem.getAsFile();
+              if (!file) continue;
+              const reader = new FileReader();
+              reader.onload = () => {
+                const dataUrl = typeof reader.result === 'string' ? reader.result : '';
+                if (!dataUrl) return;
+                tauriInvoke('app_save_clipboard_image', {
+                  base64Data: dataUrl,
+                  mime: file.type || 'image/png',
+                })
+                  .then((att) => {
+                    if (att) addExtAttachments([att]);
+                  })
+                  .catch(() => {});
+              };
+              reader.readAsDataURL(file);
+            }
+            return;
+          }
+          // Check Windows CF_HDROP when user copied files or folders in Explorer (Ctrl+C -> Ctrl+V)
+          const plain = cd.getData ? cd.getData('text/plain') : '';
+          if (!plain || (cd.files && cd.files.length > 0)) {
+            tauriInvoke('app_read_clipboard_files')
+              .then((list) => {
+                if (Array.isArray(list) && list.length > 0) {
+                  addExtAttachments(list);
+                }
+              })
+              .catch(() => {});
+          }
+        };
+
+        const handleExtDragOver = (ev) => {
+          ev.preventDefault();
+        };
+
+        const handleExtDrop = (ev) => {
+          ev.preventDefault();
+          const dt = ev.dataTransfer;
+          if (!dt || !dt.files || dt.files.length === 0) return;
+          const files = Array.from(dt.files);
+          const localPaths = [];
+          for (const f of files) {
+            if (typeof f.path === 'string' && f.path.trim()) {
+              localPaths.push(f.path.trim());
+            } else if (/^image\//i.test(f.type || '')) {
+              const reader = new FileReader();
+              reader.onload = () => {
+                const dataUrl = typeof reader.result === 'string' ? reader.result : '';
+                if (!dataUrl) return;
+                tauriInvoke('app_save_clipboard_image', {
+                  base64Data: dataUrl,
+                  mime: f.type || 'image/png',
+                })
+                  .then((att) => {
+                    if (att) addExtAttachments([att]);
+                  })
+                  .catch(() => {});
+              };
+              reader.readAsDataURL(f);
+            }
+          }
+          if (localPaths.length > 0) {
+            tauriInvoke('app_describe_paths', { paths: localPaths })
+              .then((list) => {
+                if (Array.isArray(list) && list.length > 0) addExtAttachments(list);
+              })
+              .catch(() => {});
+          }
+        };
+
+        const openComposerPopover = (kind, anchorEl) => {
+          setComposerPopover((prev) => {
+            if (prev && prev.kind === kind) return null;
+            let left = 12;
+            let bottom = 92;
+            if (anchorEl && typeof anchorEl.getBoundingClientRect === 'function') {
+              const r = anchorEl.getBoundingClientRect();
+              left = Math.max(8, Math.round(r.left));
+              bottom = Math.max(48, Math.round(window.innerHeight - r.top + 8));
+            }
+            scheduleLayoutReport(260);
+            return { kind, left, bottom };
+          });
+        };
+
+        const renderExtAttachmentsRow = () => {
+          if (extAttachments.length === 0) return null;
+          return h(
+            'div',
+            {
+              style: {
+                display: 'flex',
+                flexWrap: 'wrap',
+                alignItems: 'center',
+                gap: '6px',
+                marginBottom: '8px',
+              },
+            },
+            extAttachments.map((att) =>
+              att.kind === 'image' && att.previewDataUrl
+                ? h(
+                    'div',
+                    {
+                      key: att.id,
+                      title: att.path,
+                      style: {
+                        position: 'relative',
+                        width: '44px',
+                        height: '44px',
+                        borderRadius: '10px',
+                        overflow: 'hidden',
+                        border: '1px solid rgba(255,255,255,0.16)',
+                        background: 'rgba(0,0,0,0.35)',
+                        flexShrink: 0,
+                      },
+                    },
+                    h('img', {
+                      src: att.previewDataUrl,
+                      alt: att.name,
+                      style: { width: '100%', height: '100%', objectFit: 'cover', display: 'block' },
+                    }),
+                    h(
+                      'button',
+                      {
+                        type: 'button',
+                        title: '移除图片',
+                        onClick: (ev) => {
+                          ev.stopPropagation();
+                          removeExtAttachment(att.id);
+                        },
+                        style: {
+                          position: 'absolute',
+                          top: '2px',
+                          right: '2px',
+                          width: '16px',
+                          height: '16px',
+                          borderRadius: '999px',
+                          border: 'none',
+                          background: 'rgba(0,0,0,0.72)',
+                          color: '#fff',
+                          fontSize: '11px',
+                          lineHeight: 1,
+                          cursor: 'pointer',
+                          padding: 0,
+                        },
+                      },
+                      '×',
+                    ),
+                  )
+                : h(
+                    'span',
+                    {
+                      key: att.id,
+                      title: att.path,
+                      style: {
+                        display: 'inline-flex',
+                        alignItems: 'center',
+                        gap: '5px',
+                        padding: '3px 8px',
+                        borderRadius: '8px',
+                        fontSize: '12px',
+                        background: 'rgba(255,255,255,0.08)',
+                        border: '1px solid rgba(255,255,255,0.14)',
+                        color: '#e5e7eb',
+                        maxWidth: '220px',
+                      },
+                    },
+                    h('span', { style: { flexShrink: 0 } }, att.kind === 'folder' ? '📁' : '📎'),
+                    h(
+                      'span',
+                      { style: { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } },
+                      att.name,
+                    ),
+                    h(
+                      'button',
+                      {
+                        type: 'button',
+                        onClick: (ev) => {
+                          ev.stopPropagation();
+                          removeExtAttachment(att.id);
+                        },
+                        style: {
+                          border: 'none',
+                          background: 'transparent',
+                          color: 'rgba(229,231,235,0.68)',
+                          cursor: 'pointer',
+                          padding: '0 2px',
+                          fontSize: '12px',
+                          lineHeight: 1,
+                        },
+                      },
+                      '×',
+                    ),
+                  ),
+            ),
+          );
+        };
 
         const submitExternalComposer = () => {
           if (isExtStreaming) {
@@ -4308,12 +4829,14 @@ window.__ModuleLoader__.load({
           }
           if (extDraft.trim()) parts.push(extDraft.trim());
           const fullText = parts.join('\n').trim();
-          if (!fullText) return;
+          const attsToSend = extAttachments.slice();
+          if (!fullText && attsToSend.length === 0) return;
           dsbRuntime.extDraftText = '';
           dsbRuntime.extCapsules = [];
+          dsbRuntime.extAttachments = [];
           sendBarReport({ kind: 'capsules', capsuleCount: 0, afterInsert: false });
           notifyBarRuntime();
-          submitExternalHarnessPrompt(fullText);
+          submitExternalHarnessPrompt(fullText, attsToSend);
         };
 
         const removeExtCapsule = (capId) => {
@@ -4567,6 +5090,261 @@ window.__ModuleLoader__.load({
           );
         };
 
+        const renderComposerPopover = () => {
+          if (!IS_BAR || !composerPopover || activeHarness === 'dsh') return null;
+          const opts = activeHarnessOpts || {};
+          const prefs = activeHarnessPrefs || {};
+          const meta = getHarnessMeta(activeHarness);
+          const panelBg =
+            activeHarness === 'codex'
+              ? '#262626'
+              : activeHarness === 'claude_code'
+                ? '#2B2B29'
+                : '#1b1c1f';
+          const panelBorder =
+            activeHarness === 'claude_code'
+              ? 'rgba(255,248,240,0.12)'
+              : 'rgba(255,255,255,0.11)';
+
+          const rowBtn = (key, iconStr, title, sub, active, onClick) =>
+            h(
+              'button',
+              {
+                key,
+                type: 'button',
+                onClick: (ev) => {
+                  ev.stopPropagation();
+                  onClick();
+                },
+                style: {
+                  width: '100%',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  gap: '10px',
+                  padding: '7px 10px',
+                  borderRadius: '8px',
+                  border: 'none',
+                  background: active ? 'rgba(255,255,255,0.10)' : 'transparent',
+                  color: '#f3f4f6',
+                  cursor: 'pointer',
+                  textAlign: 'left',
+                  fontSize: '12.5px',
+                },
+              },
+              h(
+                'div',
+                { style: { display: 'flex', alignItems: 'center', gap: '8px', minWidth: 0 } },
+                iconStr ? h('span', { style: { width: '16px', textAlign: 'center', opacity: 0.85, flexShrink: 0 } }, iconStr) : null,
+                h(
+                  'div',
+                  { style: { minWidth: 0 } },
+                  h('div', { style: { fontWeight: 500, color: '#f3f4f6', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' } }, title),
+                  sub ? h('div', { style: { fontSize: '11px', color: 'rgba(209,213,219,0.56)', marginTop: '1px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' } }, sub) : null,
+                ),
+              ),
+              active ? h('span', { style: { color: meta.accent, fontSize: '12px', fontWeight: 700 } }, '✓') : null,
+            );
+
+          let content = null;
+          let panelWidth = 256;
+
+          if (composerPopover.kind === 'plus') {
+            if (activeHarness === 'antigravity') {
+              panelWidth = 236;
+              const actions = Array.isArray(opts.actions) ? opts.actions : [];
+              content = [
+                h('div', { key: 'hdr', style: { fontSize: '11px', color: 'rgba(209,213,219,0.52)', padding: '3px 10px 5px', fontWeight: 500 } }, 'Add Context'),
+                rowBtn('files', '📎', 'Files', '选择本地文件或图片', false, () => {
+                  setComposerPopover(null);
+                  pickFilesForExtComposer(false);
+                }),
+                rowBtn('folder', '📁', 'Folder', '附加文件夹上下文', false, () => {
+                  setComposerPopover(null);
+                  pickFolderForExtComposer();
+                }),
+                rowBtn('mentions', '@', 'Mentions', '插入 @ 引用文件或上下文', false, () => {
+                  setComposerPopover(null);
+                  insertTextIntoExtComposer('@');
+                }),
+                rowBtn('browser', '🌐', 'Browser', '插入 /browser 浏览网页', false, () => {
+                  setComposerPopover(null);
+                  insertTextIntoExtComposer('/browser ');
+                }),
+                actions.length > 0
+                  ? h('div', { key: 'act-hdr', style: { fontSize: '11px', color: 'rgba(209,213,219,0.48)', padding: '7px 10px 3px', borderTop: '1px solid rgba(255,255,255,0.07)', marginTop: '4px' } }, 'Actions')
+                  : null,
+                ...actions.map((a) =>
+                  rowBtn('act-' + a.id, '◫', a.label, a.desc, false, () => {
+                    setComposerPopover(null);
+                    insertTextIntoExtComposer(a.id + ' ');
+                  }),
+                ),
+              ];
+            } else if (activeHarness === 'codex') {
+              panelWidth = 286;
+              const plugins = Array.isArray(opts.plugins) ? opts.plugins : [];
+              content = [
+                h('div', { key: 'hdr-add', style: { fontSize: '11px', color: 'rgba(209,213,219,0.52)', padding: '3px 10px 5px' } }, '添加'),
+                rowBtn('cx-files', '📎', '文件和文件夹', '选择图片 / 文件附加给 Codex', false, () => {
+                  setComposerPopover(null);
+                  pickFilesForExtComposer(false);
+                }),
+                rowBtn('cx-folder', '📁', '附加文件夹', '选择目录路径作为上下文', false, () => {
+                  setComposerPopover(null);
+                  pickFolderForExtComposer();
+                }),
+                rowBtn('cx-goal', '🎯', '目标', '设置要持续追求的目标', false, () => {
+                  setComposerPopover(null);
+                  insertTextIntoExtComposer('/goal ');
+                }),
+                rowBtn('cx-plan', '💡', '计划模式', '开启计划模式（先出方案再动手）', false, () => {
+                  setComposerPopover(null);
+                  insertTextIntoExtComposer('/plan ');
+                }),
+                plugins.length > 0
+                  ? h('div', { key: 'hdr-plg', style: { fontSize: '11px', color: 'rgba(209,213,219,0.52)', padding: '7px 10px 4px', borderTop: '1px solid rgba(255,255,255,0.07)', marginTop: '4px' } }, '插件')
+                  : null,
+                ...plugins.slice(0, 6).map((p) =>
+                  rowBtn('plg-' + p.id, '🧩', p.label, p.desc, false, () => {
+                    setComposerPopover(null);
+                    insertTextIntoExtComposer('使用 ' + p.label + ' 插件：');
+                  }),
+                ),
+              ];
+            } else {
+              panelWidth = 250;
+              const actions = Array.isArray(opts.actions) ? opts.actions : [];
+              content = [
+                h('div', { key: 'hdr-cc', style: { fontSize: '11px', color: 'rgba(234,230,223,0.52)', padding: '3px 10px 5px' } }, '添加上下文'),
+                rowBtn('cc-files', '📎', '添加文件', '选择任意本地文件', false, () => {
+                  setComposerPopover(null);
+                  pickFilesForExtComposer(false);
+                }),
+                rowBtn('cc-imgs', '🖼', '添加图片', '选择截图或图片附件', false, () => {
+                  setComposerPopover(null);
+                  pickFilesForExtComposer(true);
+                }),
+                rowBtn('cc-dir', '📁', '添加工作目录', '以 --add-dir 授权给 Claude', false, () => {
+                  setComposerPopover(null);
+                  pickFolderForExtComposer();
+                }),
+                actions.length > 0
+                  ? h('div', { key: 'cc-act-hdr', style: { fontSize: '11px', color: 'rgba(234,230,223,0.48)', padding: '7px 10px 3px', borderTop: '1px solid rgba(255,248,240,0.08)', marginTop: '4px' } }, '斜杠指令')
+                  : null,
+                ...actions.map((a) =>
+                  rowBtn('cc-act-' + a.id, '/', a.label, a.desc, false, () => {
+                    setComposerPopover(null);
+                    insertTextIntoExtComposer(a.id + ' ');
+                  }),
+                ),
+              ];
+            }
+          } else if (composerPopover.kind === 'model') {
+            panelWidth = 276;
+            const models = Array.isArray(opts.models) ? opts.models : [];
+            const efforts = Array.isArray(opts.efforts) ? opts.efforts : [];
+            const curModel = prefs.model || opts.defaultModel || (models[0] && models[0].id) || '';
+            const curEffort = prefs.effort || opts.defaultEffort || (efforts[0] && efforts[0].id) || '';
+            content = [
+              h('div', { key: 'hdr-m', style: { fontSize: '11px', color: 'rgba(209,213,219,0.52)', padding: '3px 10px 5px' } }, '选择模型'),
+              ...models.map((m) =>
+                rowBtn('m-' + m.id, '', m.label, m.desc, m.id === curModel, () => {
+                  updateHarnessPrefs(activeHarness, { model: m.id });
+                }),
+              ),
+              efforts.length > 0
+                ? h(
+                    'div',
+                    {
+                      key: 'eff-box',
+                      style: {
+                        marginTop: '6px',
+                        padding: '8px 8px 4px',
+                        borderTop: '1px solid rgba(255,255,255,0.08)',
+                      },
+                    },
+                    h('div', { style: { fontSize: '11px', color: 'rgba(209,213,219,0.52)', marginBottom: '6px', paddingLeft: '2px' } }, '推理深度'),
+                    h(
+                      'div',
+                      { style: { display: 'flex', gap: '4px' } },
+                      efforts.map((ef) =>
+                        h(
+                          'button',
+                          {
+                            key: ef.id,
+                            type: 'button',
+                            title: ef.desc,
+                            onClick: (ev) => {
+                              ev.stopPropagation();
+                              updateHarnessPrefs(activeHarness, { effort: ef.id });
+                            },
+                            style: {
+                              flex: 1,
+                              padding: '5px 4px',
+                              borderRadius: '7px',
+                              border: ef.id === curEffort ? '1px solid ' + meta.accentBorder : '1px solid rgba(255,255,255,0.08)',
+                              background: ef.id === curEffort ? meta.accentBg : 'rgba(255,255,255,0.04)',
+                              color: ef.id === curEffort ? meta.accent : '#d4d4d8',
+                              fontSize: '11.5px',
+                              fontWeight: ef.id === curEffort ? 600 : 400,
+                              cursor: 'pointer',
+                            },
+                          },
+                          ef.label,
+                        ),
+                      ),
+                    ),
+                  )
+                : null,
+            ];
+          } else if (composerPopover.kind === 'mode') {
+            panelWidth = 256;
+            const modes = Array.isArray(opts.modes) ? opts.modes : [];
+            const curMode = prefs.mode || opts.defaultMode || (modes[0] && modes[0].id) || '';
+            content = [
+              h('div', { key: 'hdr-mode', style: { fontSize: '11px', color: 'rgba(209,213,219,0.52)', padding: '3px 10px 5px' } }, activeHarness === 'codex' ? '沙箱权限' : '执行模式'),
+              ...modes.map((md) =>
+                rowBtn('md-' + md.id, '🛡', md.label, md.desc, md.id === curMode, () => {
+                  updateHarnessPrefs(activeHarness, { mode: md.id });
+                  setComposerPopover(null);
+                }),
+              ),
+            ];
+          }
+
+          const clampedLeft = Math.max(8, Math.min(window.innerWidth - panelWidth - 8, composerPopover.left));
+          const pop = h(
+            'div',
+            {
+              'data-dsb-popup': '1',
+              'data-dsb-composer-popover': '1',
+              'data-dsb-popup-bottom': String(composerPopover.bottom),
+              style: {
+                position: 'fixed',
+                left: clampedLeft + 'px',
+                bottom: composerPopover.bottom + 'px',
+                width: panelWidth + 'px',
+                maxHeight: '340px',
+                overflowY: 'auto',
+                background: panelBg,
+                border: '1px solid ' + panelBorder,
+                borderRadius: '14px',
+                padding: '6px',
+                boxShadow: '0 18px 46px rgba(0,0,0,0.58)',
+                zIndex: 9999,
+                boxSizing: 'border-box',
+                fontFamily: '"Segoe UI", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif',
+              },
+            },
+            content,
+          );
+          if (ReactDOM && typeof ReactDOM.createPortal === 'function' && typeof document !== 'undefined' && document.body) {
+            return ReactDOM.createPortal(pop, document.body);
+          }
+          return pop;
+        };
+
         const renderExternalNativeComposer = () => {
           const manifest = getHarnessMeta(activeHarness);
           if (!IS_BAR || barMode === 'lip' || manifest.useNativeComposer) return null;
@@ -4575,28 +5353,36 @@ window.__ModuleLoader__.load({
           const composerCtx = {
             manifest,
             avail: activeAvail,
+            options: activeHarnessOpts,
+            prefs: activeHarnessPrefs,
+            activePopover: composerPopover ? composerPopover.kind : null,
+            openComposerPopover,
             selection: extSel,
             draft: extDraft,
             capsules: extCapsules,
-            hasPayload: Boolean(extDraft.trim() || extCapsules.length > 0),
+            attachments: extAttachments,
+            hasPayload: Boolean(extDraft.trim() || extCapsules.length > 0 || extAttachments.length > 0),
             isStreaming: isExtStreaming,
             onInputChange: handleExtInputChange,
             onInputKeyDown: handleExtInputKeyDown,
+            onPaste: handleExtPaste,
+            onDragOver: handleExtDragOver,
+            onDrop: handleExtDrop,
             onSubmit: submitExternalComposer,
             onOpenSwitcher: (ev) => {
               ev.stopPropagation();
+              setComposerPopover(null);
               if (typeof dsbRuntime.toggleHarnessMenu === 'function') {
                 dsbRuntime.toggleHarnessMenu(ev.currentTarget);
               }
             },
             renderCapsulesRow: renderExtCapsulesRow,
+            renderAttachmentsRow: renderExtAttachmentsRow,
             renderDragHandle,
             workspaceBasename,
-            getPermissionMode: () => dsbRuntime.claudePermissionMode || 'auto',
+            getPermissionMode: () => activeHarnessPrefs.mode || dsbRuntime.claudePermissionMode || 'auto',
             setPermissionMode: (modeId) => {
-              dsbRuntime.claudePermissionMode = modeId;
-              writeStoredString(STORAGE_KEY_CLAUDE_PERM, modeId);
-              notifyBarRuntime();
+              updateHarnessPrefs('claude_code', { mode: modeId });
             },
           };
 
@@ -4642,10 +5428,10 @@ window.__ModuleLoader__.load({
                 marginInline: 'auto',
                 flexShrink: 0,
                 alignSelf: 'center',
-                height: COLLAPSED_LIP_PX + 'px',
+                height: IS_BAR ? (barMode === 'lip' ? COLLAPSED_LIP_PX + 'px' : '0px') : COLLAPSED_LIP_PX + 'px',
                 zIndex: 1,
                 boxSizing: 'border-box',
-                pointerEvents: 'auto',
+                pointerEvents: IS_BAR && barMode !== 'lip' ? 'none' : 'auto',
                 fontFamily: 'system-ui, -apple-system, "Segoe UI", Roboto, "PingFang SC", sans-serif',
               },
             },
@@ -4663,6 +5449,7 @@ window.__ModuleLoader__.load({
                     bottom: 0,
                     width: '8px',
                     cursor: 'ew-resize',
+                    pointerEvents: 'auto',
                     zIndex: 35,
                   },
                 }),
@@ -4677,41 +5464,46 @@ window.__ModuleLoader__.load({
                     bottom: 0,
                     width: '8px',
                     cursor: 'ew-resize',
+                    pointerEvents: 'auto',
                     zIndex: 35,
                   },
                 }),
               ]
             : null,
 
-          h(
-            'div',
-            {
-              'data-dsb-card': '',
-              style: {
-                position: 'absolute',
-                left: 0,
-                right: 0,
-                bottom: -TUCK_OVERLAP_PX + 'px',
-                height: (isExpanded ? expandedHeight : COLLAPSED_LIP_PX) + TUCK_OVERLAP_PX + 'px',
-                paddingBottom: TUCK_OVERLAP_PX + 'px',
-                borderRadius: cardBorderRadius,
-                borderBottom: 'none',
-                background: 'var(--dsw-alias-bg-layer-2, #2c2c2e)',
-                boxShadow: IS_BAR
-                  ? '0 0 0 0.5px var(--dsw-alias-border-l2, rgba(128, 128, 128, 0.22)) inset'
-                  : isExpanded
-                    ? '0 0 0 0.5px rgba(255, 255, 255, 0.14), 0 -14px 36px rgba(0, 0, 0, 0.42)'
-                    : '0 0 0 0.5px rgba(255, 255, 255, 0.10)',
-                color: 'var(--dsw-alias-label-primary, #f3f4f6)',
-                display: 'flex',
-                flexDirection: 'column',
-                overflow: 'hidden',
-                boxSizing: 'border-box',
-                transition: isResizingHeightRef.current
-                  ? 'none'
-                  : 'height 0.22s cubic-bezier(0.22, 1, 0.36, 1), box-shadow 0.2s ease',
-              },
-            },
+          // Scheme B: Detached Floating History Sheet / Hover Peek / Unread Toast (ONLY rendered when active!)
+          !IS_BAR || barMode === 'lip' || isExpanded
+            ? h(
+                'div',
+                {
+                  'data-dsb-card': '',
+                  'data-dsb-floating-anchor': '1',
+                  style: {
+                    position: 'absolute',
+                    left: 0,
+                    right: 0,
+                    bottom: IS_BAR ? (barMode === 'lip' ? '0px' : DETACHED_GAP_PX + 'px') : -TUCK_OVERLAP_PX + 'px',
+                    height: (isExpanded ? expandedHeight : COLLAPSED_LIP_PX) + (IS_BAR ? 0 : TUCK_OVERLAP_PX) + 'px',
+                    paddingBottom: IS_BAR ? '0px' : TUCK_OVERLAP_PX + 'px',
+                    borderRadius: cardBorderRadius,
+                    borderBottom: 'none',
+                    background: 'var(--dsw-alias-bg-layer-2, #2c2c2e)',
+                    boxShadow: IS_BAR
+                      ? '0 18px 46px rgba(0, 0, 0, 0.50), 0 0 0 0.5px var(--dsw-alias-border-l2, rgba(255, 255, 255, 0.10)) inset'
+                      : isExpanded
+                        ? '0 0 0 0.5px rgba(255, 255, 255, 0.14), 0 -14px 36px rgba(0, 0, 0, 0.42)'
+                        : '0 0 0 0.5px rgba(255, 255, 255, 0.10)',
+                    color: 'var(--dsw-alias-label-primary, #f3f4f6)',
+                    display: 'flex',
+                    flexDirection: 'column',
+                    overflow: 'hidden',
+                    boxSizing: 'border-box',
+                    pointerEvents: 'auto',
+                    transition: isResizingHeightRef.current
+                      ? 'none'
+                      : 'height 0.22s cubic-bezier(0.22, 1, 0.36, 1), box-shadow 0.2s ease',
+                  },
+                },
             isExpanded
               ? [
                   h(
@@ -4897,6 +5689,35 @@ window.__ModuleLoader__.load({
                           )
                         : null,
                       renderPinButton(),
+                      IS_BAR
+                        ? h(
+                            'button',
+                            {
+                              type: 'button',
+                              title: '收起聊天记录（回到纯净输入框）',
+                              onClick: (ev) => {
+                                ev.stopPropagation();
+                                toggleHistorySheet();
+                              },
+                              style: {
+                                width: '20px',
+                                height: '20px',
+                                padding: 0,
+                                borderRadius: '6px',
+                                border: 'none',
+                                background: 'transparent',
+                                color: 'inherit',
+                                opacity: 0.6,
+                                display: 'inline-flex',
+                                alignItems: 'center',
+                                justifyContent: 'center',
+                                cursor: 'pointer',
+                                flexShrink: 0,
+                              },
+                            },
+                            HARNESS_SDK_ICONS.chevronDown('currentColor'),
+                          )
+                        : null,
                     ),
                   ),
 
@@ -5079,7 +5900,7 @@ window.__ModuleLoader__.load({
                       : latestSingleLine || getHarnessMeta(activeHarness).emptyLipHint,
                   ),
                 ),
-            !(IS_BAR && barMode === 'lip')
+            !(IS_BAR)
               ? h('div', {
                   key: 'dsb-divider',
                   'data-dsb-divider': '',
@@ -5097,12 +5918,147 @@ window.__ModuleLoader__.load({
                   },
                 })
               : null,
-            ),
+            )
+            : IS_BAR && barMode !== 'lip' && (dsbRuntime.unreadCount || 0) > 0
+              ? h(
+                  'div',
+                  {
+                    'data-dsb-floating-anchor': '1',
+                    style: {
+                      position: 'absolute',
+                      left: 0,
+                      right: 0,
+                      bottom: DETACHED_GAP_PX + 'px',
+                      display: 'flex',
+                      justifyContent: 'center',
+                      pointerEvents: 'none',
+                    },
+                  },
+                  h(
+                    'div',
+                    {
+                      'data-dsb-floating-toast': '1',
+                      onClick: () => {
+                        setHistoryOpen(true);
+                        dsbRuntime.unreadCount = 0;
+                        dsbRuntime.unreadPreview = '';
+                        notifyBarRuntime();
+                        scheduleLayoutReport(280);
+                      },
+                      style: {
+                        pointerEvents: 'auto',
+                        display: 'inline-flex',
+                        alignItems: 'center',
+                        gap: '8px',
+                        maxWidth: '94%',
+                        padding: '6px 10px 6px 12px',
+                        borderRadius: '999px',
+                        background: 'rgba(26, 28, 34, 0.94)',
+                        border: '1px solid rgba(56, 189, 248, 0.34)',
+                        boxShadow: '0 10px 28px rgba(0,0,0,0.46)',
+                        color: '#eef2ff',
+                        fontSize: '12px',
+                        cursor: 'pointer',
+                      },
+                    },
+                    h('span', {
+                      style: {
+                        width: '7px',
+                        height: '7px',
+                        borderRadius: '999px',
+                        background: '#38bdf8',
+                        animation: 'dsbUnreadPulse 2s infinite',
+                        flexShrink: 0,
+                      },
+                    }),
+                    h('span', { style: { color: '#7dd3fc', fontWeight: 600, flexShrink: 0 } }, (dsbRuntime.unreadCount || 1) + ' 条新回复'),
+                    h(
+                      'span',
+                      { style: { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', opacity: 0.9 } },
+                      dsbRuntime.unreadPreview || latestSingleLine,
+                    ),
+                    h(
+                      'button',
+                      {
+                        type: 'button',
+                        title: '标为已读并收起提醒',
+                        onClick: (ev) => {
+                          ev.stopPropagation();
+                          dsbRuntime.unreadCount = 0;
+                          dsbRuntime.unreadPreview = '';
+                          notifyBarRuntime();
+                          scheduleLayoutReport(220);
+                        },
+                        style: {
+                          border: 'none',
+                          background: 'transparent',
+                          color: 'rgba(229,231,235,0.55)',
+                          cursor: 'pointer',
+                          padding: '0 3px',
+                          fontSize: '13px',
+                          lineHeight: 1,
+                          flexShrink: 0,
+                        },
+                      },
+                      '×',
+                    ),
+                  ),
+                )
+              : IS_BAR && barMode !== 'lip' && hoverPeek && latestSingleLine
+                ? h(
+                    'div',
+                    {
+                      'data-dsb-floating-anchor': '1',
+                      style: {
+                        position: 'absolute',
+                        left: 0,
+                        right: 0,
+                        bottom: DETACHED_GAP_PX + 'px',
+                        pointerEvents: 'none',
+                      },
+                    },
+                    h(
+                      'div',
+                      {
+                        'data-dsb-floating-peek': '1',
+                        style: {
+                          padding: '9px 14px',
+                          borderRadius: '16px',
+                          background: 'rgba(24, 26, 31, 0.94)',
+                          border: '1px solid rgba(255, 255, 255, 0.12)',
+                          boxShadow: '0 12px 32px rgba(0, 0, 0, 0.48)',
+                          color: '#f3f4f6',
+                          fontSize: '12.5px',
+                          lineHeight: '18px',
+                        },
+                      },
+                      h(
+                        'div',
+                        { style: { fontSize: '11px', color: '#7dd3fc', marginBottom: '3px', fontWeight: 500 } },
+                        '最新回复轻瞥 · 单击拉环展开完整历史',
+                      ),
+                      h(
+                        'div',
+                        {
+                          style: {
+                            display: '-webkit-box',
+                            WebkitLineClamp: 2,
+                            WebkitBoxOrient: 'vertical',
+                            overflow: 'hidden',
+                            opacity: 0.9,
+                          },
+                        },
+                        latestSingleLine,
+                      ),
+                    ),
+                  )
+                : null,
             IS_BAR && barMode !== 'lip' && activeHarness === 'dsh'
-              ? renderDragHandle({ top: 'auto', bottom: '-12px', zIndex: 40 })
+              ? renderDragHandle({ top: 'auto', bottom: '-13px', zIndex: 40, pointerEvents: 'auto' })
               : null,
           ),
           renderExternalNativeComposer(),
+          renderComposerPopover(),
           renderQuickSearchPopup(),
         );
       };

@@ -531,6 +531,16 @@ struct HarnessSendPayload {
     project_id: Option<String>,
     session_id: Option<String>,
     permission_mode: Option<String>,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    effort: Option<String>,
+    #[serde(default)]
+    sandbox_mode: Option<String>,
+    #[serde(default)]
+    execution_mode: Option<String>,
+    #[serde(default)]
+    attachments: Vec<harness::TurnAttachment>,
     prompt: String,
 }
 
@@ -587,6 +597,12 @@ fn harness_load_messages(harness: String, session_id: String) -> Vec<harness::Ex
 }
 
 #[tauri::command]
+fn harness_list_options(harness: String) -> harness::HarnessComposerOptions {
+    let kind = harness::HarnessKind::parse(&harness);
+    harness::load_harness_composer_options(kind)
+}
+
+#[tauri::command]
 fn harness_send_message(app: AppHandle, payload: HarnessSendPayload) -> Result<(), String> {
     let Some(shared) = app.try_state::<AppShared>() else {
         return Err("应用状态未就绪".to_string());
@@ -603,6 +619,11 @@ fn harness_send_message(app: AppHandle, payload: HarnessSendPayload) -> Result<(
             project_id: payload.project_id,
             session_id: payload.session_id,
             permission_mode: payload.permission_mode,
+            model: payload.model,
+            effort: payload.effort,
+            sandbox_mode: payload.sandbox_mode,
+            execution_mode: payload.execution_mode,
+            attachments: payload.attachments,
             prompt: payload.prompt,
         },
     )
@@ -779,12 +800,305 @@ fn pick_folder_dialog_blocking(initial_dir: Option<String>) -> Option<String> {
     }
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PickedAttachment {
+    id: String,
+    kind: String, // "image" | "file" | "folder"
+    name: String,
+    path: String,
+    preview_data_url: Option<String>,
+}
+
+fn image_mime_for_ext(ext: &str) -> Option<&'static str> {
+    match ext.to_ascii_lowercase().as_str() {
+        "png" => Some("image/png"),
+        "jpg" | "jpeg" => Some("image/jpeg"),
+        "webp" => Some("image/webp"),
+        "gif" => Some("image/gif"),
+        "bmp" => Some("image/bmp"),
+        _ => None,
+    }
+}
+
+fn build_picked_attachment(path: &std::path::Path) -> PickedAttachment {
+    use base64::Engine;
+    static ATT_SEQ: AtomicU64 = AtomicU64::new(1);
+    let seq = ATT_SEQ.fetch_add(1, Ordering::Relaxed);
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let path_str = path.to_string_lossy().to_string();
+    let name = path
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| path_str.clone());
+    if path.is_dir() {
+        return PickedAttachment {
+            id: format!("att-{ts}-{seq}"),
+            kind: "folder".to_string(),
+            name,
+            path: path_str,
+            preview_data_url: None,
+        };
+    }
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("");
+    if let Some(mime) = image_mime_for_ext(ext) {
+        let preview = std::fs::metadata(path)
+            .ok()
+            .filter(|m| m.len() <= 4 * 1024 * 1024)
+            .and_then(|_| std::fs::read(path).ok())
+            .map(|bytes| {
+                format!(
+                    "data:{mime};base64,{}",
+                    base64::engine::general_purpose::STANDARD.encode(bytes)
+                )
+            });
+        return PickedAttachment {
+            id: format!("att-{ts}-{seq}"),
+            kind: "image".to_string(),
+            name,
+            path: path_str,
+            preview_data_url: preview,
+        };
+    }
+    PickedAttachment {
+        id: format!("att-{ts}-{seq}"),
+        kind: "file".to_string(),
+        name,
+        path: path_str,
+        preview_data_url: None,
+    }
+}
+
+fn pick_files_dialog_blocking(
+    initial_dir: Option<String>,
+    images_only: bool,
+) -> Vec<PickedAttachment> {
+    use std::ffi::OsStr;
+    use std::os::windows::ffi::OsStrExt;
+    use std::path::{Path, PathBuf};
+    use windows::core::{PCWSTR, PWSTR};
+    use windows::Win32::System::Com::{
+        CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize, CLSCTX_INPROC_SERVER,
+        COINIT_APARTMENTTHREADED,
+    };
+    use windows::Win32::UI::Shell::Common::COMDLG_FILTERSPEC;
+    use windows::Win32::UI::Shell::{
+        FileOpenDialog, IFileOpenDialog, IShellItem, SHCreateItemFromParsingName,
+        FOS_ALLOWMULTISELECT, FOS_FILEMUSTEXIST, FOS_FORCEFILESYSTEM, SIGDN_FILESYSPATH,
+    };
+
+    let resolved_dir: Option<PathBuf> = initial_dir
+        .as_deref()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from)
+        .and_then(|p| {
+            if p.is_dir() {
+                Some(p)
+            } else {
+                p.parent().filter(|par| par.is_dir()).map(Path::to_path_buf)
+            }
+        })
+        .or_else(dirs::home_dir);
+
+    unsafe {
+        let hr = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        let com_inited = hr.is_ok();
+        let result = (|| -> Vec<PickedAttachment> {
+            let Ok(dialog) =
+                CoCreateInstance::<_, IFileOpenDialog>(&FileOpenDialog, None, CLSCTX_INPROC_SERVER)
+            else {
+                return Vec::new();
+            };
+            let Ok(opts) = dialog.GetOptions() else {
+                return Vec::new();
+            };
+            let _ = dialog.SetOptions(
+                opts | FOS_ALLOWMULTISELECT | FOS_FORCEFILESYSTEM | FOS_FILEMUSTEXIST,
+            );
+            let title_text = if images_only {
+                "选择要附加的图片"
+            } else {
+                "选择要附加的文件"
+            };
+            let title_w: Vec<u16> = OsStr::new(title_text)
+                .encode_wide()
+                .chain(std::iter::once(0))
+                .collect();
+            let _ = dialog.SetTitle(PCWSTR(title_w.as_ptr()));
+            if images_only {
+                let name_w: Vec<u16> = OsStr::new("图片文件")
+                    .encode_wide()
+                    .chain(std::iter::once(0))
+                    .collect();
+                let spec_w: Vec<u16> = OsStr::new("*.png;*.jpg;*.jpeg;*.webp;*.gif;*.bmp")
+                    .encode_wide()
+                    .chain(std::iter::once(0))
+                    .collect();
+                let filters = [COMDLG_FILTERSPEC {
+                    pszName: PCWSTR(name_w.as_ptr()),
+                    pszSpec: PCWSTR(spec_w.as_ptr()),
+                }];
+                let _ = dialog.SetFileTypes(&filters);
+            }
+            if let Some(dir) = resolved_dir {
+                let dir_w: Vec<u16> = OsStr::new(&dir.to_string_lossy().to_string())
+                    .encode_wide()
+                    .chain(std::iter::once(0))
+                    .collect();
+                if let Ok(item) =
+                    SHCreateItemFromParsingName::<_, _, IShellItem>(PCWSTR(dir_w.as_ptr()), None)
+                {
+                    let _ = dialog.SetFolder(&item);
+                }
+            }
+            if dialog.Show(None).is_err() {
+                return Vec::new();
+            }
+            let Ok(arr) = dialog.GetResults() else {
+                return Vec::new();
+            };
+            let count = arr.GetCount().unwrap_or(0);
+            let mut out = Vec::new();
+            for i in 0..count {
+                if let Ok(item) = arr.GetItemAt(i) {
+                    if let Ok(display) = item.GetDisplayName(SIGDN_FILESYSPATH) {
+                        let raw: PWSTR = display;
+                        if let Ok(p) = raw.to_string() {
+                            if !p.trim().is_empty() {
+                                out.push(build_picked_attachment(Path::new(&p)));
+                            }
+                        }
+                        CoTaskMemFree(Some(raw.0 as *const std::ffi::c_void));
+                    }
+                }
+            }
+            out
+        })();
+        if com_inited {
+            CoUninitialize();
+        }
+        result
+    }
+}
+
+fn read_clipboard_files_win32() -> Vec<PickedAttachment> {
+    use windows::Win32::System::DataExchange::{CloseClipboard, GetClipboardData, OpenClipboard};
+    use windows::Win32::UI::Shell::{DragQueryFileW, HDROP};
+
+    const CF_HDROP: u32 = 15;
+    let mut paths = Vec::new();
+    unsafe {
+        if OpenClipboard(None).is_err() {
+            return Vec::new();
+        }
+        if let Ok(handle) = GetClipboardData(CF_HDROP) {
+            if !handle.0.is_null() {
+                let hdrop = HDROP(handle.0);
+                let count = DragQueryFileW(hdrop, 0xFFFF_FFFF, None);
+                for idx in 0..count.min(20) {
+                    let len = DragQueryFileW(hdrop, idx, None);
+                    if len == 0 {
+                        continue;
+                    }
+                    let mut buf = vec![0u16; (len as usize) + 1];
+                    let written = DragQueryFileW(hdrop, idx, Some(&mut buf));
+                    if written > 0 {
+                        let p = String::from_utf16_lossy(&buf[..written as usize]);
+                        if !p.trim().is_empty() {
+                            paths.push(p);
+                        }
+                    }
+                }
+            }
+        }
+        let _ = CloseClipboard();
+    }
+    paths
+        .into_iter()
+        .map(|p| build_picked_attachment(std::path::Path::new(&p)))
+        .collect()
+}
+
 #[tauri::command]
 async fn app_pick_folder(initial_dir: Option<String>) -> Option<String> {
     tauri::async_runtime::spawn_blocking(move || pick_folder_dialog_blocking(initial_dir))
         .await
         .ok()
         .flatten()
+}
+
+#[tauri::command]
+async fn app_pick_files(
+    initial_dir: Option<String>,
+    images_only: Option<bool>,
+) -> Vec<PickedAttachment> {
+    let img = images_only.unwrap_or(false);
+    tauri::async_runtime::spawn_blocking(move || pick_files_dialog_blocking(initial_dir, img))
+        .await
+        .unwrap_or_default()
+}
+
+#[tauri::command]
+fn app_read_clipboard_files() -> Vec<PickedAttachment> {
+    read_clipboard_files_win32()
+}
+
+#[tauri::command]
+fn app_describe_paths(paths: Vec<String>) -> Vec<PickedAttachment> {
+    paths
+        .into_iter()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .map(|s| build_picked_attachment(std::path::Path::new(&s)))
+        .collect()
+}
+
+#[tauri::command]
+fn app_save_clipboard_image(
+    base64_data: String,
+    mime: Option<String>,
+) -> Result<PickedAttachment, String> {
+    use base64::Engine;
+    static PASTE_SEQ: AtomicU64 = AtomicU64::new(1);
+
+    let raw_b64 = if let Some((_, rest)) = base64_data.split_once(";base64,") {
+        rest.trim()
+    } else {
+        base64_data.trim()
+    };
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(raw_b64)
+        .map_err(|e| format!("图片解码失败: {e}"))?;
+    let mime_str = mime
+        .as_deref()
+        .unwrap_or("image/png")
+        .trim()
+        .to_ascii_lowercase();
+    let ext = match mime_str.as_str() {
+        "image/jpeg" | "image/jpg" => "jpg",
+        "image/webp" => "webp",
+        "image/gif" => "gif",
+        "image/bmp" => "bmp",
+        _ => "png",
+    };
+    let dir = AppConfig::local_data_dir().join("attachments");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("创建附件目录失败: {e}"))?;
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let seq = PASTE_SEQ.fetch_add(1, Ordering::Relaxed);
+    let file_path = dir.join(format!("paste-{ts}-{seq}.{ext}"));
+    std::fs::write(&file_path, &bytes).map_err(|e| format!("保存粘贴图片失败: {e}"))?;
+    Ok(build_picked_attachment(&file_path))
 }
 
 #[tauri::command]
@@ -2105,6 +2419,7 @@ pub fn run() {
             harness_get_active,
             harness_set_active,
             harness_list_available,
+            harness_list_options,
             harness_load_catalog,
             harness_load_messages,
             harness_send_message,
@@ -2114,6 +2429,10 @@ pub fn run() {
             app_update_settings,
             app_settings_action,
             app_pick_folder,
+            app_pick_files,
+            app_read_clipboard_files,
+            app_describe_paths,
+            app_save_clipboard_image,
             quick_search_query,
             quick_search_status,
             quick_search_build_capsule,
