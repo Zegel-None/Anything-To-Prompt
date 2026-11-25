@@ -15,10 +15,11 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 use windows::Win32::UI::WindowsAndMessaging::{
     GetAncestor, GetCursorPos, GetForegroundWindow, GetWindowLongPtrW, GetWindowRect,
     GetWindowThreadProcessId, IsWindowVisible, SetForegroundWindow, SetWindowDisplayAffinity,
-    SetWindowLongPtrW, SetWindowPos, ShowWindow, WindowFromPoint, GA_ROOT, GWL_EXSTYLE,
+    SetWindowLongPtrW, SetWindowPos, ShowWindow, WindowFromPoint, GA_ROOT, GWL_EXSTYLE, GWL_STYLE,
     HWND_TOPMOST, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SW_HIDE,
     SW_SHOW, SW_SHOWNOACTIVATE, WDA_EXCLUDEFROMCAPTURE, WDA_NONE, WINDOW_DISPLAY_AFFINITY,
-    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+    WS_BORDER, WS_CAPTION, WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_DLGFRAME, WS_EX_NOACTIVATE,
+    WS_EX_TOOLWINDOW, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_POPUP, WS_SYSMENU, WS_THICKFRAME,
 };
 
 pub const BOTTOM_MARGIN_DIP: i32 = 12;
@@ -167,11 +168,41 @@ pub fn get_hwnd_class_name(hwnd: HWND) -> String {
     }
 }
 
+/// Strips Win32 caption/border/sysmenu styles and disables DWM non-client rendering so
+/// `SetWindowRgn` + `SWP_FRAMECHANGED` can NEVER cause Windows GDI to paint a classic titlebar.
+unsafe fn enforce_borderless_popup_style(hwnd: HWND) -> bool {
+    let style = GetWindowLongPtrW(hwnd, GWL_STYLE);
+    let strip_mask = (WS_CAPTION.0
+        | WS_THICKFRAME.0
+        | WS_SYSMENU.0
+        | WS_MINIMIZEBOX.0
+        | WS_MAXIMIZEBOX.0
+        | WS_BORDER.0
+        | WS_DLGFRAME.0) as isize;
+    let clean_style = (style & !strip_mask)
+        | (WS_POPUP.0 as isize)
+        | (WS_CLIPCHILDREN.0 as isize)
+        | (WS_CLIPSIBLINGS.0 as isize);
+    let changed = clean_style != style;
+    if changed {
+        let _ = SetWindowLongPtrW(hwnd, GWL_STYLE, clean_style);
+    }
+    let ncrp = DWMNCRP_DISABLED.0 as u32;
+    let _ = DwmSetWindowAttribute(
+        hwnd,
+        DWMWA_NCRENDERING_POLICY,
+        &ncrp as *const _ as *const _,
+        std::mem::size_of::<u32>() as u32,
+    );
+    changed
+}
+
 pub fn init_bar_window(bar_win: &WebviewWindow, exclude_from_capture: bool, width_dip: i32) {
     let Some(hwnd) = hwnd_of(bar_win) else {
         return;
     };
     unsafe {
+        let _ = enforce_borderless_popup_style(hwnd);
         let ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
         let next_ex = ex | (WS_EX_TOOLWINDOW.0 as isize) | (WS_EX_NOACTIVATE.0 as isize);
         let _ = SetWindowLongPtrW(hwnd, GWL_EXSTYLE, next_ex);
@@ -315,21 +346,18 @@ pub fn show_bar_noactivate(bar_win: &WebviewWindow) {
         return;
     };
     unsafe {
+        let style_changed = enforce_borderless_popup_style(hwnd);
         let ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
-        let _ = SetWindowLongPtrW(
-            hwnd,
-            GWL_EXSTYLE,
-            ex | (WS_EX_TOOLWINDOW.0 as isize) | (WS_EX_NOACTIVATE.0 as isize),
-        );
-        let _ = SetWindowPos(
-            hwnd,
-            Some(HWND_TOPMOST),
-            0,
-            0,
-            0,
-            0,
-            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_FRAMECHANGED,
-        );
+        let next_ex = ex | (WS_EX_TOOLWINDOW.0 as isize) | (WS_EX_NOACTIVATE.0 as isize);
+        let ex_changed = next_ex != ex;
+        if ex_changed {
+            let _ = SetWindowLongPtrW(hwnd, GWL_EXSTYLE, next_ex);
+        }
+        let mut flags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE;
+        if style_changed || ex_changed {
+            flags |= SWP_FRAMECHANGED;
+        }
+        let _ = SetWindowPos(hwnd, Some(HWND_TOPMOST), 0, 0, 0, 0, flags);
         let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
     }
 }
@@ -371,18 +399,18 @@ pub fn activate_and_focus_bar(bar_win: &WebviewWindow) {
         return;
     };
     unsafe {
+        let style_changed = enforce_borderless_popup_style(hwnd);
         let ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
         let cleared = (ex | (WS_EX_TOOLWINDOW.0 as isize)) & !(WS_EX_NOACTIVATE.0 as isize);
-        let _ = SetWindowLongPtrW(hwnd, GWL_EXSTYLE, cleared);
-        let _ = SetWindowPos(
-            hwnd,
-            Some(HWND_TOPMOST),
-            0,
-            0,
-            0,
-            0,
-            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_FRAMECHANGED,
-        );
+        let ex_changed = cleared != ex;
+        if ex_changed {
+            let _ = SetWindowLongPtrW(hwnd, GWL_EXSTYLE, cleared);
+        }
+        let mut flags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE;
+        if style_changed || ex_changed {
+            flags |= SWP_FRAMECHANGED;
+        }
+        let _ = SetWindowPos(hwnd, Some(HWND_TOPMOST), 0, 0, 0, 0, flags);
         let _ = ShowWindow(hwnd, SW_SHOW);
         // Satisfy Windows foreground lock from background hotkey hook
         send_dummy_vk_e8();
