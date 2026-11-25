@@ -153,7 +153,7 @@
           style: {
             position: 'relative',
             width: '100%',
-            background: '#303030',
+            background: '#343434',
             borderRadius: '22px',
             border: '1px solid rgba(255, 255, 255, 0.08)',
             padding: '15px 16px 11px 16px',
@@ -308,7 +308,7 @@
                     ? '#414141'
                     : ctx.hasPayload
                       ? '#0169cc'
-                      : '#2b6be6',
+                      : '#2c67c5',
                   color: '#ffffff',
                   cursor: 'pointer',
                   display: 'inline-flex',

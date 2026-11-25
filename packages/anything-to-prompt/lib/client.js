@@ -1378,7 +1378,7 @@ window.__ModuleLoader__.load({
         '  display: none !important;',
         '}',
         'html[data-dsh-bar-clone="1"] [data-trigger-menu] {',
-        '  max-height: 380px !important;',
+        '  max-height: 440px !important;',
         '}',
         'html[data-dsh-bar-clone="1"] [data-composer-seat] [data-slot="conversation.input.dock"],',
         'html[data-dsh-bar-clone="1"] [data-composer-seat] [data-composer-dock],',
@@ -5155,16 +5155,16 @@ window.__ModuleLoader__.load({
 
           const panelBg =
             activeHarness === 'codex'
-              ? '#212121'
+              ? '#2d2d2d'
               : activeHarness === 'claude_code'
                 ? '#2B2B29'
-                : '#17181b';
+                : '#131317';
           const panelBorder =
             activeHarness === 'claude_code'
               ? 'rgba(255, 248, 240, 0.11)'
               : activeHarness === 'codex'
-                ? 'rgba(255, 255, 255, 0.09)'
-                : 'rgba(255, 255, 255, 0.11)';
+                ? 'rgba(255, 255, 255, 0.08)'
+                : '#27272b';
 
           const svgIcon = (sz, strokeColor, children, vb = '0 0 24 24', fill = 'none') =>
             h(
@@ -5491,7 +5491,7 @@ window.__ModuleLoader__.load({
                   padding: '0 14px',
                   borderRadius: '999px',
                   border: 'none',
-                  background: highlighted ? 'rgba(255, 255, 255, 0.085)' : 'transparent',
+                  background: highlighted ? '#3d3d3d' : 'transparent',
                   color: '#ededed',
                   cursor: 'pointer',
                   textAlign: 'left',
@@ -6038,10 +6038,54 @@ window.__ModuleLoader__.load({
             }
           } else if (composerPopover.kind === 'model') {
             panelWidth = 276;
-            const models = Array.isArray(opts.models) ? opts.models : [];
-            const efforts = Array.isArray(opts.efforts) ? opts.efforts : [];
+            const defaultModelsByHarness = {
+              antigravity: [
+                { id: 'gemini-4-neon', label: 'Gemini 4 Neon', desc: '最新旗舰多模态模型' },
+                { id: 'gemini-3.5-pro', label: 'Gemini 3.5 Pro', desc: '深度推理与工程代码' },
+                { id: 'claude-opus-4-6', label: 'Claude Opus', desc: '长上下文深度思考' },
+                { id: 'claude-sonnet-4-6', label: 'Claude Sonnet', desc: '高速均衡编程模型' },
+              ],
+              codex: [
+                { id: 'gpt-6-luna', label: 'GPT-6.1 Terra', desc: 'Codex 默认旗舰编程模型' },
+                { id: 'gpt-5.4', label: 'GPT-5.4', desc: '稳健高速代码模型' },
+                { id: 'o3', label: 'o3', desc: '高强度数学与系统推理' },
+              ],
+              claude_code: [
+                { id: 'claude-opus-4-6', label: 'Claude Opus', desc: '最强深度架构与复杂重构' },
+                { id: 'claude-sonnet-4-6', label: 'Claude Sonnet', desc: '日常高速编码主力' },
+                { id: 'claude-haiku-4-5', label: 'Claude Haiku', desc: '极速轻量问答与脚本' },
+              ],
+            };
+            const defaultEffortsByHarness = {
+              antigravity: [
+                { id: 'low', label: 'Low', desc: '极速低延迟' },
+                { id: 'medium', label: 'Medium', desc: '日常均衡推理' },
+                { id: 'high', label: 'High', desc: '深度复杂推理' },
+                { id: 'max', label: 'Max', desc: '最高算力思考' },
+              ],
+              codex: [
+                { id: 'low', label: '低', desc: '快速轻量推理' },
+                { id: 'medium', label: '中', desc: '平衡速度与质量' },
+                { id: 'high', label: '高', desc: '深度工程推理' },
+                { id: 'xhigh', label: '极高', desc: '拉满思考预算' },
+              ],
+              claude_code: [
+                { id: 'low', label: '低', desc: '快速响应' },
+                { id: 'medium', label: '中', desc: '常规推理' },
+                { id: 'high', label: '高', desc: '深度推理' },
+                { id: 'max', label: '极高', desc: '最大思考深度' },
+              ],
+            };
+            const models =
+              Array.isArray(opts.models) && opts.models.length > 0
+                ? opts.models
+                : defaultModelsByHarness[activeHarness] || [];
+            const efforts =
+              Array.isArray(opts.efforts) && opts.efforts.length > 0
+                ? opts.efforts
+                : defaultEffortsByHarness[activeHarness] || [];
             const curModel = prefs.model || opts.defaultModel || (models[0] && models[0].id) || '';
-            const curEffort = prefs.effort || opts.defaultEffort || (efforts[0] && efforts[0].id) || '';
+            const curEffort = prefs.effort || opts.defaultEffort || (efforts[2] && efforts[2].id) || (efforts[0] && efforts[0].id) || '';
             content = [
               h('div', { key: 'hdr-m', style: { fontSize: '11.5px', color: 'rgba(209,213,219,0.52)', padding: '3px 10px 5px', fontWeight: 500 } }, '选择模型'),
               ...models.map((m) =>
@@ -6096,7 +6140,28 @@ window.__ModuleLoader__.load({
             ];
           } else if (composerPopover.kind === 'mode') {
             panelWidth = 256;
-            const modes = Array.isArray(opts.modes) ? opts.modes : [];
+            const defaultModesByHarness = {
+              antigravity: [
+                { id: 'auto', label: '极速', desc: 'Fast · 自动执行常规操作' },
+                { id: 'plan', label: '规划', desc: 'Planning · 先拆解方案再执行' },
+                { id: 'accept-edits', label: '自动编辑', desc: 'Accept Edits · 自动写入代码修改' },
+              ],
+              codex: [
+                { id: 'danger-full-access', label: '完全访问', desc: '无沙箱限制，直接读写与执行' },
+                { id: 'workspace-write', label: '工作区写入', desc: '仅允许在当前工作区目录写入' },
+                { id: 'read-only', label: '只读模式', desc: '只读分析，不修改任何文件' },
+              ],
+              claude_code: [
+                { id: 'auto', label: '自动', desc: '智能自动执行并拦截高危操作' },
+                { id: 'acceptEdits', label: '自动编辑', desc: '自动允许文件编辑' },
+                { id: 'plan', label: '仅规划', desc: '只读分析与规划，不修改文件' },
+                { id: 'dontAsk', label: '免询问', desc: '免交互确认提示' },
+              ],
+            };
+            const modes =
+              Array.isArray(opts.modes) && opts.modes.length > 0
+                ? opts.modes
+                : defaultModesByHarness[activeHarness] || [];
             const curMode = prefs.mode || opts.defaultMode || (modes[0] && modes[0].id) || '';
             content = [
               h(
@@ -6129,7 +6194,7 @@ window.__ModuleLoader__.load({
                 right: isFullWidth ? '0px' : 'auto',
                 bottom: composerPopover.bottom + 'px',
                 width: isFullWidth ? '100vw' : panelWidth + 'px',
-                maxHeight: isCodexPlus ? '352px' : '340px',
+                maxHeight: isCodexPlus ? '410px' : '340px',
                 overflowY: 'auto',
                 background: panelBg,
                 border: '1px solid ' + panelBorder,

@@ -55,9 +55,9 @@
         style: {
           width: '100vw',
           position: 'relative',
-          background: '#17171a',
+          background: '#19191e',
           borderRadius: '16px',
-          border: '1px solid rgba(255, 255, 255, 0.085)',
+          border: '1px solid #27272b',
           padding: '15px 14px 10px 14px',
           display: 'flex',
           flexDirection: 'column',
