@@ -57,6 +57,8 @@ pub struct HarnessSyncPayload {
     pub workspace_label: String,
     pub session_id: String,
     pub title: String,
+    #[serde(default)]
+    pub title_authoritative: bool,
     pub messages: Vec<ExternalChatMessage>,
     pub running: bool,
     pub source: String, // "hook" | "watch"
@@ -686,8 +688,8 @@ fn build_sync_payload_from_hook(notice: &HookSyncNotice) -> Option<HarnessSyncPa
         }
     }
 
-    let ws_path = notice.cwd.clone().unwrap_or_default();
-    let ws_label = if ws_path.is_empty() {
+    let mut ws_path = notice.cwd.clone().unwrap_or_default();
+    let mut ws_label = if ws_path.is_empty() {
         match harness {
             "antigravity" => "CLI Project".to_string(),
             "claude_code" => "Claude Code".to_string(),
@@ -696,14 +698,35 @@ fn build_sync_payload_from_hook(notice: &HookSyncNotice) -> Option<HarnessSyncPa
     } else {
         basename_of_path(&ws_path)
     };
-    let ws_id = if harness == "antigravity" && ws_path.is_empty() {
+    let mut ws_id = if harness == "antigravity" && ws_path.is_empty() {
         "default-cli-project".to_string()
     } else {
         ws_path.clone()
     };
 
     let fallback_title = format!("{ws_label} · 实时会话");
-    let title = title_from_messages(&messages, &fallback_title);
+    let mut title = title_from_messages(&messages, &fallback_title);
+    let mut title_authoritative = false;
+
+    if harness == "antigravity" && !session_id.is_empty() {
+        if let Some((db_ws_id, db_ws_path, db_ws_label, db_title)) =
+            crate::harness::lookup_antigravity_conversation_meta(&session_id)
+        {
+            if !db_ws_id.is_empty() {
+                ws_id = db_ws_id;
+            }
+            if !db_ws_path.is_empty() {
+                ws_path = db_ws_path;
+            }
+            if !db_ws_label.is_empty() {
+                ws_label = db_ws_label;
+            }
+            if !db_title.is_empty() {
+                title = db_title;
+                title_authoritative = true;
+            }
+        }
+    }
 
     Some(HarnessSyncPayload {
         harness: harness.to_string(),
@@ -712,6 +735,7 @@ fn build_sync_payload_from_hook(notice: &HookSyncNotice) -> Option<HarnessSyncPa
         workspace_label: ws_label,
         session_id,
         title,
+        title_authoritative,
         messages,
         running: notice.running.unwrap_or(false),
         source: "hook".to_string(),
@@ -1048,6 +1072,7 @@ pub fn start_live_sync_services(app: AppHandle, enabled_flag: Arc<AtomicBool>) {
                                     workspace_label: label.clone(),
                                     session_id: sid,
                                     title: title_from_messages(&msgs, &label),
+                                    title_authoritative: false,
                                     messages: msgs,
                                     running: false,
                                     source: "watch".to_string(),
@@ -1084,6 +1109,7 @@ pub fn start_live_sync_services(app: AppHandle, enabled_flag: Arc<AtomicBool>) {
                                     workspace_label: label.clone(),
                                     session_id: sid,
                                     title: title_from_messages(&msgs, &label),
+                                    title_authoritative: false,
                                     messages: msgs,
                                     running: false,
                                     source: "watch".to_string(),
@@ -1106,13 +1132,39 @@ pub fn start_live_sync_services(app: AppHandle, enabled_flag: Arc<AtomicBool>) {
                         if let Ok(raw) = fs::read_to_string(&p) {
                             let msgs = parse_antigravity_transcript_lines(&raw);
                             if !cid.is_empty() && !msgs.is_empty() {
+                                let (ws_id, ws_path, ws_label, title, title_authoritative) =
+                                    if let Some((db_ws_id, db_ws_path, db_ws_label, db_title)) =
+                                        crate::harness::lookup_antigravity_conversation_meta(&cid)
+                                    {
+                                        let has_title = !db_title.is_empty();
+                                        (
+                                            db_ws_id,
+                                            db_ws_path,
+                                            db_ws_label,
+                                            if has_title {
+                                                db_title
+                                            } else {
+                                                title_from_messages(&msgs, "Antigravity 实时对话")
+                                            },
+                                            has_title,
+                                        )
+                                    } else {
+                                        (
+                                            "default-cli-project".to_string(),
+                                            String::new(),
+                                            "Antigravity".to_string(),
+                                            title_from_messages(&msgs, "Antigravity 实时对话"),
+                                            false,
+                                        )
+                                    };
                                 let payload = HarnessSyncPayload {
                                     harness: "antigravity".to_string(),
-                                    workspace_id: "default-cli-project".to_string(),
-                                    workspace_path: String::new(),
-                                    workspace_label: "Antigravity".to_string(),
+                                    workspace_id: ws_id,
+                                    workspace_path: ws_path,
+                                    workspace_label: ws_label,
                                     session_id: cid,
-                                    title: title_from_messages(&msgs, "Antigravity 实时对话"),
+                                    title,
+                                    title_authoritative,
                                     messages: msgs,
                                     running: false,
                                     source: "watch".to_string(),

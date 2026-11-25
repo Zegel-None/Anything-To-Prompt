@@ -707,6 +707,70 @@ pub fn load_antigravity_catalog() -> ExternalHarnessCatalog {
     }
 }
 
+/// Read-only lookup of an Antigravity conversation's authoritative metadata
+/// `(workspace_id, workspace_path, workspace_label, title)` from `conversation_summaries.db`.
+/// Prevents real-time hook / JSONL tail updates from overwriting the real conversation title
+/// (e.g. "DeepSeek Bar UI Bug Fix") with a raw user message snippet.
+pub fn lookup_antigravity_conversation_meta(
+    conv_id: &str,
+) -> Option<(String, String, String, String)> {
+    let cid = conv_id.trim();
+    if cid.is_empty() {
+        return None;
+    }
+    let home = dirs::home_dir()?;
+    let gemini_dir = home.join(".gemini");
+    let dbs = [
+        gemini_dir
+            .join("antigravity")
+            .join("conversation_summaries.db"),
+        gemini_dir
+            .join("antigravity-cli")
+            .join("conversation_summaries.db"),
+    ];
+
+    for db_path in dbs {
+        let Some(conn) = open_sqlite_readonly(&db_path) else {
+            continue;
+        };
+        let row: rusqlite::Result<(String, String, String, String)> = conn.query_row(
+            "SELECT COALESCE(title, ''), COALESCE(preview, ''), \
+             COALESCE(workspace_uris, ''), COALESCE(project_id, '') \
+             FROM conversation_summaries WHERE conversation_id = ?1 LIMIT 1",
+            [cid],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        );
+        if let Ok((title, preview, ws_uris, project_id)) = row {
+            let ws_path = parse_first_workspace_uri(&ws_uris);
+            let normalized_pid = if project_id.trim().is_empty() {
+                "default-cli-project".to_string()
+            } else {
+                project_id.trim().to_string()
+            };
+            let label = if normalized_pid == "default-cli-project" {
+                "CLI Project (桌面端同步)".to_string()
+            } else if normalized_pid == "outside-of-project" {
+                "自由对话".to_string()
+            } else if !ws_path.is_empty() {
+                basename_of_path(&ws_path)
+            } else {
+                format!("项目 {}", &normalized_pid[..normalized_pid.len().min(8)])
+            };
+            let display_title = if !title.trim().is_empty() {
+                sanitize_title(&title, "新对话")
+            } else if !preview.trim().is_empty() {
+                sanitize_title(&preview, "新对话")
+            } else {
+                String::new()
+            };
+            if !display_title.is_empty() || !ws_path.is_empty() {
+                return Some((normalized_pid, ws_path, label, display_title));
+            }
+        }
+    }
+    None
+}
+
 pub fn load_codex_catalog() -> ExternalHarnessCatalog {
     let exe = resolve_codex_exe();
     let Some(home) = dirs::home_dir() else {

@@ -259,6 +259,21 @@ window.__ModuleLoader__.load({
         .catch(() => []);
     }
 
+    function findExternalCatalogEntry(hId, sessionId) {
+      if (!sessionId) return null;
+      const catalog = dsbRuntime.externalCatalogs[hId];
+      const groups = catalog && Array.isArray(catalog.groups) ? catalog.groups : [];
+      for (const ws of groups) {
+        const convs = Array.isArray(ws.convs) ? ws.convs : [];
+        for (const conv of convs) {
+          if (conv && String(conv.id) === String(sessionId)) {
+            return { ws, conv };
+          }
+        }
+      }
+      return null;
+    }
+
     function refreshExternalCatalog(harnessId, autoSelectIfEmpty = true) {
       const hId = normalizeHarnessId(harnessId);
       if (hId === 'dsh' || !IS_BAR) return Promise.resolve(null);
@@ -271,7 +286,17 @@ window.__ModuleLoader__.load({
             dsbRuntime.externalCatalogs[hId] = catalog;
             const groups = Array.isArray(catalog.groups) ? catalog.groups : [];
             const cur = dsbRuntime.externalSelection[hId] || {};
-            if (autoSelectIfEmpty && !cur.sessionId && groups.length > 0) {
+            if (cur.sessionId) {
+              const matched = findExternalCatalogEntry(hId, cur.sessionId);
+              if (matched) {
+                dsbRuntime.externalSelection[hId] = {
+                  workspaceId: matched.ws.workspaceId || cur.workspaceId || '',
+                  workspacePath: matched.ws.path || matched.conv.cwd || cur.workspacePath || '',
+                  sessionId: cur.sessionId,
+                  title: matched.conv.title || cur.title || matched.ws.label || '新对话',
+                };
+              }
+            } else if (autoSelectIfEmpty && groups.length > 0) {
               const firstWs = groups[0];
               const firstConv = Array.isArray(firstWs.convs) && firstWs.convs.length > 0 ? firstWs.convs[0] : null;
               if (firstConv) {
@@ -538,11 +563,32 @@ window.__ModuleLoader__.load({
 
       if (shouldUpdateMessages) {
         if (incomingSessionId) {
+          const catHit = findExternalCatalogEntry(hId, incomingSessionId);
+          const sameSession = curSel.sessionId === incomingSessionId;
+          const isAuthTitle = Boolean(evt.titleAuthoritative && evt.title);
+          const resolvedTitle = isAuthTitle
+            ? evt.title
+            : (catHit && catHit.conv && catHit.conv.title) ||
+              (sameSession && curSel.title ? curSel.title : evt.title) ||
+              HARNESS_META[hId].label;
+          const resolvedWsId =
+            (isAuthTitle && evt.workspaceId) ||
+            (catHit && catHit.ws && catHit.ws.workspaceId) ||
+            (evt.workspaceId && evt.workspaceId !== 'default-cli-project' ? evt.workspaceId : '') ||
+            (sameSession ? curSel.workspaceId : '') ||
+            evt.workspaceId ||
+            '';
+          const resolvedWsPath =
+            (isAuthTitle && evt.workspacePath) ||
+            (catHit && catHit.ws && (catHit.ws.path || (catHit.conv && catHit.conv.cwd))) ||
+            evt.workspacePath ||
+            (sameSession ? curSel.workspacePath : '') ||
+            '';
           dsbRuntime.externalSelection[hId] = {
-            workspaceId: evt.workspaceId || curSel.workspaceId || '',
-            workspacePath: evt.workspacePath || curSel.workspacePath || '',
+            workspaceId: resolvedWsId,
+            workspacePath: resolvedWsPath,
             sessionId: incomingSessionId,
-            title: evt.title || curSel.title || HARNESS_META[hId].label,
+            title: resolvedTitle,
           };
         }
         if (Array.isArray(evt.messages) && evt.messages.length > 0) {
