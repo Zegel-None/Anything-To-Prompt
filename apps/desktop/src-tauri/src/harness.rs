@@ -472,7 +472,7 @@ pub fn list_harness_availability(dsh_connected: bool) -> Vec<HarnessAvailability
     ]
 }
 
-fn clean_windows_path(raw: &str) -> String {
+pub(crate) fn clean_windows_path(raw: &str) -> String {
     let trimmed = raw.trim();
     if let Some(rest) = trimmed.strip_prefix(r"\\?\") {
         return rest.to_string();
@@ -484,7 +484,7 @@ fn clean_windows_path(raw: &str) -> String {
     trimmed.to_string()
 }
 
-fn basename_of_path(path: &str) -> String {
+pub(crate) fn basename_of_path(path: &str) -> String {
     let cleaned = clean_windows_path(path);
     let trimmed = cleaned.trim_end_matches(['\\', '/']);
     if trimmed.is_empty() {
@@ -498,7 +498,7 @@ fn basename_of_path(path: &str) -> String {
         .to_string()
 }
 
-fn sanitize_title(raw: &str, fallback: &str) -> String {
+pub(crate) fn sanitize_title(raw: &str, fallback: &str) -> String {
     let first_line = raw
         .lines()
         .map(|l| l.trim())

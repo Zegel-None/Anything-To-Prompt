@@ -13,15 +13,15 @@ Built with **Tauri v2 + Rust** (Win32 / UI Automation / NTFS USN MFT / Medium-In
 
 ## Key Features
 
-### 1. Multi-Harness Switcher with 1:1 Native Desktop Composer Replicas
-Switch seamlessly between **DeepSeek Harness**, **Antigravity**, **Codex**, and **Claude Code** from the workspace/session popover. No third-party app binaries are modified, and all external CLIs run strictly at **Medium Integrity** via the built-in Broker (never elevating or corrupting `~/.codex` / `~/.gemini` / `~/.claude` ACLs):
+### 1. Plugin-as-Dependency · Auto-Launch with All 4 Harnesses · Live Conversation Sync · 1:1 Native Composers
+`anything-to-prompt.exe` mirrors itself into a single canonical runtime dependency (`%LOCALAPPDATA%\AnythingToPrompt\bin\anything-to-prompt.exe`) shared across all 4 Harness plugins. Launching any Harness automatically wakes the single-instance bar (confirmed by a gentle 1s electric-blue cursor breathing pulse). **The Windows system tray icon is hidden by default** — all settings live inside the unified **`⚙`** panel in the bar switcher (and are also exposed via MCP tools):
 
-| Harness | Composer UI | History & Desktop Sync |
-| :--- | :--- | :--- |
-| **DeepSeek Harness (`dsh`)** | Native DSH floating composer | Real-time bidirectional twin with local DSH WebUI (zero injection into normal browser tabs) |
-| **Antigravity (`agy.exe`)** | **1:1 Antigravity Desktop composer replica** (double-bezel dark obsidian frame, `Gemini 4 Neon High`, shield speed badge, light circular send / crimson square stop button) | Read-only sync from `conversation_summaries.db` & `transcript.jsonl`; new turns stream via `agy --print --output-format stream-json` directly into Antigravity Desktop's **`CLI Project`** |
-| **Codex (`codex.exe`)** | **1:1 Codex Desktop stacked composer replica** (inset `#1f1f1f` computer/workspace shelf, `20px` graphite card, coral-orange access mode, live model/effort parsed from `~/.codex/config.toml`, cobalt-blue circular send button) | Read-only sync from `~/.codex/state_5.sqlite` & `rollout-*.jsonl`; turns run via `codex app-server` JSON-RPC 2.0 sharing the exact same `~/.codex` history |
-| **Claude Code (`claude.exe`)** | **1:1 Claude Desktop (Code Mode) dark composer replica** (warm charcoal `#30302E` card, Anthropic spark workspace chip, one-click `auto / acceptEdits / plan / dontAsk` permission toggle, live model/effort from `~/.claude/settings.json`, terracotta `#D97757` rounded-square send button) | Read-only scan of `~/.claude/projects/*/*.jsonl`; turns stream via `claude -p --output-format stream-json --include-partial-messages --resume <id>`, sharing full history with terminal `claude --resume` |
+| Harness | Companion Plugin & Auto-Launch | Composer UI | History & Real-Time Sync |
+| :--- | :--- | :--- | :--- |
+| **DeepSeek Harness (`dsh`)** | `@local/anything-to-prompt` (auto-spawns companion on DSH startup) | Native DSH floating composer | Real-time bidirectional twin with local DSH WebUI (zero injection into normal browser tabs) |
+| **Antigravity (`agy.exe`)** | `~/.gemini/config/plugins/anything-to-prompt-sync/` (`plugin.json` + `hooks.json` + `mcp_config.json`) | **1:1 Antigravity Desktop composer replica** (double-bezel dark obsidian frame, `Gemini 4 Neon High`, shield speed badge, light circular send / crimson square stop button) | **Native Hook push (<10ms) + read-only JSONL live tail**; turns stream via `agy --print --output-format stream-json` into Antigravity Desktop's **`CLI Project`** |
+| **Codex (`codex.exe`)** | `~/.codex/plugins/anything-to-prompt-sync/` (`.codex-plugin/plugin.json` + `.mcp.json`) | **1:1 Codex Desktop stacked composer replica** (inset `#1f1f1f` computer/workspace shelf, `20px` graphite card, coral-orange access mode, live model/effort from `~/.codex/config.toml`, cobalt-blue circular send button) | **Zero-invasion read-only `rollout-*.jsonl` live tail** (never modifies `config.toml`); turns run via `codex app-server` JSON-RPC 2.0 sharing the exact same `~/.codex` history |
+| **Claude Code (`claude.exe`)** | `~/.claude/skills/anything-to-prompt-sync/` (`.claude-plugin/plugin.json` + `hooks/hooks.json` + `.mcp.json`) | **1:1 Claude Desktop (Code Mode) dark composer replica** (warm charcoal `#30302E` card, Anthropic spark workspace chip, one-click `auto / acceptEdits / plan / dontAsk` permission toggle, live model/effort from `~/.claude/settings.json`, terracotta `#D97757` rounded-square send button) | **Native Hook push (<10ms) + read-only `~/.claude/projects/*/*.jsonl` live tail**; turns stream via `claude -p --output-format stream-json --include-partial-messages --resume <id>` sharing history with terminal `claude --resume` |
 
 ### 2. Pure `Ctrl` Loop + Dual-Button Pen (CAD Auto-Box↔Lasso + Red Dual-Screenshot)
 - **Zero-Conflict `Ctrl` State Machine (8ms OS physical key-state polling)**:
@@ -58,10 +58,15 @@ Starts matching from the 1st character on single-line pure text (no capsules, no
 ## Quick Start
 
 ### Download Prebuilt Binaries (Recommended)
-Download the latest release (e.g. `v0.2.5`) from GitHub **Releases**:
-- `anything-to-prompt.exe` (portable)
+Download the latest release (e.g. `v0.3.0`) from GitHub **Releases**:
+- `anything-to-prompt.exe` (portable — auto-mirrors into `%LOCALAPPDATA%\AnythingToPrompt\bin\` and registers all 4 Harness plugins)
 - `Anything-to-Prompt_<version>_x64-setup.exe` (NSIS installer)
 - `Anything-to-Prompt_<version>_x64_en-US.msi` (MSI installer)
+
+Or run the one-command plugin installer:
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\install-plugins.ps1
+```
 
 ### Build from Source
 Requirements: Windows 11 (WebView2), Node.js >= 20, Rust / Cargo (`x86_64-pc-windows-msvc`).

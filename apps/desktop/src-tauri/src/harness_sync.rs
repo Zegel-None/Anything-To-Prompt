@@ -1,0 +1,1231 @@
+use crate::harness::{
+    basename_of_path, clean_windows_path, parse_antigravity_transcript_lines,
+    parse_claude_code_transcript_lines, parse_codex_rollout_lines, sanitize_title,
+    ExternalChatMessage,
+};
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::fs::{self, OpenOptions};
+use std::io::{BufRead, BufReader, Read, Write};
+use std::os::windows::ffi::OsStrExt;
+use std::os::windows::fs::OpenOptionsExt;
+use std::os::windows::io::FromRawHandle;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use tauri::{AppHandle, Manager};
+use windows::core::{PCWSTR, PSTR};
+use windows::Win32::Foundation::{CloseHandle, LocalFree, HANDLE, HLOCAL, INVALID_HANDLE_VALUE};
+use windows::Win32::Security::Authorization::{
+    ConvertSidToStringSidA, ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
+};
+use windows::Win32::Security::{
+    GetTokenInformation, TokenUser, PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES, TOKEN_QUERY,
+    TOKEN_USER,
+};
+use windows::Win32::Storage::FileSystem::PIPE_ACCESS_INBOUND;
+use windows::Win32::System::Pipes::{
+    ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, PIPE_READMODE_BYTE,
+    PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_WAIT,
+};
+use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+
+const SYNC_PIPE_SHORT: &str = "atp-harness-sync-v1";
+const PLUGIN_DIR_NAME: &str = "anything-to-prompt-sync";
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HookSyncNotice {
+    pub harness: String,
+    pub event: String,
+    pub session_id: Option<String>,
+    pub cwd: Option<String>,
+    pub transcript_path: Option<String>,
+    pub last_user_input: Option<String>,
+    pub last_assistant_message: Option<String>,
+    pub running: Option<bool>,
+    pub timestamp_ms: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HarnessSyncPayload {
+    pub harness: String,
+    pub workspace_id: String,
+    pub workspace_path: String,
+    pub workspace_label: String,
+    pub session_id: String,
+    pub title: String,
+    pub messages: Vec<ExternalChatMessage>,
+    pub running: bool,
+    pub source: String, // "hook" | "watch"
+    pub updated_at_ms: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExternalSyncPluginStatus {
+    pub enabled: bool,
+    pub dsh_plugin: bool,
+    pub antigravity_plugin: bool,
+    pub claude_code_plugin: bool,
+    pub codex_plugin: bool,
+    pub codex_live_watch: bool,
+    pub runtime_exe_path: String,
+    pub pipe_name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PipeControlCommand {
+    pub control: String,
+    pub arg: Option<String>,
+}
+
+pub fn send_control_to_pipe(action: &str, arg: Option<&str>) -> std::io::Result<()> {
+    let cmd = PipeControlCommand {
+        control: action.to_string(),
+        arg: arg.map(|s| s.to_string()),
+    };
+    let encoded = serde_json::to_string(&cmd)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    let mut file = OpenOptions::new()
+        .write(true)
+        .custom_flags(0)
+        .open(sync_pipe_full_path())?;
+    writeln!(file, "{encoded}")?;
+    file.flush()
+}
+
+fn sync_pipe_full_path() -> String {
+    format!(r"\\.\pipe\{SYNC_PIPE_SHORT}")
+}
+
+fn now_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+fn to_wide(s: &str) -> Vec<u16> {
+    std::ffi::OsStr::new(s)
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect()
+}
+
+fn current_user_sid_string() -> Option<String> {
+    unsafe {
+        let mut token = HANDLE::default();
+        if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token).is_err() {
+            return None;
+        }
+        let mut needed = 0u32;
+        let _ = GetTokenInformation(token, TokenUser, None, 0, &mut needed);
+        if needed == 0 {
+            let _ = CloseHandle(token);
+            return None;
+        }
+        let mut buf = vec![0u8; needed as usize];
+        let ok = GetTokenInformation(
+            token,
+            TokenUser,
+            Some(buf.as_mut_ptr() as *mut _),
+            needed,
+            &mut needed,
+        )
+        .is_ok();
+        let _ = CloseHandle(token);
+        if !ok {
+            return None;
+        }
+        let token_user = &*(buf.as_ptr() as *const TOKEN_USER);
+        let mut str_sid = PSTR::null();
+        if ConvertSidToStringSidA(token_user.User.Sid, &mut str_sid).is_err() || str_sid.is_null() {
+            return None;
+        }
+        let cstr = std::ffi::CStr::from_ptr(str_sid.0 as *const i8);
+        let res = cstr.to_string_lossy().into_owned();
+        let _ = LocalFree(Some(HLOCAL(str_sid.0 as *mut std::ffi::c_void)));
+        Some(res)
+    }
+}
+
+/// Fast-path CLI subcommand executed by Antigravity / Claude Code / Codex hooks:
+/// `anything-to-prompt.exe --hook-event <antigravity|claude_code|codex> [optional_json]`
+/// Reads hook JSON, forwards a compact `HookSyncNotice` to the running bar's Named Pipe (<5ms),
+/// prints `{}` to stdout (strictly compliant with synchronous hook contracts), and exits 0.
+pub fn run_hook_event_cli(harness_raw: &str, inline_json: Option<&str>) {
+    let harness = match harness_raw.trim().to_ascii_lowercase().as_str() {
+        "antigravity" | "agy" => "antigravity",
+        "claude_code" | "claude-code" | "claudecode" | "claude" => "claude_code",
+        "codex" => "codex",
+        _ => {
+            println!("{{}}");
+            return;
+        }
+    };
+
+    let raw_input = if let Some(arg) = inline_json.filter(|s| !s.trim().is_empty()) {
+        arg.to_string()
+    } else {
+        let mut buf = String::new();
+        let _ = std::io::stdin().read_to_string(&mut buf);
+        buf
+    };
+
+    if let Some(notice) = parse_hook_payload(harness, &raw_input) {
+        let _ = send_notice_to_pipe(&sync_pipe_full_path(), &notice);
+    }
+
+    // Always return empty JSON object so synchronous hooks (Antigravity / Claude Code) never block or error.
+    println!("{{}}");
+}
+
+pub fn parse_hook_payload(harness: &str, raw_json: &str) -> Option<HookSyncNotice> {
+    let trimmed = raw_json.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let v: serde_json::Value = serde_json::from_str(trimmed).ok()?;
+
+    let event = v
+        .get("hookEventName")
+        .or_else(|| v.get("hook_event_name"))
+        .or_else(|| v.get("type"))
+        .and_then(|s| s.as_str())
+        .unwrap_or("event")
+        .to_string();
+
+    let session_id = v
+        .get("conversationId")
+        .or_else(|| v.get("session_id"))
+        .or_else(|| v.get("sessionId"))
+        .or_else(|| v.get("thread-id"))
+        .or_else(|| v.get("thread_id"))
+        .and_then(|s| s.as_str())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+
+    let cwd = v
+        .get("cwd")
+        .and_then(|s| s.as_str())
+        .map(clean_windows_path)
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            v.get("workspacePaths")
+                .and_then(|a| a.as_array())
+                .and_then(|arr| arr.first())
+                .and_then(|s| s.as_str())
+                .map(clean_windows_path)
+                .filter(|s| !s.is_empty())
+        });
+
+    let transcript_path = v
+        .get("transcriptPath")
+        .or_else(|| v.get("transcript_path"))
+        .and_then(|s| s.as_str())
+        .map(clean_windows_path)
+        .filter(|s| !s.is_empty());
+
+    let last_user_input = v
+        .get("lastUserInput")
+        .or_else(|| v.get("prompt"))
+        .and_then(|s| s.as_str())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+
+    let last_assistant_message = v
+        .get("last_assistant_message")
+        .or_else(|| v.get("last-assistant-message"))
+        .and_then(|s| s.as_str())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+
+    let ev_lower = event.to_ascii_lowercase();
+    let running = if ev_lower.contains("stop") || ev_lower.contains("complete") || ev_lower.contains("end") {
+        Some(false)
+    } else if ev_lower.contains("preinvocation")
+        || ev_lower.contains("userpromptsubmit")
+        || ev_lower.contains("pretooluse")
+    {
+        Some(true)
+    } else {
+        None
+    };
+
+    Some(HookSyncNotice {
+        harness: harness.to_string(),
+        event,
+        session_id,
+        cwd,
+        transcript_path,
+        last_user_input,
+        last_assistant_message,
+        running,
+        timestamp_ms: now_ms(),
+    })
+}
+
+fn send_notice_to_pipe(pipe_path: &str, notice: &HookSyncNotice) -> std::io::Result<()> {
+    let encoded = serde_json::to_string(notice)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    let mut file = OpenOptions::new()
+        .write(true)
+        .custom_flags(0)
+        .open(pipe_path)?;
+    writeln!(file, "{encoded}")?;
+    file.flush()
+}
+
+fn write_if_changed(path: &Path, content: &str) -> std::io::Result<bool> {
+    if let Ok(existing) = fs::read_to_string(path) {
+        if existing == content {
+            return Ok(false);
+        }
+    }
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(path, content)?;
+    Ok(true)
+}
+
+pub fn build_antigravity_hooks_json(exe_path: &Path) -> String {
+    let cmd = format!("\"{}\" --hook-event antigravity", exe_path.to_string_lossy());
+    let hook_entry = serde_json::json!({
+        "type": "command",
+        "command": cmd,
+        "timeout": 3
+    });
+    let root = serde_json::json!({
+        "anything-to-prompt-sync": {
+            "SessionStart": [hook_entry],
+            "PreInvocation": [hook_entry],
+            "PostInvocation": [hook_entry],
+            "Stop": [hook_entry]
+        }
+    });
+    serde_json::to_string_pretty(&root).unwrap_or_default()
+}
+
+pub fn build_claude_code_hooks_json(exe_path: &Path) -> String {
+    let slash_exe = exe_path.to_string_lossy().replace('\\', "/");
+    let cmd = format!("\"{slash_exe}\" --hook-event claude_code");
+    let group = serde_json::json!([
+        {
+            "hooks": [
+                {
+                    "type": "command",
+                    "command": cmd,
+                    "timeout": 5
+                }
+            ]
+        }
+    ]);
+    let root = serde_json::json!({
+        "description": "Anything-to-Prompt real-time workspace and conversation sync hooks",
+        "hooks": {
+            "SessionStart": group,
+            "UserPromptSubmit": group,
+            "Stop": group
+        }
+    });
+    serde_json::to_string_pretty(&root).unwrap_or_default()
+}
+
+pub fn build_antigravity_mcp_json(exe_path: &Path) -> String {
+    let root = serde_json::json!({
+        "mcpServers": {
+            "anything-to-prompt": {
+                "command": exe_path.to_string_lossy(),
+                "args": ["--mcp-sidecar", "--harness", "antigravity"]
+            }
+        }
+    });
+    serde_json::to_string_pretty(&root).unwrap_or_default()
+}
+
+pub fn build_claude_code_mcp_json(exe_path: &Path) -> String {
+    let slash_exe = exe_path.to_string_lossy().replace('\\', "/");
+    let root = serde_json::json!({
+        "mcpServers": {
+            "anything-to-prompt": {
+                "command": slash_exe,
+                "args": ["--mcp-sidecar", "--harness", "claude_code"]
+            }
+        }
+    });
+    serde_json::to_string_pretty(&root).unwrap_or_default()
+}
+
+pub fn build_codex_mcp_json(exe_path: &Path) -> String {
+    let root = serde_json::json!({
+        "mcpServers": {
+            "anything-to-prompt": {
+                "command": exe_path.to_string_lossy(),
+                "args": ["--mcp-sidecar", "--harness", "codex"]
+            }
+        }
+    });
+    serde_json::to_string_pretty(&root).unwrap_or_default()
+}
+
+fn antigravity_plugin_dir(home: &Path) -> PathBuf {
+    home.join(".gemini")
+        .join("config")
+        .join("plugins")
+        .join(PLUGIN_DIR_NAME)
+}
+
+fn claude_code_plugin_dir(home: &Path) -> PathBuf {
+    home.join(".claude").join("skills").join(PLUGIN_DIR_NAME)
+}
+
+fn codex_plugin_dir(home: &Path) -> PathBuf {
+    home.join(".codex").join("plugins").join(PLUGIN_DIR_NAME)
+}
+
+/// Mirrors the running executable into `%LOCALAPPDATA%\AnythingToPrompt\bin\anything-to-prompt.exe`
+/// so all 4 Harness plugins reference one stable, permanent dependency binary even if the user
+/// moves or deletes their downloaded portable EXE.
+pub fn ensure_runtime_exe_installed() -> PathBuf {
+    let canonical = crate::config::AppConfig::runtime_exe_path();
+    let Ok(cur) = std::env::current_exe() else {
+        return canonical;
+    };
+    let cur_name = cur
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    // Never overwrite the runtime bin with a cargo test harness binary
+    if !cur_name.eq_ignore_ascii_case("anything-to-prompt.exe") {
+        return if canonical.is_file() { canonical } else { cur };
+    }
+    if cur
+        .to_string_lossy()
+        .eq_ignore_ascii_case(&canonical.to_string_lossy())
+    {
+        return canonical;
+    }
+    let needs_copy = match (fs::metadata(&cur), fs::metadata(&canonical)) {
+        (Ok(src), Ok(dst)) => {
+            src.len() != dst.len()
+                || src.modified().ok() != dst.modified().ok()
+        }
+        _ => true,
+    };
+    if needs_copy {
+        if let Some(parent) = canonical.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        if fs::copy(&cur, &canonical).is_ok() {
+            log::info!("Synced stable runtime dependency exe -> {}", canonical.display());
+            return canonical;
+        }
+    }
+    if canonical.is_file() {
+        canonical
+    } else {
+        cur
+    }
+}
+
+/// Installs/updates or cleanly removes the lightweight native companion/sync plugins for:
+/// - Antigravity (`~/.gemini/config/plugins/anything-to-prompt-sync`: `plugin.json` + `hooks.json` + `mcp_config.json`)
+/// - Claude Code (`~/.claude/skills/anything-to-prompt-sync`: `.claude-plugin/plugin.json` + `hooks/hooks.json` + `.mcp.json`)
+/// - Codex (`~/.codex/plugins/anything-to-prompt-sync`: `.codex-plugin/plugin.json` + `.mcp.json`, plus zero-invasion JSONL live tail)
+/// Never mutates third-party databases or `config.toml`.
+pub fn apply_external_sync_plugins(enable: bool) -> ExternalSyncPluginStatus {
+    let dsh_ok = crate::config::AppConfig::dsh_home_dir()
+        .join("profiles")
+        .join("web")
+        .join("local-plugins")
+        .join("anything-to-prompt")
+        .join("package.json")
+        .is_file();
+
+    let Some(home) = dirs::home_dir() else {
+        return ExternalSyncPluginStatus {
+            enabled: enable,
+            dsh_plugin: dsh_ok,
+            antigravity_plugin: false,
+            claude_code_plugin: false,
+            codex_plugin: false,
+            codex_live_watch: false,
+            runtime_exe_path: crate::config::AppConfig::runtime_exe_path()
+                .to_string_lossy()
+                .to_string(),
+            pipe_name: sync_pipe_full_path(),
+        };
+    };
+
+    let exe = ensure_runtime_exe_installed();
+    let exe_display = exe.to_string_lossy().to_string();
+    let ag_dir = antigravity_plugin_dir(&home);
+    let cc_dir = claude_code_plugin_dir(&home);
+    let cx_dir = codex_plugin_dir(&home);
+    let has_codex = home.join(".codex").is_dir();
+
+    if !enable {
+        for dir in [&ag_dir, &cc_dir, &cx_dir] {
+            if dir.exists() {
+                let _ = fs::remove_dir_all(dir);
+            }
+        }
+        return ExternalSyncPluginStatus {
+            enabled: false,
+            dsh_plugin: dsh_ok,
+            antigravity_plugin: false,
+            claude_code_plugin: false,
+            codex_plugin: false,
+            codex_live_watch: false,
+            runtime_exe_path: exe_display,
+            pipe_name: sync_pipe_full_path(),
+        };
+    }
+
+    // 1. Antigravity native plugin (`plugin.json` + root `hooks.json` + `mcp_config.json`)
+    let mut ag_ok = false;
+    if home.join(".gemini").is_dir() {
+        let manifest = serde_json::to_string_pretty(&serde_json::json!({
+            "name": PLUGIN_DIR_NAME,
+            "description": "Anything-to-Prompt companion bar launcher, settings bridge, and real-time workspace transcript sync."
+        }))
+        .unwrap_or_default();
+        let hooks = build_antigravity_hooks_json(&exe);
+        let mcp = build_antigravity_mcp_json(&exe);
+        let w1 = write_if_changed(&ag_dir.join("plugin.json"), &manifest);
+        let w2 = write_if_changed(&ag_dir.join("hooks.json"), &hooks);
+        let w3 = write_if_changed(&ag_dir.join("mcp_config.json"), &mcp);
+        ag_ok = w1.is_ok() && w2.is_ok() && w3.is_ok();
+        if ag_ok {
+            log::info!("Synced Antigravity companion plugin at {}", ag_dir.display());
+        }
+    }
+
+    // 2. Claude Code native skills-dir plugin (`.claude-plugin/plugin.json` + `hooks/hooks.json` + `.mcp.json`)
+    let mut cc_ok = false;
+    if home.join(".claude").is_dir() {
+        let manifest = serde_json::to_string_pretty(&serde_json::json!({
+            "name": PLUGIN_DIR_NAME,
+            "version": env!("CARGO_PKG_VERSION"),
+            "description": "Anything-to-Prompt companion bar launcher, settings bridge, and real-time workspace transcript sync.",
+            "author": {
+                "name": "Anything-to-Prompt"
+            }
+        }))
+        .unwrap_or_default();
+        let hooks = build_claude_code_hooks_json(&exe);
+        let mcp = build_claude_code_mcp_json(&exe);
+        let w1 = write_if_changed(&cc_dir.join(".claude-plugin").join("plugin.json"), &manifest);
+        let w2 = write_if_changed(&cc_dir.join("hooks").join("hooks.json"), &hooks);
+        let w3 = write_if_changed(&cc_dir.join(".mcp.json"), &mcp);
+        cc_ok = w1.is_ok() && w2.is_ok() && w3.is_ok();
+        if cc_ok {
+            log::info!("Synced Claude Code companion plugin at {}", cc_dir.display());
+        }
+    }
+
+    // 3. Codex native plugin bundle (`.codex-plugin/plugin.json` + `.mcp.json`) + zero-invasion JSONL live watch
+    let mut cx_ok = false;
+    if has_codex {
+        let manifest = serde_json::to_string_pretty(&serde_json::json!({
+            "version": env!("CARGO_PKG_VERSION"),
+            "name": PLUGIN_DIR_NAME,
+            "mcpServers": "./.mcp.json",
+            "description": "Anything-to-Prompt companion bar launcher and settings bridge for Codex.",
+            "author": "Anything-to-Prompt",
+            "license": "MIT"
+        }))
+        .unwrap_or_default();
+        let mcp = build_codex_mcp_json(&exe);
+        let w1 = write_if_changed(&cx_dir.join(".codex-plugin").join("plugin.json"), &manifest);
+        let w2 = write_if_changed(&cx_dir.join(".mcp.json"), &mcp);
+        cx_ok = w1.is_ok() && w2.is_ok();
+        if cx_ok {
+            log::info!("Synced Codex companion plugin at {}", cx_dir.display());
+        }
+    }
+
+    ExternalSyncPluginStatus {
+        enabled: true,
+        dsh_plugin: dsh_ok,
+        antigravity_plugin: ag_ok,
+        claude_code_plugin: cc_ok,
+        codex_plugin: cx_ok,
+        codex_live_watch: has_codex,
+        runtime_exe_path: exe_display,
+        pipe_name: sync_pipe_full_path(),
+    }
+}
+
+pub fn query_external_sync_status(enabled: bool) -> ExternalSyncPluginStatus {
+    let dsh_ok = crate::config::AppConfig::dsh_home_dir()
+        .join("profiles")
+        .join("web")
+        .join("local-plugins")
+        .join("anything-to-prompt")
+        .join("package.json")
+        .is_file();
+    let runtime_exe = crate::config::AppConfig::runtime_exe_path()
+        .to_string_lossy()
+        .to_string();
+    let Some(home) = dirs::home_dir() else {
+        return ExternalSyncPluginStatus {
+            enabled,
+            dsh_plugin: dsh_ok,
+            antigravity_plugin: false,
+            claude_code_plugin: false,
+            codex_plugin: false,
+            codex_live_watch: false,
+            runtime_exe_path: runtime_exe,
+            pipe_name: sync_pipe_full_path(),
+        };
+    };
+    ExternalSyncPluginStatus {
+        enabled,
+        dsh_plugin: dsh_ok,
+        antigravity_plugin: antigravity_plugin_dir(&home).join("hooks.json").is_file(),
+        claude_code_plugin: claude_code_plugin_dir(&home)
+            .join("hooks")
+            .join("hooks.json")
+            .is_file(),
+        codex_plugin: codex_plugin_dir(&home)
+            .join(".codex-plugin")
+            .join("plugin.json")
+            .is_file(),
+        codex_live_watch: enabled && home.join(".codex").is_dir(),
+        runtime_exe_path: runtime_exe,
+        pipe_name: sync_pipe_full_path(),
+    }
+}
+
+pub fn push_harness_sync_to_bar(app: &AppHandle, payload: &HarnessSyncPayload) {
+    if let Some(bar_win) = app.get_webview_window("bar") {
+        if let Ok(json) = serde_json::to_string(payload) {
+            let js = format!(
+                "(function(){{ if (typeof window.__DSB_HARNESS_SYNC__ === 'function') {{ window.__DSB_HARNESS_SYNC__({json}); }} }})();"
+            );
+            let _ = bar_win.eval(&js);
+        }
+    }
+}
+
+fn file_sig(path: &Path) -> Option<(i64, u64)> {
+    let meta = fs::metadata(path).ok()?;
+    let mtime = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    Some((mtime, meta.len()))
+}
+
+fn title_from_messages(msgs: &[ExternalChatMessage], fallback: &str) -> String {
+    if let Some(first_user) = msgs.iter().find(|m| m.role == "user" && !m.text.trim().is_empty()) {
+        return sanitize_title(&first_user.text, fallback);
+    }
+    fallback.to_string()
+}
+
+fn build_sync_payload_from_hook(notice: &HookSyncNotice) -> Option<HarnessSyncPayload> {
+    let harness = notice.harness.as_str();
+    let session_id = notice.session_id.clone().unwrap_or_default();
+    if session_id.is_empty() && notice.transcript_path.is_none() {
+        return None;
+    }
+
+    let mut messages: Vec<ExternalChatMessage> = Vec::new();
+    if let Some(ref tp) = notice.transcript_path {
+        if let Ok(raw) = fs::read_to_string(tp) {
+            messages = match harness {
+                "antigravity" => parse_antigravity_transcript_lines(&raw),
+                "claude_code" => parse_claude_code_transcript_lines(&raw),
+                "codex" => parse_codex_rollout_lines(&raw),
+                _ => Vec::new(),
+            };
+        }
+    }
+    if messages.is_empty() && !session_id.is_empty() {
+        let kind = crate::harness::HarnessKind::parse(harness);
+        messages = crate::harness::load_external_messages(kind, &session_id);
+    }
+
+    // Append in-flight user/assistant text from hook payload if async JSONL flush hasn't caught up yet
+    if let Some(ref user_txt) = notice.last_user_input {
+        let already_last = messages
+            .last()
+            .map(|m| m.role == "user" && m.text.trim() == user_txt.trim())
+            .unwrap_or(false);
+        if !already_last && notice.event.to_ascii_lowercase().contains("prompt") {
+            messages.push(ExternalChatMessage {
+                id: format!("hook-u-{}", notice.timestamp_ms),
+                role: "user".to_string(),
+                text: user_txt.clone(),
+                streaming: false,
+            });
+        }
+    }
+    if let Some(ref asst_txt) = notice.last_assistant_message {
+        let already_last = messages
+            .last()
+            .map(|m| m.role == "assistant" && m.text.trim() == asst_txt.trim())
+            .unwrap_or(false);
+        if !already_last {
+            messages.push(ExternalChatMessage {
+                id: format!("hook-a-{}", notice.timestamp_ms),
+                role: "assistant".to_string(),
+                text: asst_txt.clone(),
+                streaming: false,
+            });
+        }
+    }
+
+    let ws_path = notice.cwd.clone().unwrap_or_default();
+    let ws_label = if ws_path.is_empty() {
+        match harness {
+            "antigravity" => "CLI Project".to_string(),
+            "claude_code" => "Claude Code".to_string(),
+            _ => "Codex".to_string(),
+        }
+    } else {
+        basename_of_path(&ws_path)
+    };
+    let ws_id = if harness == "antigravity" && ws_path.is_empty() {
+        "default-cli-project".to_string()
+    } else {
+        ws_path.clone()
+    };
+
+    let fallback_title = format!("{ws_label} · 实时会话");
+    let title = title_from_messages(&messages, &fallback_title);
+
+    Some(HarnessSyncPayload {
+        harness: harness.to_string(),
+        workspace_id: ws_id,
+        workspace_path: ws_path,
+        workspace_label: ws_label,
+        session_id,
+        title,
+        messages,
+        running: notice.running.unwrap_or(false),
+        source: "hook".to_string(),
+        updated_at_ms: notice.timestamp_ms,
+    })
+}
+
+fn create_inbound_sync_pipe(pipe_full: &str) -> Option<HANDLE> {
+    let pipe_w = to_wide(pipe_full);
+    let sid = current_user_sid_string();
+    let sddl = sid.map(|s| format!("D:(A;;GA;;;{s})"));
+    let sddl_w = sddl.as_deref().map(to_wide);
+    let mut sd = PSECURITY_DESCRIPTOR::default();
+    let mut sa = SECURITY_ATTRIBUTES {
+        nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+        lpSecurityDescriptor: std::ptr::null_mut(),
+        bInheritHandle: false.into(),
+    };
+    let sa_ptr = if let Some(ref sw) = sddl_w {
+        let ok = unsafe {
+            ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                PCWSTR(sw.as_ptr()),
+                SDDL_REVISION_1,
+                &mut sd,
+                None,
+            )
+            .is_ok()
+        };
+        if ok {
+            sa.lpSecurityDescriptor = sd.0;
+            Some(&sa as *const SECURITY_ATTRIBUTES)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    let handle_res = unsafe {
+        CreateNamedPipeW(
+            PCWSTR(pipe_w.as_ptr()),
+            PIPE_ACCESS_INBOUND,
+            PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
+            16,
+            0,
+            65536,
+            0,
+            sa_ptr,
+        )
+    };
+    if !sd.0.is_null() {
+        unsafe {
+            let _ = LocalFree(Some(HLOCAL(sd.0)));
+        }
+    }
+
+    if handle_res != INVALID_HANDLE_VALUE && !handle_res.0.is_null() {
+        Some(handle_res)
+    } else {
+        None
+    }
+}
+
+fn find_newest_codex_rollout(home: &Path) -> Option<(PathBuf, i64, u64)> {
+    let sessions_root = home.join(".codex").join("sessions");
+    let mut newest_year: Option<PathBuf> = None;
+    let mut best_y = String::new();
+    for entry in fs::read_dir(&sessions_root).ok()?.flatten() {
+        if entry.path().is_dir() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name >= best_y {
+                best_y = name;
+                newest_year = Some(entry.path());
+            }
+        }
+    }
+    let year_dir = newest_year?;
+    let mut newest_month: Option<PathBuf> = None;
+    let mut best_m = String::new();
+    for entry in fs::read_dir(&year_dir).ok()?.flatten() {
+        if entry.path().is_dir() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name >= best_m {
+                best_m = name;
+                newest_month = Some(entry.path());
+            }
+        }
+    }
+    let month_dir = newest_month?;
+    let mut day_dirs: Vec<(String, PathBuf)> = fs::read_dir(&month_dir)
+        .ok()?
+        .flatten()
+        .filter(|e| e.path().is_dir())
+        .map(|e| (e.file_name().to_string_lossy().to_string(), e.path()))
+        .collect();
+    day_dirs.sort_by(|a, b| b.0.cmp(&a.0));
+
+    // Check up to the 2 most recent day folders so midnight rollovers never miss
+    let mut best: Option<(PathBuf, i64, u64)> = None;
+    for (_, day_dir) in day_dirs.into_iter().take(2) {
+        let Ok(files) = fs::read_dir(&day_dir) else {
+            continue;
+        };
+        for f in files.flatten() {
+            let p = f.path();
+            if p.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+                continue;
+            }
+            if let Some((mtime, len)) = file_sig(&p) {
+                if len > 0 && best.as_ref().map(|b| mtime > b.1).unwrap_or(true) {
+                    best = Some((p, mtime, len));
+                }
+            }
+        }
+    }
+    best
+}
+
+fn parse_codex_rollout_meta(raw: &str) -> (String, String) {
+    for line in raw.lines().take(20) {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
+            continue;
+        };
+        if v.get("type").and_then(|t| t.as_str()) == Some("session_meta") {
+            if let Some(p) = v.get("payload") {
+                let id = p
+                    .get("id")
+                    .and_then(|s| s.as_str())
+                    .unwrap_or("")
+                    .trim()
+                    .to_string();
+                let cwd = p
+                    .get("cwd")
+                    .and_then(|s| s.as_str())
+                    .map(clean_windows_path)
+                    .unwrap_or_default();
+                if !id.is_empty() {
+                    return (id, cwd);
+                }
+            }
+        }
+    }
+    (String::new(), String::new())
+}
+
+fn find_newest_claude_jsonl(home: &Path) -> Option<(PathBuf, i64, u64)> {
+    let projects_root = home.join(".claude").join("projects");
+    let mut best: Option<(PathBuf, i64, u64)> = None;
+    for proj in fs::read_dir(&projects_root).ok()?.flatten() {
+        let pp = proj.path();
+        if !pp.is_dir() {
+            continue;
+        }
+        let Ok(files) = fs::read_dir(&pp) else {
+            continue;
+        };
+        for f in files.flatten() {
+            let fp = f.path();
+            if fp.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+                continue;
+            }
+            let stem = fp.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+            if stem.starts_with("agent-") {
+                continue;
+            }
+            if let Some((mtime, len)) = file_sig(&fp) {
+                if len > 0 && best.as_ref().map(|b| mtime > b.1).unwrap_or(true) {
+                    best = Some((fp, mtime, len));
+                }
+            }
+        }
+    }
+    best
+}
+
+fn parse_claude_jsonl_meta(raw: &str, fallback_stem: &str) -> (String, String) {
+    let mut sid = fallback_stem.to_string();
+    let mut cwd = String::new();
+    for line in raw.lines().take(60) {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
+            continue;
+        };
+        if let Some(s) = v.get("sessionId").and_then(|x| x.as_str()) {
+            if !s.trim().is_empty() {
+                sid = s.trim().to_string();
+            }
+        }
+        if cwd.is_empty() {
+            if let Some(c) = v.get("cwd").and_then(|x| x.as_str()) {
+                if !c.trim().is_empty() {
+                    cwd = clean_windows_path(c);
+                }
+            }
+        }
+        if !cwd.is_empty() && !sid.is_empty() {
+            break;
+        }
+    }
+    (sid, cwd)
+}
+
+fn find_newest_antigravity_transcript(home: &Path) -> Option<(PathBuf, String, i64, u64)> {
+    let mut best: Option<(PathBuf, String, i64, u64)> = None;
+    for sub in ["antigravity", "antigravity-cli"] {
+        let brain = home.join(".gemini").join(sub).join("brain");
+        let Ok(entries) = fs::read_dir(&brain) else {
+            continue;
+        };
+        for ent in entries.flatten() {
+            let dir = ent.path();
+            if !dir.is_dir() {
+                continue;
+            }
+            let cid = ent.file_name().to_string_lossy().to_string();
+            let tp = dir
+                .join(".system_generated")
+                .join("logs")
+                .join("transcript.jsonl");
+            if let Some((mtime, len)) = file_sig(&tp) {
+                if len > 0 && best.as_ref().map(|b| mtime > b.2).unwrap_or(true) {
+                    best = Some((tp, cid, mtime, len));
+                }
+            }
+        }
+    }
+    best
+}
+
+/// Starts two lightweight daemon threads inside Anything-to-Prompt:
+/// 1. Named Pipe receiver (`\\.\pipe\atp-harness-sync-v1`) for instant (<10ms) hook push from Antigravity / Claude Code plugins.
+/// 2. Zero-invasion read-only JSONL tail watcher (650ms cadence) across Codex / Claude Code / Antigravity so live desktop & terminal conversations stream into the bar automatically.
+pub fn start_live_sync_services(app: AppHandle, enabled_flag: Arc<AtomicBool>) {
+    // Thread 1: Named Pipe hook event listener
+    let app_pipe = app.clone();
+    let flag_pipe = enabled_flag.clone();
+    let _ = std::thread::Builder::new()
+        .name("atp-sync-pipe".to_string())
+        .spawn(move || {
+            let full_pipe = sync_pipe_full_path();
+            loop {
+                let Some(handle) = create_inbound_sync_pipe(&full_pipe) else {
+                    std::thread::sleep(Duration::from_millis(800));
+                    continue;
+                };
+                let connected = unsafe {
+                    match ConnectNamedPipe(handle, None) {
+                        Ok(()) => true,
+                        Err(e) => {
+                            let win_err = windows::core::Error::from_thread();
+                            win_err.code().0 as u32 == 0x80070217 || e.code().0 as u32 == 0x80070217
+                        }
+                    }
+                };
+                if !connected {
+                    unsafe {
+                        let _ = CloseHandle(handle);
+                    }
+                    continue;
+                }
+                let file = unsafe { std::fs::File::from_raw_handle(handle.0) };
+                let reader = BufReader::new(file);
+                for line in reader.lines().map_while(Result::ok) {
+                    let trimmed = line.trim();
+                    if trimmed.is_empty() {
+                        continue;
+                    }
+                    if let Ok(ctrl) = serde_json::from_str::<PipeControlCommand>(trimmed) {
+                        crate::handle_pipe_control_command(&app_pipe, &ctrl.control, ctrl.arg.as_deref());
+                        continue;
+                    }
+                    if !flag_pipe.load(Ordering::Acquire) {
+                        continue;
+                    }
+                    if let Ok(notice) = serde_json::from_str::<HookSyncNotice>(trimmed) {
+                        if let Some(payload) = build_sync_payload_from_hook(&notice) {
+                            push_harness_sync_to_bar(&app_pipe, &payload);
+                        }
+                    }
+                }
+                unsafe {
+                    let _ = DisconnectNamedPipe(handle);
+                }
+            }
+        });
+
+    // Thread 2: Zero-invasion read-only live JSONL watcher (Codex + Claude Code + Antigravity)
+    let app_watch = app;
+    let flag_watch = enabled_flag;
+    let _ = std::thread::Builder::new()
+        .name("atp-sync-tail".to_string())
+        .spawn(move || {
+            let Some(home) = dirs::home_dir() else {
+                return;
+            };
+            // Seed initial baselines so existing historical files do not fire spurious sync events on boot
+            let mut seen: HashMap<String, (PathBuf, i64, u64)> = HashMap::new();
+            if let Some((p, mt, ln)) = find_newest_codex_rollout(&home) {
+                seen.insert("codex".to_string(), (p, mt, ln));
+            }
+            if let Some((p, mt, ln)) = find_newest_claude_jsonl(&home) {
+                seen.insert("claude_code".to_string(), (p, mt, ln));
+            }
+            if let Some((p, _, mt, ln)) = find_newest_antigravity_transcript(&home) {
+                seen.insert("antigravity".to_string(), (p, mt, ln));
+            }
+
+            loop {
+                std::thread::sleep(Duration::from_millis(650));
+                if !flag_watch.load(Ordering::Acquire) {
+                    continue;
+                }
+
+                // 1. Codex live rollout watcher
+                if let Some((p, mt, ln)) = find_newest_codex_rollout(&home) {
+                    let changed = seen
+                        .get("codex")
+                        .map(|(op, omt, oln)| *op != p || mt > *omt || ln != *oln)
+                        .unwrap_or(true);
+                    if changed {
+                        seen.insert("codex".to_string(), (p.clone(), mt, ln));
+                        if let Ok(raw) = fs::read_to_string(&p) {
+                            let (sid, cwd) = parse_codex_rollout_meta(&raw);
+                            let msgs = parse_codex_rollout_lines(&raw);
+                            if !sid.is_empty() && !msgs.is_empty() {
+                                let label = if cwd.is_empty() {
+                                    "Codex".to_string()
+                                } else {
+                                    basename_of_path(&cwd)
+                                };
+                                let payload = HarnessSyncPayload {
+                                    harness: "codex".to_string(),
+                                    workspace_id: cwd.clone(),
+                                    workspace_path: cwd,
+                                    workspace_label: label.clone(),
+                                    session_id: sid,
+                                    title: title_from_messages(&msgs, &label),
+                                    messages: msgs,
+                                    running: false,
+                                    source: "watch".to_string(),
+                                    updated_at_ms: mt,
+                                };
+                                push_harness_sync_to_bar(&app_watch, &payload);
+                            }
+                        }
+                    }
+                }
+
+                // 2. Claude Code live JSONL watcher
+                if let Some((p, mt, ln)) = find_newest_claude_jsonl(&home) {
+                    let changed = seen
+                        .get("claude_code")
+                        .map(|(op, omt, oln)| *op != p || mt > *omt || ln != *oln)
+                        .unwrap_or(true);
+                    if changed {
+                        seen.insert("claude_code".to_string(), (p.clone(), mt, ln));
+                        if let Ok(raw) = fs::read_to_string(&p) {
+                            let stem = p.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+                            let (sid, cwd) = parse_claude_jsonl_meta(&raw, stem);
+                            let msgs = parse_claude_code_transcript_lines(&raw);
+                            if !sid.is_empty() && !msgs.is_empty() {
+                                let label = if cwd.is_empty() {
+                                    "Claude Code".to_string()
+                                } else {
+                                    basename_of_path(&cwd)
+                                };
+                                let payload = HarnessSyncPayload {
+                                    harness: "claude_code".to_string(),
+                                    workspace_id: cwd.clone(),
+                                    workspace_path: cwd,
+                                    workspace_label: label.clone(),
+                                    session_id: sid,
+                                    title: title_from_messages(&msgs, &label),
+                                    messages: msgs,
+                                    running: false,
+                                    source: "watch".to_string(),
+                                    updated_at_ms: mt,
+                                };
+                                push_harness_sync_to_bar(&app_watch, &payload);
+                            }
+                        }
+                    }
+                }
+
+                // 3. Antigravity live transcript watcher
+                if let Some((p, cid, mt, ln)) = find_newest_antigravity_transcript(&home) {
+                    let changed = seen
+                        .get("antigravity")
+                        .map(|(op, omt, oln)| *op != p || mt > *omt || ln != *oln)
+                        .unwrap_or(true);
+                    if changed {
+                        seen.insert("antigravity".to_string(), (p.clone(), mt, ln));
+                        if let Ok(raw) = fs::read_to_string(&p) {
+                            let msgs = parse_antigravity_transcript_lines(&raw);
+                            if !cid.is_empty() && !msgs.is_empty() {
+                                let payload = HarnessSyncPayload {
+                                    harness: "antigravity".to_string(),
+                                    workspace_id: "default-cli-project".to_string(),
+                                    workspace_path: String::new(),
+                                    workspace_label: "Antigravity".to_string(),
+                                    session_id: cid,
+                                    title: title_from_messages(&msgs, "Antigravity 实时对话"),
+                                    messages: msgs,
+                                    running: false,
+                                    source: "watch".to_string(),
+                                    updated_at_ms: mt,
+                                };
+                                push_harness_sync_to_bar(&app_watch, &payload);
+                            }
+                        }
+                    }
+                }
+            }
+        });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_antigravity_and_claude_and_codex_hook_payloads() {
+        let ag_raw = r#"{
+            "conversationId": "ag-conv-123",
+            "workspacePaths": ["D:\\Work\\Demo"],
+            "transcriptPath": "C:\\Users\\Me\\.gemini\\antigravity\\brain\\ag-conv-123\\transcript.jsonl",
+            "lastUserInput": "优化编译速度",
+            "hookEventName": "PreInvocation",
+            "cwd": "D:\\Work\\Demo"
+        }"#;
+        let ag = parse_hook_payload("antigravity", ag_raw).unwrap();
+        assert_eq!(ag.harness, "antigravity");
+        assert_eq!(ag.session_id.as_deref(), Some("ag-conv-123"));
+        assert_eq!(ag.cwd.as_deref(), Some(r"D:\Work\Demo"));
+        assert_eq!(ag.running, Some(true));
+
+        let cc_raw = r#"{
+            "session_id": "cc-sess-999",
+            "cwd": "D:\\AI\\Ollama Claude",
+            "transcript_path": "C:\\Users\\Me\\.claude\\projects\\p\\cc-sess-999.jsonl",
+            "hook_event_name": "Stop",
+            "last_assistant_message": "已完成重构"
+        }"#;
+        let cc = parse_hook_payload("claude_code", cc_raw).unwrap();
+        assert_eq!(cc.harness, "claude_code");
+        assert_eq!(cc.session_id.as_deref(), Some("cc-sess-999"));
+        assert_eq!(cc.running, Some(false));
+        assert_eq!(cc.last_assistant_message.as_deref(), Some("已完成重构"));
+
+        let cx_raw = r#"{
+            "type": "agent-turn-complete",
+            "thread-id": "cx-thread-7",
+            "cwd": "D:\\Repo",
+            "last-assistant-message": "All tests pass."
+        }"#;
+        let cx = parse_hook_payload("codex", cx_raw).unwrap();
+        assert_eq!(cx.harness, "codex");
+        assert_eq!(cx.session_id.as_deref(), Some("cx-thread-7"));
+        assert_eq!(cx.running, Some(false));
+    }
+
+    #[test]
+    fn generates_valid_antigravity_and_claude_hooks_json() {
+        let exe = Path::new(r"C:\Tools\anything-to-prompt.exe");
+        let ag_json: serde_json::Value =
+            serde_json::from_str(&build_antigravity_hooks_json(exe)).unwrap();
+        assert!(ag_json["anything-to-prompt-sync"]["SessionStart"].is_array());
+        assert!(ag_json["anything-to-prompt-sync"]["Stop"].is_array());
+
+        let cc_json: serde_json::Value =
+            serde_json::from_str(&build_claude_code_hooks_json(exe)).unwrap();
+        assert!(cc_json["hooks"]["SessionStart"].is_array());
+        assert!(cc_json["hooks"]["UserPromptSubmit"].is_array());
+        assert!(cc_json["hooks"]["Stop"].is_array());
+        let cmd = cc_json["hooks"]["Stop"][0]["hooks"][0]["command"]
+            .as_str()
+            .unwrap();
+        assert!(cmd.contains("C:/Tools/anything-to-prompt.exe"));
+        assert!(cmd.contains("--hook-event claude_code"));
+    }
+
+    #[test]
+    fn pipe_roundtrip_delivers_hook_notice_locally() {
+        let pipe_name = format!(r"\\.\pipe\atp-sync-test-{}", std::process::id());
+        let pipe_for_srv = pipe_name.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let srv = std::thread::spawn(move || {
+            let h = create_inbound_sync_pipe(&pipe_for_srv).expect("create pipe");
+            let _ = tx.send(());
+            unsafe {
+                let _ = ConnectNamedPipe(h, None);
+            }
+            let file = unsafe { std::fs::File::from_raw_handle(h.0) };
+            let mut line = String::new();
+            let _ = BufReader::new(file).read_line(&mut line);
+            line
+        });
+
+        rx.recv().unwrap();
+        std::thread::sleep(Duration::from_millis(30));
+        let notice = HookSyncNotice {
+            harness: "claude_code".to_string(),
+            event: "Stop".to_string(),
+            session_id: Some("sess-pipe-1".to_string()),
+            cwd: Some(r"D:\Work".to_string()),
+            transcript_path: None,
+            last_user_input: None,
+            last_assistant_message: Some("Done".to_string()),
+            running: Some(false),
+            timestamp_ms: 123456,
+        };
+        send_notice_to_pipe(&pipe_name, &notice).expect("send notice");
+        let received = srv.join().unwrap();
+        let parsed: HookSyncNotice = serde_json::from_str(received.trim()).unwrap();
+        assert_eq!(parsed.session_id.as_deref(), Some("sess-pipe-1"));
+        assert_eq!(parsed.last_assistant_message.as_deref(), Some("Done"));
+    }
+}

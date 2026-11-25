@@ -210,10 +210,14 @@ window.__ModuleLoader__.load({
       externalMessages: { antigravity: [], codex: [], claude_code: [] },
       externalActiveTurn: null,
       externalLoading: { antigravity: false, codex: false, claude_code: false },
+      liveSyncMeta: { antigravity: null, codex: null, claude_code: null },
+      lastSyncCatalogRefresh: { antigravity: 0, codex: 0, claude_code: 0 },
+      appSettings: null,
       claudePermissionMode: readStoredString(STORAGE_KEY_CLAUDE_PERM, 'auto'),
       extDraftText: '',
       extCapsules: [],
       toggleHarnessMenu: null,
+      openSettingsMenu: null,
     };
 
     function applyHarnessThemeAttribute(harnessId) {
@@ -480,6 +484,90 @@ window.__ModuleLoader__.load({
       notifyBarRuntime();
     }
 
+    function refreshAppSettings() {
+      if (!IS_BAR) return Promise.resolve(null);
+      return tauriInvoke('app_get_settings')
+        .then((snap) => {
+          if (snap && typeof snap === 'object') {
+            dsbRuntime.appSettings = snap;
+            notifyBarRuntime();
+          }
+          return snap;
+        })
+        .catch(() => null);
+    }
+
+    function updateAppSettings(patch) {
+      if (!IS_BAR || !patch) return Promise.resolve(null);
+      // Optimistic local preview when running inside browser-only test mode
+      if (dsbRuntime.appSettings && dsbRuntime.appSettings.config) {
+        dsbRuntime.appSettings = {
+          ...dsbRuntime.appSettings,
+          config: { ...dsbRuntime.appSettings.config, ...patch },
+        };
+        notifyBarRuntime();
+      }
+      return tauriInvoke('app_update_settings', { patch })
+        .then((snap) => {
+          if (snap && typeof snap === 'object') {
+            dsbRuntime.appSettings = snap;
+            notifyBarRuntime();
+          }
+          return snap;
+        })
+        .catch(() => dsbRuntime.appSettings);
+    }
+
+    function handleIncomingHarnessSync(evt) {
+      if (!evt || typeof evt !== 'object') return;
+      const hId = normalizeHarnessId(evt.harness);
+      if (hId === 'dsh') return;
+      // Never overwrite an active turn currently streaming from the floating bar itself
+      if (dsbRuntime.externalActiveTurn && dsbRuntime.externalActiveTurn.harness === hId) {
+        return;
+      }
+
+      const incomingSessionId = String(evt.sessionId || '');
+      const curSel = dsbRuntime.externalSelection[hId] || {};
+      const shouldUpdateMessages =
+        !curSel.sessionId ||
+        !incomingSessionId ||
+        curSel.sessionId === incomingSessionId ||
+        evt.source === 'hook' ||
+        evt.source === 'watch';
+
+      if (shouldUpdateMessages) {
+        if (incomingSessionId) {
+          dsbRuntime.externalSelection[hId] = {
+            workspaceId: evt.workspaceId || curSel.workspaceId || '',
+            workspacePath: evt.workspacePath || curSel.workspacePath || '',
+            sessionId: incomingSessionId,
+            title: evt.title || curSel.title || HARNESS_META[hId].label,
+          };
+        }
+        if (Array.isArray(evt.messages) && evt.messages.length > 0) {
+          dsbRuntime.externalMessages[hId] = evt.messages;
+        }
+      }
+
+      dsbRuntime.liveSyncMeta[hId] = {
+        source: evt.source || 'watch',
+        running: Boolean(evt.running),
+        updatedAt: evt.updatedAtMs || Date.now(),
+      };
+
+      const now = Date.now();
+      if (now - (dsbRuntime.lastSyncCatalogRefresh[hId] || 0) > 2500) {
+        dsbRuntime.lastSyncCatalogRefresh[hId] = now;
+        refreshExternalCatalog(hId, false);
+      }
+
+      notifyBarRuntime();
+      if (typeof dsbRuntime.scheduleLayoutReport === 'function') {
+        dsbRuntime.scheduleLayoutReport(220);
+      }
+    }
+
     function notifyBarRuntime() {
       for (const fn of dsbRuntime.listeners) {
         try {
@@ -601,6 +689,7 @@ window.__ModuleLoader__.load({
       }
       applyHarnessThemeAttribute(dsbRuntime.activeHarness);
       window.__DSB_HARNESS_EVENT__ = handleIncomingHarnessEvent;
+      window.__DSB_HARNESS_SYNC__ = handleIncomingHarnessSync;
       window.__DSB_BRIDGE__ = {
         setMode(mode) {
           setBarMode(mode);
@@ -609,6 +698,17 @@ window.__ModuleLoader__.load({
         setHarness(harnessId) {
           setActiveHarness(harnessId, false);
           return dsbRuntime.activeHarness;
+        },
+        openSettings() {
+          if (typeof dsbRuntime.openSettingsMenu === 'function') {
+            dsbRuntime.openSettingsMenu();
+            return true;
+          }
+          return false;
+        },
+        refreshSettings() {
+          refreshAppSettings();
+          return true;
         },
         focusComposer() {
           return focusComposerElement();
@@ -4000,9 +4100,30 @@ window.__ModuleLoader__.load({
                                 border: '1px solid ' + HARNESS_META[activeHarness].accentBorder,
                                 color: HARNESS_META[activeHarness].accent,
                                 letterSpacing: '0.01em',
+                                display: 'inline-flex',
+                                alignItems: 'center',
+                                gap: '5px',
                               },
                             },
-                            HARNESS_META[activeHarness].label + ' · ' + HARNESS_META[activeHarness].syncHint,
+                            dsbRuntime.liveSyncMeta[activeHarness]
+                              ? h('span', {
+                                  style: {
+                                    width: '6px',
+                                    height: '6px',
+                                    borderRadius: '999px',
+                                    background: '#34d399',
+                                    boxShadow: '0 0 6px #34d399',
+                                    flexShrink: 0,
+                                  },
+                                })
+                              : null,
+                            HARNESS_META[activeHarness].label +
+                              ' · ' +
+                              (dsbRuntime.liveSyncMeta[activeHarness]
+                                ? dsbRuntime.liveSyncMeta[activeHarness].running
+                                  ? '实时同步（运行中）'
+                                  : '实时同步'
+                                : HARNESS_META[activeHarness].syncHint),
                           )
                         : null,
                       activeHarness !== 'dsh' &&
@@ -4244,6 +4365,8 @@ window.__ModuleLoader__.load({
 
         const [, setTick] = useState(0);
         const [menuOpen, setMenuOpen] = useState(false);
+        const [settingsView, setSettingsView] = useState(false);
+        const [actionToast, setActionToast] = useState('');
         const [hoveredWsId, setHoveredWsId] = useState('');
         const [manualPathMode, setManualPathMode] = useState(false);
         const [manualPathValue, setManualPathValue] = useState('');
@@ -4257,10 +4380,17 @@ window.__ModuleLoader__.load({
         useEffect(() => {
           dsbRuntime.toggleHarnessMenu = (anchorEl) => {
             extAnchorRef.current = anchorEl || null;
+            setSettingsView(false);
             setMenuOpen((prev) => !prev);
+          };
+          dsbRuntime.openSettingsMenu = () => {
+            refreshAppSettings();
+            setSettingsView(true);
+            setMenuOpen(true);
           };
           return () => {
             if (dsbRuntime.toggleHarnessMenu) dsbRuntime.toggleHarnessMenu = null;
+            if (dsbRuntime.openSettingsMenu) dsbRuntime.openSettingsMenu = null;
           };
         }, []);
 
@@ -4612,13 +4742,358 @@ window.__ModuleLoader__.load({
             if (isValidRect(r0)) chipRect = r0;
           }
 
-          const menuMaxW = 452;
+          const menuMaxW = 468;
           const leftPx = chipRect
             ? Math.max(8, Math.min(Math.round(chipRect.left), Math.max(8, window.innerWidth - menuMaxW - 8)))
             : 12;
 
           const panelBg = harnessTheme.surface;
           const panelBorder = harnessTheme.border;
+
+          const snap = dsbRuntime.appSettings || {
+            version: '0.3.0',
+            isElevated: false,
+            dshStatus: '已连接',
+            config: {
+              outputTarget: 'dsh',
+              startupBreathPulse: true,
+              hideFromScreenCapture: false,
+              showTrayIcon: false,
+              syncExternalPlugins: true,
+              preferAdmin: true,
+              autostart: false,
+            },
+            syncStatus: {
+              enabled: true,
+              dshPlugin: true,
+              antigravityPlugin: true,
+              claudeCodePlugin: true,
+              codexPlugin: true,
+              codexLiveWatch: true,
+            },
+          };
+          const cfg = snap.config || {};
+          const syncSt = snap.syncStatus || {};
+
+          const runSettingsAction = (action, toastMsg) => {
+            if (toastMsg) {
+              setActionToast(toastMsg);
+              setTimeout(() => setActionToast(''), 1800);
+            }
+            tauriInvoke('app_settings_action', { action })
+              .then(() => {
+                if (action === 'resync_plugins' || action === 'reconnect_dsh') {
+                  refreshAppSettings();
+                }
+              })
+              .catch(() => {});
+          };
+
+          const renderToggleRow = (key, title, desc, checked, onToggle, extraBtn) =>
+            h(
+              'div',
+              {
+                key,
+                style: {
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  gap: '10px',
+                  padding: '6px 8px',
+                  borderRadius: '10px',
+                  background: 'rgba(255,255,255,0.03)',
+                },
+              },
+              h(
+                'div',
+                { style: { minWidth: 0, flex: 1 } },
+                h('div', { style: { fontSize: '12px', fontWeight: 550, lineHeight: '16px' } }, title),
+                desc
+                  ? h(
+                      'div',
+                      { style: { fontSize: '10.5px', opacity: 0.56, marginTop: '2px', lineHeight: '14px' } },
+                      desc,
+                    )
+                  : null,
+              ),
+              h(
+                'div',
+                { style: { display: 'flex', alignItems: 'center', gap: '6px', flexShrink: 0 } },
+                extraBtn || null,
+                h(
+                  'button',
+                  {
+                    type: 'button',
+                    role: 'switch',
+                    'aria-checked': checked ? 'true' : 'false',
+                    'data-dsb-setting-toggle': key,
+                    onClick: () => onToggle(!checked),
+                    style: {
+                      width: '34px',
+                      height: '19px',
+                      borderRadius: '999px',
+                      border: 'none',
+                      padding: '2px',
+                      cursor: 'pointer',
+                      background: checked ? harnessTheme.accent : 'rgba(128,128,128,0.34)',
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      justifyContent: checked ? 'flex-end' : 'flex-start',
+                      transition: 'background 0.14s ease',
+                    },
+                  },
+                  h('span', {
+                    style: {
+                      width: '15px',
+                      height: '15px',
+                      borderRadius: '999px',
+                      background: '#ffffff',
+                      boxShadow: '0 1px 3px rgba(0,0,0,0.32)',
+                    },
+                  }),
+                ),
+              ),
+            );
+
+          const renderSettingsBody = () =>
+            h(
+              'div',
+              {
+                'data-dsb-settings-panel': '1',
+                style: {
+                  width: '466px',
+                  borderRadius: '14px',
+                  padding: '10px',
+                  background: panelBg,
+                  border: '1px solid ' + panelBorder,
+                  boxShadow: '0 8px 24px rgba(0,0,0,0.38)',
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: '8px',
+                  boxSizing: 'border-box',
+                },
+              },
+              // Header
+              h(
+                'div',
+                {
+                  style: {
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    padding: '0 2px 4px',
+                    borderBottom: '1px solid ' + panelBorder,
+                  },
+                },
+                h(
+                  'div',
+                  { style: { display: 'flex', alignItems: 'center', gap: '6px' } },
+                  h('span', { style: { fontSize: '12.5px', fontWeight: 650 } }, '插件与悬浮条设置'),
+                  h(
+                    'span',
+                    {
+                      style: {
+                        fontSize: '10.5px',
+                        padding: '1px 6px',
+                        borderRadius: '999px',
+                        background: harnessTheme.accentBg,
+                        color: harnessTheme.accent,
+                        border: '1px solid ' + harnessTheme.accentBorder,
+                      },
+                    },
+                    'v' + (snap.version || '0.3.0'),
+                  ),
+                  actionToast
+                    ? h('span', { style: { fontSize: '11px', color: '#34d399', marginLeft: '4px' } }, actionToast)
+                    : null,
+                ),
+                h(
+                  'button',
+                  {
+                    type: 'button',
+                    'data-dsb-settings-back': '1',
+                    onClick: () => setSettingsView(false),
+                    style: {
+                      border: '1px solid ' + panelBorder,
+                      background: 'rgba(255,255,255,0.05)',
+                      color: 'inherit',
+                      borderRadius: '8px',
+                      padding: '3px 8px',
+                      fontSize: '11.5px',
+                      cursor: 'pointer',
+                    },
+                  },
+                  '← 返回工作区',
+                ),
+              ),
+
+              // Output target segmented picker
+              h(
+                'div',
+                { style: { display: 'flex', flexDirection: 'column', gap: '4px' } },
+                h('div', { style: { fontSize: '11px', opacity: 0.65, paddingLeft: '4px' } }, '选区胶囊投递目标'),
+                h(
+                  'div',
+                  { style: { display: 'flex', gap: '4px' } },
+                  [
+                    { id: 'dsh', label: '悬浮条（默认）' },
+                    { id: 'dsh_and_clipboard', label: '悬浮条 + 剪贴板' },
+                    { id: 'clipboard_only', label: '仅复制胶囊' },
+                  ].map((opt) => {
+                    const active = (cfg.outputTarget || 'dsh') === opt.id;
+                    return h(
+                      'button',
+                      {
+                        key: opt.id,
+                        type: 'button',
+                        'data-dsb-target-opt': opt.id,
+                        onClick: () => updateAppSettings({ outputTarget: opt.id }),
+                        style: {
+                          flex: 1,
+                          padding: '5px 6px',
+                          borderRadius: '8px',
+                          fontSize: '11.5px',
+                          fontWeight: active ? 600 : 450,
+                          cursor: 'pointer',
+                          border: active ? '1px solid ' + harnessTheme.accentBorder : '1px solid transparent',
+                          background: active ? harnessTheme.accentBg : 'rgba(255,255,255,0.04)',
+                          color: active ? '#ffffff' : 'rgba(229,231,235,0.78)',
+                        },
+                      },
+                      opt.label,
+                    );
+                  }),
+                ),
+              ),
+
+              // Core toggles
+              h(
+                'div',
+                { style: { display: 'flex', flexDirection: 'column', gap: '4px' } },
+                renderToggleRow(
+                  'syncExternalPlugins',
+                  '四家插件伴随启动 & 实时对话同步',
+                  'DSH ' +
+                    (syncSt.dshPlugin ? '✓' : '·') +
+                    '  Antigravity ' +
+                    (syncSt.antigravityPlugin ? '✓' : '·') +
+                    '  Claude ' +
+                    (syncSt.claudeCodePlugin ? '✓' : '·') +
+                    '  Codex ' +
+                    (syncSt.codexPlugin || syncSt.codexLiveWatch ? '✓' : '·'),
+                  cfg.syncExternalPlugins !== false,
+                  (v) => updateAppSettings({ syncExternalPlugins: v }),
+                ),
+                renderToggleRow(
+                  'startupBreathPulse',
+                  '启动鼠标呼吸灯',
+                  '就绪时指针柔和亮起蓝光 1 秒后熄灭，提示 Ctrl 已生效',
+                  cfg.startupBreathPulse !== false,
+                  (v) => updateAppSettings({ startupBreathPulse: v }),
+                  h(
+                    'button',
+                    {
+                      type: 'button',
+                      onClick: () => runSettingsAction('preview_breath', '呼吸灯演示中…'),
+                      style: {
+                        fontSize: '11px',
+                        padding: '2px 7px',
+                        borderRadius: '6px',
+                        border: '1px solid ' + harnessTheme.accentBorder,
+                        background: harnessTheme.accentBg,
+                        color: harnessTheme.accent,
+                        cursor: 'pointer',
+                      },
+                    },
+                    '试一下',
+                  ),
+                ),
+                renderToggleRow(
+                  'hideFromScreenCapture',
+                  '向录屏 / 远程桌面隐藏窗口',
+                  '关闭即可在 GameViewer / ToDesk / OBS 中正常显示',
+                  Boolean(cfg.hideFromScreenCapture),
+                  (v) => updateAppSettings({ hideFromScreenCapture: v }),
+                ),
+                renderToggleRow(
+                  'showTrayIcon',
+                  '显示右下角系统托盘图标',
+                  '默认关闭（极简零图标，全部设置均在此面板）',
+                  Boolean(cfg.showTrayIcon),
+                  (v) => updateAppSettings({ showTrayIcon: v }),
+                ),
+                renderToggleRow(
+                  'preferAdmin',
+                  '优先管理员权限运行',
+                  '确保可拾取管理员权限窗口（外部 CLI 仍走普通权限 Broker）',
+                  cfg.preferAdmin !== false,
+                  (v) => updateAppSettings({ preferAdmin: v }),
+                ),
+              ),
+
+              // Quick action footer (replaces old system tray actions)
+              h(
+                'div',
+                {
+                  style: {
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    gap: '4px',
+                    paddingTop: '6px',
+                    borderTop: '1px solid ' + panelBorder,
+                  },
+                },
+                h(
+                  'div',
+                  { style: { display: 'flex', alignItems: 'center', gap: '4px', flexWrap: 'wrap' } },
+                  [
+                    { id: 'resync_plugins', label: '重同步插件', toast: '四家插件已同步' },
+                    { id: 'reconnect_dsh', label: '重连 DSH', toast: '正在重连 DSH…' },
+                    { id: 'open_captures', label: '截图目录', toast: '' },
+                    { id: 'open_config', label: '配置文件', toast: '' },
+                  ].map((act) =>
+                    h(
+                      'button',
+                      {
+                        key: act.id,
+                        type: 'button',
+                        onClick: () => runSettingsAction(act.id, act.toast),
+                        style: {
+                          fontSize: '11px',
+                          padding: '4px 8px',
+                          borderRadius: '7px',
+                          border: '1px solid ' + panelBorder,
+                          background: 'rgba(255,255,255,0.04)',
+                          color: 'rgba(229,231,235,0.88)',
+                          cursor: 'pointer',
+                        },
+                      },
+                      act.label,
+                    ),
+                  ),
+                ),
+                h(
+                  'button',
+                  {
+                    type: 'button',
+                    'data-dsb-quit-btn': '1',
+                    onClick: () => runSettingsAction('quit', ''),
+                    style: {
+                      fontSize: '11px',
+                      padding: '4px 9px',
+                      borderRadius: '7px',
+                      border: '1px solid rgba(248,113,113,0.42)',
+                      background: 'rgba(248,113,113,0.14)',
+                      color: '#fca5a5',
+                      cursor: 'pointer',
+                      flexShrink: 0,
+                    },
+                  },
+                  '退出',
+                ),
+              ),
+            );
 
           const menuNode = h(
             'div',
@@ -4639,13 +5114,13 @@ window.__ModuleLoader__.load({
                 fontFamily: 'system-ui, -apple-system, "Segoe UI", Roboto, "PingFang SC", sans-serif',
               },
             },
-            // Level 0 (Top): Harness Switcher (DeepSeek / Antigravity / Codex)
+            // Level 0 (Top): Harness Switcher (DeepSeek / Antigravity / Codex / Claude) + Refresh + Settings Gear
             h(
               'div',
               {
                 'data-dsb-harness-bar': '1',
                 style: {
-                  width: '450px',
+                  width: '466px',
                   borderRadius: '14px',
                   padding: '5px 6px',
                   background: panelBg,
@@ -4676,7 +5151,7 @@ window.__ModuleLoader__.load({
                     },
                     style: {
                       flex: 1,
-                      padding: '6px 8px',
+                      padding: '6px 6px',
                       borderRadius: '10px',
                       border: isSelected ? '1px solid ' + meta.accentBorder : '1px solid transparent',
                       background: isSelected ? meta.accentBg : 'transparent',
@@ -4687,8 +5162,9 @@ window.__ModuleLoader__.load({
                       display: 'inline-flex',
                       alignItems: 'center',
                       justifyContent: 'center',
-                      gap: '6px',
+                      gap: '5px',
                       opacity: isReady ? 1 : 0.55,
+                      whiteSpace: 'nowrap',
                       transition: 'background 0.14s ease, border-color 0.14s ease',
                     },
                   },
@@ -4705,7 +5181,7 @@ window.__ModuleLoader__.load({
                   h('span', null, meta.label),
                 );
               }),
-              activeHarness !== 'dsh'
+              activeHarness !== 'dsh' && !settingsView
                 ? h(
                     'button',
                     {
@@ -4727,10 +5203,44 @@ window.__ModuleLoader__.load({
                     '↻',
                   )
                 : null,
+              h(
+                'button',
+                {
+                  type: 'button',
+                  'data-dsb-settings-btn': '1',
+                  title: settingsView ? '返回工作区列表' : '插件与悬浮条设置',
+                  onClick: () => {
+                    const next = !settingsView;
+                    if (next) refreshAppSettings();
+                    setSettingsView(next);
+                    if (typeof dsbRuntime.scheduleLayoutReport === 'function') {
+                      dsbRuntime.scheduleLayoutReport(240);
+                    }
+                  },
+                  style: {
+                    width: '26px',
+                    height: '26px',
+                    borderRadius: '8px',
+                    border: settingsView ? '1px solid ' + harnessTheme.accentBorder : 'none',
+                    background: settingsView ? harnessTheme.accentBg : 'rgba(255,255,255,0.06)',
+                    color: settingsView ? harnessTheme.accent : 'rgba(229,231,235,0.85)',
+                    fontSize: '13px',
+                    cursor: 'pointer',
+                    flexShrink: 0,
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    padding: 0,
+                  },
+                },
+                '⚙',
+              ),
             ),
 
-            // Levels 1 & 2: Workspaces | Conversations
-            h(
+            // Either Settings Panel OR Workspaces | Conversations
+            settingsView
+              ? renderSettingsBody()
+              : h(
               'div',
               {
                 style: {

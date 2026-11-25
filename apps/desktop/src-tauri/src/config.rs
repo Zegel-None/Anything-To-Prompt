@@ -34,6 +34,10 @@ pub struct AppConfig {
     pub hide_from_screen_capture: bool,
     /// Play a gentle ~1.5s electric-blue cursor breathing pulse when the app starts ready.
     pub startup_breath_pulse: bool,
+    /// Show Windows notification-area tray icon (defaults to `false` in v0.3+: all settings live inside the bar plugin settings UI).
+    pub show_tray_icon: bool,
+    /// Register lightweight sync/sidecar plugins for Antigravity, Claude Code, and Codex and stream live workspace conversations.
+    pub sync_external_plugins: bool,
     pub accept_injected_input: bool,
     pub output_target: OutputTarget,
     pub active_harness: String,
@@ -55,6 +59,8 @@ impl Default for AppConfig {
             capture_orphan_ttl_minutes: 60,
             hide_from_screen_capture: false,
             startup_breath_pulse: true,
+            show_tray_icon: false,
+            sync_external_plugins: true,
             accept_injected_input: false,
             output_target: OutputTarget::Dsh,
             active_harness: "dsh".to_string(),
@@ -87,6 +93,14 @@ impl AppConfig {
 
     pub fn captures_dir() -> PathBuf {
         Self::local_data_dir().join("captures")
+    }
+
+    /// Canonical stable runtime binary path shared by all 4 Harness plugins
+    /// (`%LOCALAPPDATA%\AnythingToPrompt\bin\anything-to-prompt.exe`).
+    pub fn runtime_exe_path() -> PathBuf {
+        Self::local_data_dir()
+            .join("bin")
+            .join("anything-to-prompt.exe")
     }
 
     pub fn dsh_home_dir() -> PathBuf {

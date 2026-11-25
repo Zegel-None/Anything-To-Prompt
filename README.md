@@ -13,15 +13,15 @@
 
 ## 核心特性
 
-### 1. 多 Harness 一键切换 + 1:1 原生桌面输入框复刻
-点击左下角工作区/对话胶囊，在顶部一级切换栏即可无缝切换 **DeepSeek Harness / Antigravity / Codex / Claude Code**，不修改任何原软件安装目录，所有外部 CLI 均通过 **中完整性（Medium Integrity）Broker** 非提权运行，绝不污染用户目录 ACL：
+### 1. 插件即依赖 · 随四家 Harness 自动启动 · 实时对话同步 · 1:1 原生桌面输入框复刻
+`anything-to-prompt.exe` 自动部署为统一本地依赖（`%LOCALAPPDATA%\AnythingToPrompt\bin\anything-to-prompt.exe`），由四家插件随 Harness 自动伴随启动（全局唯一单实例，启动就绪时鼠标柔和呼吸亮起 1 秒蓝光后熄灭）；**默认移除桌面右下角系统托盘图标**，所有设置统一收进悬浮条弹窗右上角 **`⚙`** 面板中，四家风格自适应：
 
-| Harness | 视觉与输入框形态 | 对话历史与桌面端同步 |
-| :--- | :--- | :--- |
-| **DeepSeek Harness (`dsh`)** | 原生 DSH 浮条输入卡 | 本地 WebUI 毫秒级双向实时孪生（零侵入浏览器正常页面） |
-| **Antigravity (`agy.exe`)** | **1:1 复刻 Antigravity 桌面版输入框**（双层暗黑圆角、`Gemini 4 Neon High`、盾牌 `极速`、银白圆形发送键 / 红方块停止键） | 只读同步本地 `conversation_summaries.db` 与 `transcript.jsonl`，新消息通过 `agy --print --output-format stream-json` **原生同步到 Antigravity 桌面端 `CLI Project`** |
-| **Codex (`codex.exe`)** | **1:1 复刻 Codex 桌面版堆叠输入框**（内缩 `#1f1f1f`「此计算机 / 工作区」卡槽、`20px` 大圆角石墨灰输入卡、橙红 `完全访问`、自动读取 `~/.codex/config.toml` 模型/推理档位、钴蓝圆形发送键） | 只读同步 `~/.codex/state_5.sqlite` 与 `rollout-*.jsonl`，经由 `codex app-server` JSON-RPC 2.0 写入同库共享历史（桌面端刷新可见） |
-| **Claude Code (`claude.exe`)** | **1:1 复刻 Claude Desktop（Code 模式）暗色输入框**（暖炭灰 `#30302E` 圆角卡、Anthropic 星芒工作区胶囊、一键切换 `自动 / 自动编辑 / 仅规划 / 免询问` 权限模式、自动读取 `~/.claude/settings.json` 模型/档位、陶土橙 `#D97757` 圆角矩形发送键） | 只读扫描 `~/.claude/projects/*/*.jsonl` 共享会话，经由 `claude -p --output-format stream-json --include-partial-messages --resume <id>` 实时流式执行，与终端 `claude --resume` 同库互通 |
+| Harness | 插件形态 & 伴随启动 | 视觉与输入框形态 | 对话历史与实时同步 |
+| :--- | :--- | :--- | :--- |
+| **DeepSeek Harness (`dsh`)** | `@local/anything-to-prompt`（随 DSH 启动自动拉起单实例） | 原生 DSH 浮条输入卡 | 本地 WebUI 毫秒级双向实时孪生（零侵入浏览器正常页面） |
+| **Antigravity (`agy.exe`)** | `~/.gemini/config/plugins/anything-to-prompt-sync/`（`plugin.json` + `hooks.json` + `mcp_config.json` 伴随启动） | **1:1 复刻 Antigravity 桌面版输入框**（双层暗黑圆角、`Gemini 4 Neon High`、盾牌 `极速`、银白圆形发送键 / 红方块停止键） | **原生 Hook 毫秒级推送 + 只读 JSONL 实时 Tail**；发消息经 `agy --print --output-format stream-json` **原生同步到 Antigravity 桌面端 `CLI Project`** |
+| **Codex (`codex.exe`)** | `~/.codex/plugins/anything-to-prompt-sync/`（`.codex-plugin/plugin.json` + `.mcp.json` 伴随启动） | **1:1 复刻 Codex 桌面版堆叠输入框**（内缩 `#1f1f1f`「此计算机 / 工作区」卡槽、`20px` 大圆角石墨灰输入卡、橙红 `完全访问`、自动读取 `~/.codex/config.toml` 模型/推理档位、钴蓝圆形发送键） | **零侵入只读 `rollout-*.jsonl` 实时 Tail 同步**（绝不修改 `config.toml`）；发消息经由 `codex app-server` JSON-RPC 2.0 写入同库共享历史 |
+| **Claude Code (`claude.exe`)** | `~/.claude/skills/anything-to-prompt-sync/`（`.claude-plugin/plugin.json` + `hooks/hooks.json` + `.mcp.json` 伴随启动） | **1:1 复刻 Claude Desktop（Code 模式）暗色输入框**（暖炭灰 `#30302E` 圆角卡、Anthropic 星芒工作区胶囊、一键切换 `自动 / 自动编辑 / 仅规划 / 免询问` 权限模式、自动读取 `~/.claude/settings.json` 模型/档位、陶土橙 `#D97757` 圆角矩形发送键） | **原生 Hook 毫秒级推送 + 只读 `~/.claude/projects/*/*.jsonl` 实时 Tail**；发消息经由 `claude -p --output-format stream-json --include-partial-messages --resume <id>` 实时流式执行，与终端 `claude --resume` 同库互通 |
 
 ### 2. 纯 `Ctrl` 单键闭环 + 蓝/红双键画笔（CAD 级框选↔圈选无缝切换）
 - **纯 `Ctrl` 键态控制（8ms OS 物理键态驱动，零 Alt / 组合键冲突）**：
@@ -86,12 +86,17 @@ anything-to-prompt/
 
 ### 直接下载使用（推荐）
 
-前往 GitHub **Releases** 下载最新版本（如 `v0.2.5`）：
-- `anything-to-prompt.exe`（免安装绿色便携版）
+前往 GitHub **Releases** 下载最新版本（如 `v0.3.0`）：
+- `anything-to-prompt.exe`（免安装绿色便携版，运行后自动镜像到 `%LOCALAPPDATA%\AnythingToPrompt\bin\` 并为四家注册插件）
 - `Anything-to-Prompt_<version>_x64-setup.exe`（Windows NSIS 安装包）
 - `Anything-to-Prompt_<version>_x64_en-US.msi`（Windows MSI 安装包）
 
-首次启动会自动同步内置插件 `@local/anything-to-prompt` 并连接本机 DSH（默认端口 `3080`），同时自动探测本机 `agy.exe`（Antigravity）、`codex.exe`（Codex）与 `claude.exe`（Claude Code）。
+也可执行一键插件安装脚本（自动部署统一依赖 EXE + 注册 DSH / Antigravity / Claude Code / Codex 四家插件并静默启动）：
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\install-plugins.ps1
+```
+
+启动生效后鼠标会柔和地**呼吸亮起 1 秒电光蓝光晕后熄灭**，无右下角托盘打扰；双击 `Ctrl` 唤出输入框，点左下角胶囊顶部右侧 **`⚙`** 即可打开四家统一的插件设置面板。
 
 ### 从源码自行构建
 

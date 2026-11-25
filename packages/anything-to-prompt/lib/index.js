@@ -2,7 +2,8 @@
 // 1. Writes instance discovery JSON (<DSH_HOME>/anything-to-prompt/instances/<port>.json) with authenticatedUrl()
 // 2. Relays twin state (/anything-to-prompt/events, /anything-to-prompt/state, /anything-to-prompt/sync)
 
-import { mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
+import { spawn } from 'node:child_process';
+import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -185,6 +186,20 @@ function broadcastTwinEvent(eventName, payload) {
 }
 
 export function apply(ctx) {
+  // 0a. Auto-launch Anything-to-Prompt companion EXE as a plugin dependency when DSH starts
+  try {
+    const localAppData = process.env.LOCALAPPDATA || join(homedir(), 'AppData', 'Local');
+    const companionExe = join(localAppData, 'AnythingToPrompt', 'bin', 'anything-to-prompt.exe');
+    if (existsSync(companionExe)) {
+      const child = spawn(companionExe, ['--ensure-running', '--launched-by', 'dsh'], {
+        detached: true,
+        stdio: 'ignore',
+        windowsHide: true,
+      });
+      child.unref();
+    }
+  } catch {}
+
   // 0. Instance discovery file lifecycle
   let discoveryFilePath = null;
   let loggedWsFields = false;

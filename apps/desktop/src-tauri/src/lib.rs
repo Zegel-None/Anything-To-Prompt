@@ -6,7 +6,9 @@ pub mod dsh;
 pub mod elevation;
 pub mod everything_ipc;
 pub mod harness;
+pub mod harness_sync;
 pub mod hooks;
+pub mod mcp_sidecar;
 pub mod ntfs_usn;
 pub mod pick;
 pub mod plugin_sync;
@@ -44,6 +46,13 @@ use windows::Win32::UI::WindowsAndMessaging::{ChangeWindowMessageFilter, MSGFLT_
 #[derive(Debug, Default, Clone)]
 pub struct CliOptions {
     pub broker_pipe: Option<String>,
+    pub hook_event: Option<(String, Option<String>)>,
+    pub mcp_sidecar: bool,
+    pub mcp_harness: Option<String>,
+    pub ensure_running: bool,
+    pub launched_by: Option<String>,
+    pub install_plugins: bool,
+    pub uninstall_plugins: bool,
     pub elevated_relaunch: bool,
     pub no_elevate: bool,
     pub dev_state: Option<DevTargetState>,
@@ -80,6 +89,46 @@ impl CliOptions {
                         out.broker_pipe = Some(vec[i + 1].clone());
                         i += 1;
                     }
+                }
+                "--hook-event" => {
+                    if i + 1 < vec.len() {
+                        let harness = vec[i + 1].clone();
+                        let inline = if i + 2 < vec.len() && !vec[i + 2].starts_with("--") {
+                            i += 1;
+                            Some(vec[i + 1].clone())
+                        } else {
+                            None
+                        };
+                        out.hook_event = Some((harness, inline));
+                        i += 1;
+                    }
+                }
+                "--mcp-sidecar" => {
+                    out.mcp_sidecar = true;
+                }
+                "--harness" => {
+                    if i + 1 < vec.len() {
+                        out.mcp_harness = Some(vec[i + 1].clone());
+                        i += 1;
+                    }
+                }
+                "--ensure-running" => {
+                    out.ensure_running = true;
+                    out.passthrough_args.push(vec[i].clone());
+                }
+                "--launched-by" => {
+                    if i + 1 < vec.len() {
+                        out.launched_by = Some(vec[i + 1].clone());
+                        out.passthrough_args.push(vec[i].clone());
+                        out.passthrough_args.push(vec[i + 1].clone());
+                        i += 1;
+                    }
+                }
+                "--install-plugins" => {
+                    out.install_plugins = true;
+                }
+                "--uninstall-plugins" => {
+                    out.uninstall_plugins = true;
                 }
                 "--elevated-relaunch" => {
                     out.elevated_relaunch = true;
@@ -230,6 +279,7 @@ pub struct AppShared {
     pub pick_counter: Mutex<PickCounterState>,
     pub compose_waiters: Mutex<HashMap<String, mpsc::Sender<String>>>,
     pub last_outside_hide_at: Mutex<Option<std::time::Instant>>,
+    pub live_sync_enabled: Arc<AtomicBool>,
 }
 
 impl AppShared {
@@ -504,6 +554,236 @@ fn harness_cancel_turn(app: AppHandle, turn_id: String) -> bool {
         .broker
         .call(crate::broker::BrokerRequest::CancelHarnessTurn { turn_id });
     resp.ok
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AppSettingsSnapshot {
+    version: String,
+    is_elevated: bool,
+    dsh_status: String,
+    config: AppConfig,
+    sync_status: harness_sync::ExternalSyncPluginStatus,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+struct AppSettingsPatch {
+    output_target: Option<config::OutputTarget>,
+    startup_breath_pulse: Option<bool>,
+    hide_from_screen_capture: Option<bool>,
+    show_tray_icon: Option<bool>,
+    sync_external_plugins: Option<bool>,
+    prefer_admin: Option<bool>,
+    autostart: Option<bool>,
+}
+
+fn build_settings_snapshot(app: &AppHandle) -> AppSettingsSnapshot {
+    let (cfg, dsh_status) = if let Some(shared) = app.try_state::<AppShared>() {
+        let cfg = shared
+            .config
+            .lock()
+            .map(|c| c.clone())
+            .unwrap_or_default();
+        let dsh_st = shared
+            .dsh_conn
+            .lock()
+            .map(|d| d.status_label.clone())
+            .unwrap_or_else(|_| "未连接".to_string());
+        (cfg, dsh_st)
+    } else {
+        (AppConfig::load_or_create(), "未连接".to_string())
+    };
+    let sync_status = harness_sync::query_external_sync_status(cfg.sync_external_plugins);
+    AppSettingsSnapshot {
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        is_elevated: elevation::is_elevated(),
+        dsh_status,
+        config: cfg,
+        sync_status,
+    }
+}
+
+fn apply_capture_affinity_to_windows(app: &AppHandle, exclude: bool) {
+    if let Some(bar_win) = app.get_webview_window("bar") {
+        if let Some(h) = hwnd_of(&bar_win) {
+            window::apply_capture_affinity(h, exclude);
+        }
+    }
+    if let Some(ov_win) = app.get_webview_window("overlay") {
+        if let Some(h) = hwnd_of(&ov_win) {
+            window::apply_capture_affinity(h, exclude);
+        }
+    }
+}
+
+#[tauri::command]
+fn app_get_settings(app: AppHandle) -> AppSettingsSnapshot {
+    build_settings_snapshot(&app)
+}
+
+#[tauri::command]
+fn app_update_settings(app: AppHandle, patch: AppSettingsPatch) -> AppSettingsSnapshot {
+    if let Some(shared) = app.try_state::<AppShared>() {
+        let mut hide_changed: Option<bool> = None;
+        let mut sync_changed: Option<bool> = None;
+        let mut autostart_changed: Option<bool> = None;
+        let mut tray_changed: Option<bool> = None;
+
+        if let Ok(mut cfg) = shared.config.lock() {
+            if let Some(v) = patch.output_target {
+                cfg.output_target = v;
+            }
+            if let Some(v) = patch.startup_breath_pulse {
+                cfg.startup_breath_pulse = v;
+            }
+            if let Some(v) = patch.hide_from_screen_capture {
+                if cfg.hide_from_screen_capture != v {
+                    cfg.hide_from_screen_capture = v;
+                    hide_changed = Some(v);
+                }
+            }
+            if let Some(v) = patch.show_tray_icon {
+                if cfg.show_tray_icon != v {
+                    cfg.show_tray_icon = v;
+                    tray_changed = Some(v);
+                }
+            }
+            if let Some(v) = patch.sync_external_plugins {
+                if cfg.sync_external_plugins != v {
+                    cfg.sync_external_plugins = v;
+                    sync_changed = Some(v);
+                }
+            }
+            if let Some(v) = patch.prefer_admin {
+                cfg.prefer_admin = v;
+            }
+            if let Some(v) = patch.autostart {
+                if cfg.autostart != v {
+                    cfg.autostart = v;
+                    autostart_changed = Some(v);
+                }
+            }
+            let _ = cfg.save();
+        }
+
+        if let Some(exclude) = hide_changed {
+            apply_capture_affinity_to_windows(&app, exclude);
+        }
+        if let Some(enable_sync) = sync_changed {
+            shared.live_sync_enabled.store(enable_sync, Ordering::Release);
+            let _ = harness_sync::apply_external_sync_plugins(enable_sync);
+        }
+        if let Some(enable_auto) = autostart_changed {
+            let _ = tray::apply_autostart_setting(enable_auto);
+        }
+        if let Some(show_tray) = tray_changed {
+            if show_tray {
+                let needs_create = shared
+                    .tray_handles
+                    .lock()
+                    .map(|g| g.is_none())
+                    .unwrap_or(false);
+                if needs_create {
+                    if let Ok(handles) = tray::setup_tray(&app) {
+                        if let Ok(mut slot) = shared.tray_handles.lock() {
+                            *slot = Some(handles);
+                        }
+                        tray::refresh_tray_status(&app);
+                    }
+                }
+            } else {
+                if let Some(t) = app.tray_by_id("dsb-tray") {
+                    let _ = t.set_visible(false);
+                }
+            }
+        }
+    }
+    build_settings_snapshot(&app)
+}
+
+#[tauri::command]
+fn app_settings_action(app: AppHandle, action: String) -> Result<String, String> {
+    match action.as_str() {
+        "open_config" => {
+            let p = AppConfig::config_path();
+            if let Some(parent) = p.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let _ = std::process::Command::new("explorer.exe").arg(&p).spawn();
+            Ok("opened_config".to_string())
+        }
+        "open_captures" => {
+            let dir = AppConfig::captures_dir();
+            let _ = std::fs::create_dir_all(&dir);
+            let _ = std::process::Command::new("explorer.exe").arg(&dir).spawn();
+            Ok("opened_captures".to_string())
+        }
+        "reconnect_dsh" => {
+            trigger_dsh_reconnect(app);
+            Ok("reconnecting".to_string())
+        }
+        "preview_breath" => {
+            cursor::play_ready_breath_pulse();
+            Ok("pulsing".to_string())
+        }
+        "resync_plugins" => {
+            let _ = plugin_sync::ensure_dsh_plugin_synced();
+            let enabled = app
+                .try_state::<AppShared>()
+                .and_then(|s| s.config.lock().ok().map(|c| c.sync_external_plugins))
+                .unwrap_or(true);
+            let st = harness_sync::apply_external_sync_plugins(enabled);
+            serde_json::to_string(&st).map_err(|e| e.to_string())
+        }
+        "quit" => {
+            cursor::restore_system_cursors();
+            app.exit(0);
+            Ok("exiting".to_string())
+        }
+        other => Err(format!("未知操作: {other}")),
+    }
+}
+
+pub fn handle_pipe_control_command(app: &AppHandle, action: &str, _arg: Option<&str>) {
+    match action {
+        "ping" => {}
+        "reload_config" => {
+            let latest = AppConfig::load_or_create();
+            if let Some(shared) = app.try_state::<AppShared>() {
+                shared
+                    .live_sync_enabled
+                    .store(latest.sync_external_plugins, Ordering::Release);
+                apply_capture_affinity_to_windows(app, latest.hide_from_screen_capture);
+                if let Ok(mut guard) = shared.config.lock() {
+                    *guard = latest;
+                }
+            }
+            if let Some(bar_win) = app.get_webview_window("bar") {
+                let _ = bar_win.eval(
+                    "(function(){ if (window.__DSB_BRIDGE__ && window.__DSB_BRIDGE__.refreshSettings) { window.__DSB_BRIDGE__.refreshSettings(); } })();",
+                );
+            }
+        }
+        "open_settings" => {
+            dispatch_state_event(app, StateEvent::DoubleCtrlOpen);
+            if let Some(bar_win) = app.get_webview_window("bar") {
+                let _ = bar_win.eval(
+                    "(function(){ if (window.__DSB_BRIDGE__ && window.__DSB_BRIDGE__.openSettings) { window.__DSB_BRIDGE__.openSettings(); } })();",
+                );
+            }
+        }
+        "preview_breath" => {
+            cursor::play_ready_breath_pulse();
+        }
+        "open_captures" => {
+            let _ = app_settings_action(app.clone(), "open_captures".to_string());
+        }
+        "resync_plugins" => {
+            let _ = app_settings_action(app.clone(), "resync_plugins".to_string());
+        }
+        _ => {}
+    }
 }
 
 #[tauri::command]
@@ -1232,6 +1512,31 @@ fn start_dsh_health_monitor(app: AppHandle) {
 pub fn run() {
     let cli = CliOptions::parse(std::env::args());
 
+    // 0. Ultra-fast (<5ms) synchronous hook relay — exits before logger/UAC/Tauri
+    if let Some((ref harness, ref inline)) = cli.hook_event {
+        harness_sync::run_hook_event_cli(harness, inline.as_deref());
+        return;
+    }
+
+    // 0b. Native stdio MCP sidecar loaded by Antigravity / Claude Code / Codex plugins
+    if cli.mcp_sidecar {
+        mcp_sidecar::run_mcp_sidecar(cli.mcp_harness.as_deref());
+        return;
+    }
+
+    // 0c. One-shot plugin registration / removal CLI flags (used by installers)
+    if cli.install_plugins {
+        let _ = plugin_sync::ensure_dsh_plugin_synced();
+        let st = harness_sync::apply_external_sync_plugins(true);
+        println!("{}", serde_json::to_string_pretty(&st).unwrap_or_default());
+        return;
+    }
+    if cli.uninstall_plugins {
+        let st = harness_sync::apply_external_sync_plugins(false);
+        println!("{}", serde_json::to_string_pretty(&st).unwrap_or_default());
+        return;
+    }
+
     // 1. Medium-integrity broker child mode exits before UI/single-instance
     if let Some(pipe_name) = cli.broker_pipe.as_deref() {
         let _ = broker::run_broker_client(pipe_name);
@@ -1286,6 +1591,10 @@ pub fn run() {
     let initial_width = config.bar_width;
     let exclude_capture = config.hide_from_screen_capture && !cli.dev_allow_capture;
     let startup_breath_pulse = config.startup_breath_pulse;
+    let show_tray_icon = config.show_tray_icon;
+    let sync_external_plugins = config.sync_external_plugins;
+    let live_sync_enabled = Arc::new(AtomicBool::new(sync_external_plugins));
+    let live_sync_for_setup = live_sync_enabled.clone();
 
     let initial_mode_str = match cli.dev_state {
         Some(DevTargetState::Lip) | Some(DevTargetState::Hidden) => "lip",
@@ -1325,6 +1634,7 @@ pub fn run() {
         pick_counter: Mutex::new(PickCounterState::default()),
         compose_waiters: Mutex::new(HashMap::new()),
         last_outside_hide_at: Mutex::new(None),
+        live_sync_enabled,
     };
 
     let startup_dev_state = cli.dev_state;
@@ -1349,6 +1659,12 @@ pub fn run() {
                         let _ = bar_win.eval(&js);
                     }
                 }
+            } else if forwarded.ensure_running {
+                // Silent companion wake-up from a Harness plugin — already running, never steal focus!
+                log::info!(
+                    "Single-instance received --ensure-running from {:?}; staying quietly armed.",
+                    forwarded.launched_by
+                );
             } else if !forwarded.dev_dump
                 && forwarded.dev_pick_tap.is_none()
                 && forwarded.dev_pick_stroke.is_none()
@@ -1520,6 +1836,9 @@ pub fn run() {
             harness_load_messages,
             harness_send_message,
             harness_cancel_turn,
+            app_get_settings,
+            app_update_settings,
+            app_settings_action,
             quick_search_query,
             quick_search_status,
             quick_search_build_capsule,
@@ -1586,11 +1905,17 @@ pub fn run() {
                 pick::set_overlay_hwnd(h);
             }
 
-            if let Ok(handles) = tray::setup_tray(&app_handle) {
-                if let Ok(mut slot) = app.state::<AppShared>().tray_handles.lock() {
-                    *slot = Some(handles);
+            if show_tray_icon {
+                if let Ok(handles) = tray::setup_tray(&app_handle) {
+                    if let Ok(mut slot) = app.state::<AppShared>().tray_handles.lock() {
+                        *slot = Some(handles);
+                    }
                 }
             }
+
+            // Deploy canonical runtime exe + 4-harness companion/sync plugins & start real-time sync bus
+            let _ = harness_sync::apply_external_sync_plugins(sync_external_plugins);
+            harness_sync::start_live_sync_services(app_handle.clone(), live_sync_for_setup.clone());
 
             let (hook_tx, hook_rx) = mpsc::channel::<HookEvent>();
             start_input_hooks(hook_shared.clone(), hook_tx);
