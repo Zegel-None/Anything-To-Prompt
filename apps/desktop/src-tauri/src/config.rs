@@ -4,6 +4,18 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OutputTarget {
+    /// Inject capsule into Anything-to-Prompt / DSH floating composer (default)
+    #[default]
+    Dsh,
+    /// Inject into DSH floating composer AND copy structured capsule to clipboard
+    DshAndClipboard,
+    /// Copy structured capsule to clipboard only (ideal for Codex / Claude Code / Antigravity)
+    ClipboardOnly,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct AppConfig {
@@ -18,6 +30,7 @@ pub struct AppConfig {
     pub capture_orphan_ttl_minutes: u64,
     pub exclude_from_capture: bool,
     pub accept_injected_input: bool,
+    pub output_target: OutputTarget,
     pub app_source_map: HashMap<String, String>,
 }
 
@@ -35,6 +48,7 @@ impl Default for AppConfig {
             capture_orphan_ttl_minutes: 60,
             exclude_from_capture: true,
             accept_injected_input: false,
+            output_target: OutputTarget::Dsh,
             app_source_map: HashMap::new(),
         }
     }

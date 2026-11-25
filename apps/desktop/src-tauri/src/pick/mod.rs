@@ -1,13 +1,16 @@
 pub mod adapters;
 pub mod fs_meta;
+pub mod grounding;
 pub mod process;
 
 use crate::captures::{
     capture_target_window_bitblt, save_annotated_capture, RawScreenCapture, ScreenRect,
 };
+use crate::config::OutputTarget;
 use crate::pick::adapters::office::{self, OfficeAppKind};
 use crate::pick::adapters::{collect_deep_adapter_outputs, AdapterContext};
 use crate::pick::fs_meta::{format_human_bytes, inspect_path_metadata};
+use crate::pick::grounding::{BboxCoords, MonitorSpace, UiaAffordance};
 use crate::pick::process::inspect_process;
 use crate::state::StateEvent;
 use crate::window::get_hwnd_class_name;
@@ -43,6 +46,8 @@ pub struct UiaElementInfo {
     pub sibling_index: usize,
     pub ancestors: Vec<String>,
     pub is_root_or_empty: bool,
+    #[serde(default)]
+    pub affordance: Option<UiaAffordance>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -763,8 +768,10 @@ fn extract_uia_element_info(
     let mut sibling_index = 0usize;
     let mut ancestors = Vec::new();
     let mut text_snippet = String::new();
+    let mut affordance = None;
 
     if include_ancestors_and_text {
+        affordance = Some(UiaAffordance::extract(el));
         // Count previous siblings (cap 64)
         let mut prev_cur = el.clone();
         for _ in 0..64 {
@@ -822,6 +829,7 @@ fn extract_uia_element_info(
         sibling_index,
         ancestors,
         is_root_or_empty: is_top_window,
+        affordance,
     }
 }
 
@@ -931,6 +939,7 @@ pub fn execute_tap_pick(
             sibling_index: 0,
             ancestors: Vec::new(),
             is_root_or_empty: true,
+            affordance: None,
         },
     };
 
@@ -968,6 +977,17 @@ pub fn execute_tap_pick(
         1500,
     );
 
+    let mon = MonitorSpace::for_point(x, y, root_hwnd);
+    let grounding_lines = grounding::format_tap_grounding(
+        root_hwnd,
+        win_rect,
+        &mon,
+        (x, y),
+        el_info.rect,
+        &el_info.control_type,
+        el_info.affordance.as_ref(),
+    );
+
     let pick_kind = if is_bg { "background" } else { "tap" };
     let capsule = build_capsule_payload(
         n,
@@ -978,6 +998,8 @@ pub fn execute_tap_pick(
         Some(&el_info),
         &[],
         &adapter_outputs,
+        &grounding_lines,
+        Some((&mon, win_rect)),
         screenshot_path.as_deref(),
     );
 
@@ -1076,6 +1098,13 @@ pub fn execute_stroke_pick(
         1500,
     );
 
+    let win_rect = get_window_screen_rect(root_hwnd);
+    let mon = MonitorSpace::for_point(center_x, center_y, root_hwnd);
+    let start_pt = points[0];
+    let end_pt = *points.last().unwrap_or(&start_pt);
+    let grounding_lines =
+        grounding::format_drag_grounding(root_hwnd, win_rect, &mon, start_pt, end_pt, bbox);
+
     let capsule = build_capsule_payload(
         n,
         "stroke",
@@ -1085,6 +1114,8 @@ pub fn execute_stroke_pick(
         sampled.first(),
         &sampled,
         &adapter_outputs,
+        &grounding_lines,
+        Some((&mon, win_rect)),
         screenshot_path.as_deref(),
     );
 
@@ -1223,6 +1254,17 @@ fn try_execute_office_tap_pick(
                 "excel",
                 is_wps_exe(&proc_meta.exe_name),
                 &target_locator,
+            ));
+            let win_rect = get_window_screen_rect(hit.root_hwnd);
+            let mon = MonitorSpace::for_point(x, y, hit.root_hwnd);
+            lines.extend(grounding::format_tap_grounding(
+                hit.root_hwnd,
+                win_rect,
+                &mon,
+                (x, y),
+                rect,
+                "ExcelCell",
+                None,
             ));
             if let Some(sp) = screenshot_path.as_deref() {
                 lines.push(format!(
@@ -1363,6 +1405,17 @@ fn try_execute_office_tap_pick(
                 "ppt",
                 is_wps_exe(&proc_meta.exe_name),
                 &target_locator,
+            ));
+            let win_rect = get_window_screen_rect(hit.root_hwnd);
+            let mon = MonitorSpace::for_point(x, y, hit.root_hwnd);
+            lines.extend(grounding::format_tap_grounding(
+                hit.root_hwnd,
+                win_rect,
+                &mon,
+                (x, y),
+                rect,
+                &ppt.shape_type,
+                None,
             ));
             if let Some(sp) = screenshot_path.as_deref() {
                 lines.push(format!(
@@ -1568,6 +1621,16 @@ fn try_execute_office_drag_pick(
                 is_wps_exe(&proc_meta.exe_name),
                 &target_locator,
             ));
+            let win_rect = get_window_screen_rect(hit.root_hwnd);
+            let mon = MonitorSpace::for_point(start.0, start.1, hit.root_hwnd);
+            lines.extend(grounding::format_drag_grounding(
+                hit.root_hwnd,
+                win_rect,
+                &mon,
+                start,
+                end,
+                bbox,
+            ));
             if let Some(sp) = screenshot_path.as_deref() {
                 lines.push(format!(
                     "debug_screenshot_path: {sp} (仅当以上信息不足或可疑时再打开查看)"
@@ -1691,6 +1754,16 @@ fn try_execute_office_drag_pick(
                 "excel",
                 is_wps_exe(&proc_meta.exe_name),
                 &target_locator,
+            ));
+            let win_rect = get_window_screen_rect(hit.root_hwnd);
+            let mon = MonitorSpace::for_point(start.0, start.1, hit.root_hwnd);
+            lines.extend(grounding::format_drag_grounding(
+                hit.root_hwnd,
+                win_rect,
+                &mon,
+                start,
+                end,
+                rect,
             ));
             if let Some(sp) = screenshot_path.as_deref() {
                 lines.push(format!(
@@ -1847,6 +1920,8 @@ fn build_capsule_payload(
     primary_el: Option<&UiaElementInfo>,
     sampled_els: &[UiaElementInfo],
     adapter_outputs: &[adapters::AdapterOutput],
+    grounding_lines: &[String],
+    coord_ctx: Option<(&MonitorSpace, ScreenRect)>,
     screenshot_path: Option<&str>,
 ) -> CapsulePayload {
     let badge = circled_badge(n);
@@ -1913,6 +1988,10 @@ fn build_capsule_payload(
         lines.push(format!("mapped_source_dir: {src}"));
     }
 
+    if !grounding_lines.is_empty() {
+        lines.extend(grounding_lines.iter().cloned());
+    }
+
     if let Some(el) = primary_el {
         lines.push(format!(
             "picked_element: type={} sibling_index={} rect=({},{},{}x{})",
@@ -1950,13 +2029,23 @@ fn build_capsule_payload(
     if sampled_els.len() > 1 {
         lines.push(format!("stroke_sampled_elements ({}):", sampled_els.len()));
         for (idx, s) in sampled_els.iter().enumerate() {
+            let center_hint = if let Some((mon, win_rect)) = coord_ctx {
+                let bb = BboxCoords::compute(s.rect, mon, win_rect);
+                format!(
+                    " center_px=({},{}) norm1000=({},{})",
+                    bb.center.px.0, bb.center.px.1, bb.center.norm1000.0, bb.center.norm1000.1
+                )
+            } else {
+                String::new()
+            };
             lines.push(format!(
-                "  [{}] {} name=\"{}\" value=\"{}\" id=\"{}\"",
+                "  [{}] {} name=\"{}\" value=\"{}\" id=\"{}\"{}",
                 idx + 1,
                 s.control_type,
                 truncate_chars(&s.name, 80),
                 truncate_chars(&s.value, 80),
                 truncate_chars(&s.automation_id, 40),
+                center_hint,
             ));
         }
     }
@@ -2047,6 +2136,30 @@ fn emit_pick_toast(app: &AppHandle, text: &str) {
 }
 
 fn inject_capsule_into_bar(app: &AppHandle, capsule: &CapsulePayload) {
+    let target = app
+        .try_state::<AppShared>()
+        .and_then(|s| s.config.lock().ok().map(|c| c.output_target))
+        .unwrap_or(OutputTarget::Dsh);
+
+    if matches!(
+        target,
+        OutputTarget::ClipboardOnly | OutputTarget::DshAndClipboard
+    ) {
+        let copied = grounding::copy_text_to_clipboard(&capsule.text);
+        log::info!(
+            "Copied structured capsule '{}' to clipboard (ok={copied}, target={:?})",
+            capsule.summary.title,
+            target
+        );
+        if target == OutputTarget::ClipboardOnly {
+            emit_pick_toast(
+                app,
+                "已复制坐标胶囊 · 可直接粘贴到 Codex / Claude Code / Antigravity",
+            );
+            return;
+        }
+    }
+
     if let Some(bar_win) = app.get_webview_window("bar") {
         if let Ok(json_arg) = serde_json::to_string(capsule) {
             let script = format!(
@@ -2124,6 +2237,7 @@ mod tests {
             sibling_index: 0,
             ancestors: Vec::new(),
             is_root_or_empty: true,
+            affordance: None,
         };
         assert!(!is_valid_tap_element(&root_pane));
 
@@ -2145,6 +2259,7 @@ mod tests {
             sibling_index: 0,
             ancestors: vec!["MenuBar(name=\"应用程序\", id=\"MenuBar\")".into()],
             is_root_or_empty: false,
+            affordance: None,
         };
         assert!(is_valid_tap_element(&valid_btn));
     }
@@ -2170,6 +2285,7 @@ mod tests {
             sibling_index: 0,
             ancestors: Vec::new(),
             is_root_or_empty: root,
+            affordance: None,
         };
 
         // Small button, unnamed 55x55 avatar Image, and Bilibili feed cards -> immediate Element

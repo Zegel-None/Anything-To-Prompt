@@ -1,4 +1,4 @@
-use crate::config::AppConfig;
+use crate::config::{AppConfig, OutputTarget};
 use crate::elevation::is_elevated;
 use crate::state::StateEvent;
 use crate::AppShared;
@@ -91,6 +91,32 @@ pub fn setup_tray(app: &AppHandle) -> tauri::Result<TrayHandles> {
     let reconnect_item = MenuItem::with_id(app, "reconnect", "重新连接 DSH", true, None::<&str>)?;
     let sep1 = PredefinedMenuItem::separator(app)?;
 
+    let target_dsh_item = CheckMenuItem::with_id(
+        app,
+        "target_dsh",
+        "投递目标：DSH 悬浮条（默认）",
+        true,
+        cfg.output_target == OutputTarget::Dsh,
+        None::<&str>,
+    )?;
+    let target_both_item = CheckMenuItem::with_id(
+        app,
+        "target_both",
+        "投递目标：DSH + 同步复制到剪贴板",
+        true,
+        cfg.output_target == OutputTarget::DshAndClipboard,
+        None::<&str>,
+    )?;
+    let target_clip_item = CheckMenuItem::with_id(
+        app,
+        "target_clipboard",
+        "投递目标：仅复制胶囊（Codex / Claude Code / Antigravity）",
+        true,
+        cfg.output_target == OutputTarget::ClipboardOnly,
+        None::<&str>,
+    )?;
+    let sep_target = PredefinedMenuItem::separator(app)?;
+
     let autostart_item = CheckMenuItem::with_id(
         app,
         "autostart",
@@ -122,6 +148,10 @@ pub fn setup_tray(app: &AppHandle) -> tauri::Result<TrayHandles> {
             &status_item,
             &reconnect_item,
             &sep1,
+            &target_dsh_item,
+            &target_both_item,
+            &target_clip_item,
+            &sep_target,
             &autostart_item,
             &admin_item,
             &sep2,
@@ -134,6 +164,9 @@ pub fn setup_tray(app: &AppHandle) -> tauri::Result<TrayHandles> {
 
     let autostart_clone = autostart_item.clone();
     let admin_clone = admin_item.clone();
+    let t_dsh = target_dsh_item.clone();
+    let t_both = target_both_item.clone();
+    let t_clip = target_clip_item.clone();
 
     let mut builder = TrayIconBuilder::with_id("dsb-tray")
         .menu(&menu)
@@ -145,6 +178,21 @@ pub fn setup_tray(app: &AppHandle) -> tauri::Result<TrayHandles> {
             }
             "reconnect" => {
                 crate::trigger_dsh_reconnect(app_handle.clone());
+            }
+            "target_dsh" | "target_both" | "target_clipboard" => {
+                let next = match event.id().as_ref() {
+                    "target_both" => OutputTarget::DshAndClipboard,
+                    "target_clipboard" => OutputTarget::ClipboardOnly,
+                    _ => OutputTarget::Dsh,
+                };
+                let _ = t_dsh.set_checked(next == OutputTarget::Dsh);
+                let _ = t_both.set_checked(next == OutputTarget::DshAndClipboard);
+                let _ = t_clip.set_checked(next == OutputTarget::ClipboardOnly);
+                if let Ok(mut c) = app_handle.state::<AppShared>().config.lock() {
+                    c.output_target = next;
+                    let _ = c.save();
+                }
+                log::info!("Switched capsule output target -> {:?}", next);
             }
             "autostart" => {
                 let checked = autostart_clone.is_checked().unwrap_or(false);

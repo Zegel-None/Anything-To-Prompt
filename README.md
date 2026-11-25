@@ -30,6 +30,14 @@
   - **IDE / 编辑器**：VS Code / Antigravity / Cursor（解析 `storage.json` 映射工作区真实路径）、JetBrains、Visual Studio、Notepad++、Notepad。
   - **终端**：Windows Terminal / PowerShell / CMD / IDE 内置终端（抓取缓冲区文本 + 子进程工作目录与命令行）。
   - **文件 / Office / 专业软件**：资源管理器选区自动附带（含目录统计与 Git 分支）、Word / Excel / PPT / WPS / Outlook / SolidWorks / AutoCAD（通过中完整性 Broker 安全读取 COM）、微信 / 飞书 / 钉钉 / QQ / Obsidian / Unity / Unreal / Blender / Steam。
+- **Computer Use 全坐标系机械锚定（适配 Codex / Claude Code / Antigravity / DSH / Windows-MCP）**：
+  - 每次点选或拖拽，胶囊内自动机械计算并附带 `computer_use_grounding` 区块（`<0.1ms` 零误差），同时给出 **4 套坐标体系**：
+    - `px`（物理屏幕像素，直喂 Win32 / `Windows-MCP`）；
+    - `dip`（逻辑像素，自动除以当前显示器 `dpi_scale`）；
+    - `norm1000`（`0~1000` 显示器归一化坐标，直喂 Gemini / Antigravity 及缩图后的 Claude / Codex CUA）；
+    - `win_rel` & `win_ratio`（相对目标窗口左上角偏移，窗口被拖动后依然命中）；
+  - 同步区分 **`element_center`（元素中心点）** 与 **`click_point`（用户落点）**、拖拽起终点及圈内每个子控件中心坐标，并附带 **UIA 交互能力画像**（`enabled / focusable / patterns=[Invoke,Value,Toggle,...] / state / runtime_id`）。
+  - 支持在系统托盘一键切换 **多 Harness 投递目标**：`DSH 悬浮条` / `DSH + 同步复制到剪贴板` / `仅复制胶囊到剪贴板`（直接粘贴进 Codex、Claude Code、Antigravity）。
 - **红框编号调试截图自动轮转**：本地保存在 `%LOCALAPPDATA%\AnythingToPrompt\captures\`，不直接上传图片，仅在胶囊隐藏上下文附带路径供智能体按需查阅，发送满 20 条消息或超时 60 分钟自动清理。
 
 ### 3. Office / WPS 原生选择模式 & 实时原地修改生态依赖
@@ -123,6 +131,7 @@ npm --prefix .\apps\desktop run build
 | `captureKeepMessages` | `20` | 调试截图保留的后续已发送消息条数 |
 | `captureOrphanTtlMinutes` | `60` | 未发送孤儿截图自动清理分钟数 |
 | `excludeFromCapture` | `true` | 常规截屏时隐藏悬浮条自身窗口（拾取自身元素时会自动临时放开） |
+| `outputTarget` | `"dsh"` | 胶囊投递目标：`dsh`（悬浮条）/ `dsh_and_clipboard`（悬浮条+剪贴板）/ `clipboard_only`（仅复制，配合 Codex / Claude Code / Antigravity） |
 | `appSourceMap` | `{}` | 可执行文件名/路径到本地源码目录的自定义映射表 |
 
 ---
