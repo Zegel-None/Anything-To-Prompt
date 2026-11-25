@@ -1410,6 +1410,11 @@ window.__ModuleLoader__.load({
         '}',
         'html[data-dsh-bar-clone="1"] [data-dsb-menu-scroll]::-webkit-scrollbar { width: 4px; }',
         'html[data-dsh-bar-clone="1"] [data-dsb-menu-scroll]::-webkit-scrollbar-thumb { background: rgba(128,128,128,0.28); border-radius: 999px; }',
+        '[data-dsb-composer-popover="1"]::-webkit-scrollbar { width: 5px; }',
+        '[data-dsb-composer-popover="1"]::-webkit-scrollbar-track { background: transparent; }',
+        '[data-dsb-composer-popover="1"]::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.22); border-radius: 999px; }',
+        '[data-dsb-pop-row="1"]:hover { background: rgba(255, 255, 255, 0.085) !important; }',
+        '[data-dsb-pop-row="codex"]:hover { background: rgba(255, 255, 255, 0.085) !important; }',
         // =====================================================================
         // Multi-Harness Auto-Discovered Styles (`harnesses/<id>/{harness.json,ui.js}`)
         // Hide DSH's native [data-composer-card] whenever an external harness renders
@@ -2611,6 +2616,11 @@ window.__ModuleLoader__.load({
         const [historyOpen, setHistoryOpen] = useState(false);
         const [hoverPeek, setHoverPeek] = useState(false);
         const [composerPopover, setComposerPopover] = useState(null);
+        const [composerSubView, setComposerSubView] = useState(null);
+        const sketchCanvasRef = useRef(null);
+        const sketchDrawingRef = useRef(false);
+        const sketchColorRef = useRef('#38bdf8');
+        const [sketchColor, setSketchColor] = useState('#38bdf8');
         const hoverPeekTimerRef = useRef(null);
         const lastKnownAsstRef = useRef({ sessionKey: '', asstId: '' });
         const [expandedHeight, setExpandedHeight] = useState(() =>
@@ -4728,17 +4738,25 @@ window.__ModuleLoader__.load({
         };
 
         const openComposerPopover = (kind, anchorEl) => {
+          setComposerSubView(null);
           setComposerPopover((prev) => {
             if (prev && prev.kind === kind) return null;
             let left = 12;
             let bottom = 92;
-            if (anchorEl && typeof anchorEl.getBoundingClientRect === 'function') {
+            let fullWidth = false;
+            if (kind === 'plus' && dsbRuntime.activeHarness === 'codex') {
+              const compEl = document.querySelector('[data-dsb-external-composer="codex"]');
+              const cr = compEl ? compEl.getBoundingClientRect() : null;
+              left = 0;
+              bottom = cr && cr.height > 10 ? Math.max(88, Math.round(window.innerHeight - cr.top + 6)) : 126;
+              fullWidth = true;
+            } else if (anchorEl && typeof anchorEl.getBoundingClientRect === 'function') {
               const r = anchorEl.getBoundingClientRect();
               left = Math.max(8, Math.round(r.left));
-              bottom = Math.max(48, Math.round(window.innerHeight - r.top + 8));
+              bottom = Math.max(48, Math.round(window.innerHeight - r.top + 10));
             }
             scheduleLayoutReport(260);
-            return { kind, left, bottom };
+            return { kind, left, bottom, fullWidth };
           });
         };
 
@@ -5132,23 +5150,260 @@ window.__ModuleLoader__.load({
           const opts = activeHarnessOpts || {};
           const prefs = activeHarnessPrefs || {};
           const meta = getHarnessMeta(activeHarness);
+          const isCodexPlus = composerPopover.kind === 'plus' && activeHarness === 'codex';
+          const isAgPlus = composerPopover.kind === 'plus' && activeHarness === 'antigravity';
+
           const panelBg =
             activeHarness === 'codex'
-              ? '#262626'
+              ? '#212121'
               : activeHarness === 'claude_code'
                 ? '#2B2B29'
-                : '#1b1c1f';
+                : '#17181b';
           const panelBorder =
             activeHarness === 'claude_code'
-              ? 'rgba(255,248,240,0.12)'
-              : 'rgba(255,255,255,0.11)';
+              ? 'rgba(255, 248, 240, 0.11)'
+              : activeHarness === 'codex'
+                ? 'rgba(255, 255, 255, 0.09)'
+                : 'rgba(255, 255, 255, 0.11)';
 
-          const rowBtn = (key, iconStr, title, sub, active, onClick) =>
+          const svgIcon = (sz, strokeColor, children, vb = '0 0 24 24', fill = 'none') =>
+            h(
+              'svg',
+              {
+                width: sz,
+                height: sz,
+                viewBox: vb,
+                fill,
+                stroke: strokeColor || 'none',
+                strokeWidth: 1.75,
+                strokeLinecap: 'round',
+                strokeLinejoin: 'round',
+                style: { display: 'block', flexShrink: 0 },
+              },
+              children,
+            );
+
+          const POP_ICONS = {
+            paperclip: (c = '#d4d4d8', sz = 16) =>
+              svgIcon(sz, c, [
+                h('path', {
+                  key: 'p',
+                  d: 'M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48',
+                }),
+              ]),
+            folder: (c = '#d4d4d8', sz = 16) =>
+              svgIcon(sz, c, [
+                h('path', {
+                  key: 'p',
+                  d: 'M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7z',
+                }),
+              ]),
+            image: (c = '#d4d4d8', sz = 16) =>
+              svgIcon(sz, c, [
+                h('rect', { key: 'r', x: 3, y: 4, width: 18, height: 16, rx: 2 }),
+                h('circle', { key: 'c', cx: 8.5, cy: 9.5, r: 1.5 }),
+                h('path', { key: 'p', d: 'M21 15l-5-5L5 20' }),
+              ]),
+            atSign: (c = '#d4d4d8', sz = 16) =>
+              svgIcon(sz, c, [
+                h('circle', { key: 'c', cx: 12, cy: 12, r: 4 }),
+                h('path', { key: 'p', d: 'M16 8v5a3 3 0 0 0 6 0v-1a10 10 0 1 0-3.92 7.94' }),
+              ]),
+            actionsBox: (c = '#d4d4d8', sz = 16) =>
+              svgIcon(sz, c, [
+                h('rect', { key: 'r', x: 3.5, y: 3.5, width: 17, height: 17, rx: 3.5 }),
+                h('path', { key: 'p', d: 'M9 15l6-6' }),
+              ]),
+            chrome: (c = '#d4d4d8', sz = 16) =>
+              svgIcon(sz, c, [
+                h('circle', { key: 'o', cx: 12, cy: 12, r: 9 }),
+                h('circle', { key: 'i', cx: 12, cy: 12, r: 3.5 }),
+                h('path', { key: 'l1', d: 'M12 8.5h8.4' }),
+                h('path', { key: 'l2', d: 'M8.97 13.75L4.77 6.48' }),
+                h('path', { key: 'l3', d: 'M15.03 13.75l-4.2 7.27' }),
+              ]),
+            drive: (c = '#d4d4d8', sz = 16) =>
+              svgIcon(sz, c, [
+                h('path', { key: 'p1', d: 'M8.5 4h7l6 10.5-3.5 5.5h-12L2.5 14.5 8.5 4z' }),
+                h('path', { key: 'p2', d: 'M8.5 4l6 10.5H2.5' }),
+                h('path', { key: 'p3', d: 'M15.5 4L9.5 14.5l3 5.5' }),
+              ]),
+            antigravityMark: (sz = 18) =>
+              h(
+                'span',
+                {
+                  style: {
+                    width: sz + 'px',
+                    height: sz + 'px',
+                    borderRadius: '5px',
+                    background: '#ffffff',
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    flexShrink: 0,
+                  },
+                },
+                svgIcon(12, '#1d4ed8', [
+                  h('path', { key: 'a', d: 'M6 19L12 5l6 14M8.5 14h7', strokeWidth: 2.3 }),
+                ]),
+              ),
+            target: (c = '#a3a3a3', sz = 17) =>
+              svgIcon(sz, c, [
+                h('circle', { key: 'c1', cx: 12, cy: 12, r: 8.5 }),
+                h('circle', { key: 'c2', cx: 12, cy: 12, r: 4.5 }),
+                h('circle', { key: 'c3', cx: 12, cy: 12, r: 1.2, fill: c }),
+                h('path', { key: 'ar', d: 'M16.5 7.5L21 3' }),
+              ]),
+            bulb: (c = '#a3a3a3', sz = 17) =>
+              svgIcon(sz, c, [
+                h('path', { key: 'b', d: 'M9 18h6M10 21h4M12 3a6 6 0 0 0-3.5 10.85c.56.42.9 1.08.9 1.78V16h5.2v-.37c0-.7.34-1.36.9-1.78A6 6 0 0 0 12 3z' }),
+              ]),
+            squiggle: (sz = 18) =>
+              h(
+                'svg',
+                {
+                  width: sz,
+                  height: sz,
+                  viewBox: '0 0 24 24',
+                  fill: 'none',
+                  strokeWidth: 2.2,
+                  strokeLinecap: 'round',
+                  strokeLinejoin: 'round',
+                  style: { display: 'block', flexShrink: 0 },
+                },
+                h(
+                  'defs',
+                  null,
+                  h(
+                    'linearGradient',
+                    { id: 'dsb-sq-grad', x1: '0%', y1: '100%', x2: '100%', y2: '0%' },
+                    h('stop', { offset: '0%', stopColor: '#10b981' }),
+                    h('stop', { offset: '55%', stopColor: '#06b6d4' }),
+                    h('stop', { offset: '100%', stopColor: '#3b82f6' }),
+                  ),
+                ),
+                h('path', {
+                  d: 'M4 18c2-8 5-12 6-6s3 6 5-3 3-3 5 4',
+                  stroke: 'url(#dsb-sq-grad)',
+                }),
+              ),
+            pluginBadge: (id, sz = 18) => {
+              const lower = String(id || '').toLowerCase();
+              if (lower.includes('doc')) {
+                return h(
+                  'span',
+                  {
+                    style: {
+                      width: sz + 'px',
+                      height: sz + 'px',
+                      borderRadius: '4px',
+                      background: '#2563eb',
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      flexShrink: 0,
+                    },
+                  },
+                  svgIcon(12, '#ffffff', [
+                    h('path', { key: 'l1', d: 'M6 8h12M6 12h12M6 16h8', strokeWidth: 2.2 }),
+                  ]),
+                );
+              }
+              if (lower.includes('pdf')) {
+                return h(
+                  'span',
+                  {
+                    style: {
+                      width: sz + 'px',
+                      height: sz + 'px',
+                      borderRadius: '4px',
+                      background: '#dc2626',
+                      color: '#ffffff',
+                      fontSize: '7.5px',
+                      fontWeight: 800,
+                      letterSpacing: '-0.03em',
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      flexShrink: 0,
+                    },
+                  },
+                  'PDF',
+                );
+              }
+              if (lower.includes('sheet') || lower.includes('excel')) {
+                return h(
+                  'span',
+                  {
+                    style: {
+                      width: sz + 'px',
+                      height: sz + 'px',
+                      borderRadius: '4px',
+                      background: '#16a34a',
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      flexShrink: 0,
+                    },
+                  },
+                  svgIcon(12, '#ffffff', [
+                    h('rect', { key: 'r', x: 4, y: 5, width: 16, height: 14, rx: 1.5, strokeWidth: 2 }),
+                    h('path', { key: 'g', d: 'M4 10h16M10 5v14', strokeWidth: 1.8 }),
+                  ]),
+                );
+              }
+              if (lower.includes('present') || lower.includes('slide') || lower.includes('ppt')) {
+                return h(
+                  'span',
+                  {
+                    style: {
+                      width: sz + 'px',
+                      height: sz + 'px',
+                      borderRadius: '4px',
+                      background: '#ea580c',
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      flexShrink: 0,
+                    },
+                  },
+                  svgIcon(12, '#ffffff', [
+                    h('rect', { key: 'r', x: 4, y: 5, width: 16, height: 11, rx: 1.5, strokeWidth: 2 }),
+                    h('path', { key: 's', d: 'M9 19h6M12 16v3', strokeWidth: 2 }),
+                  ]),
+                );
+              }
+              return h(
+                'span',
+                {
+                  style: {
+                    width: sz + 'px',
+                    height: sz + 'px',
+                    borderRadius: '4px',
+                    background: 'rgba(255,255,255,0.12)',
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    flexShrink: 0,
+                  },
+                },
+                svgIcon(12, '#e5e7eb', [
+                  h('circle', { key: 'c', cx: 12, cy: 12, r: 5, strokeWidth: 2 }),
+                ]),
+              );
+            },
+            slash: (c = '#c7c3b8', sz = 15) =>
+              svgIcon(sz, c, [h('path', { key: 's', d: 'M15 5L9 19', strokeWidth: 2 })]),
+          };
+
+          // Standard compact row (Antigravity / Claude / Model / Mode)
+          const rowBtn = (key, iconNode, title, sub, active, onClick, rightNode) =>
             h(
               'button',
               {
                 key,
                 type: 'button',
+                'data-dsb-pop-row': '1',
                 onClick: (ev) => {
                   ev.stopPropagation();
                   onClick();
@@ -5159,118 +5414,622 @@ window.__ModuleLoader__.load({
                   alignItems: 'center',
                   justifyContent: 'space-between',
                   gap: '10px',
-                  padding: '7px 10px',
+                  padding: sub ? '7px 10px' : '6px 10px',
+                  minHeight: sub ? '38px' : '33px',
                   borderRadius: '8px',
                   border: 'none',
                   background: active ? 'rgba(255,255,255,0.10)' : 'transparent',
-                  color: '#f3f4f6',
+                  color: '#eceef2',
                   cursor: 'pointer',
                   textAlign: 'left',
-                  fontSize: '12.5px',
+                  fontSize: '13.5px',
+                  lineHeight: '19px',
+                  transition: 'background 0.1s ease',
+                  boxSizing: 'border-box',
                 },
               },
               h(
                 'div',
-                { style: { display: 'flex', alignItems: 'center', gap: '8px', minWidth: 0 } },
-                iconStr ? h('span', { style: { width: '16px', textAlign: 'center', opacity: 0.85, flexShrink: 0 } }, iconStr) : null,
+                { style: { display: 'flex', alignItems: 'center', gap: '10px', minWidth: 0, flex: 1 } },
+                iconNode || null,
                 h(
                   'div',
-                  { style: { minWidth: 0 } },
-                  h('div', { style: { fontWeight: 500, color: '#f3f4f6', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' } }, title),
-                  sub ? h('div', { style: { fontSize: '11px', color: 'rgba(209,213,219,0.56)', marginTop: '1px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' } }, sub) : null,
+                  { style: { minWidth: 0, flex: 1 } },
+                  h(
+                    'div',
+                    {
+                      style: {
+                        fontWeight: 450,
+                        color: '#eceef2',
+                        whiteSpace: 'nowrap',
+                        overflow: 'hidden',
+                        textOverflow: 'ellipsis',
+                      },
+                    },
+                    title,
+                  ),
+                  sub
+                    ? h(
+                        'div',
+                        {
+                          style: {
+                            fontSize: '11.5px',
+                            color: 'rgba(209,213,219,0.52)',
+                            marginTop: '1px',
+                            whiteSpace: 'nowrap',
+                            overflow: 'hidden',
+                            textOverflow: 'ellipsis',
+                          },
+                        },
+                        sub,
+                      )
+                    : null,
                 ),
               ),
-              active ? h('span', { style: { color: meta.accent, fontSize: '12px', fontWeight: 700 } }, '✓') : null,
+              rightNode || (active ? h('span', { style: { color: meta.accent, fontSize: '12px', fontWeight: 700 } }, '✓') : null),
             );
+
+          // Codex 1:1 full-width pill row: [icon] [title] [inline muted description]
+          const codexRowBtn = (key, iconNode, title, inlineDesc, highlighted, onClick, rightNode) =>
+            h(
+              'button',
+              {
+                key,
+                type: 'button',
+                'data-dsb-pop-row': 'codex',
+                onClick: (ev) => {
+                  ev.stopPropagation();
+                  onClick();
+                },
+                style: {
+                  width: '100%',
+                  height: '36px',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  gap: '10px',
+                  padding: '0 14px',
+                  borderRadius: '999px',
+                  border: 'none',
+                  background: highlighted ? 'rgba(255, 255, 255, 0.085)' : 'transparent',
+                  color: '#ededed',
+                  cursor: 'pointer',
+                  textAlign: 'left',
+                  fontSize: '13.5px',
+                  transition: 'background 0.1s ease',
+                  boxSizing: 'border-box',
+                },
+              },
+              h(
+                'div',
+                { style: { display: 'flex', alignItems: 'center', gap: '10px', minWidth: 0, flex: 1 } },
+                iconNode || null,
+                h(
+                  'span',
+                  {
+                    style: {
+                      fontWeight: highlighted ? 550 : 450,
+                      color: '#ededed',
+                      flexShrink: 0,
+                      whiteSpace: 'nowrap',
+                    },
+                  },
+                  title,
+                ),
+                inlineDesc
+                  ? h(
+                      'span',
+                      {
+                        style: {
+                          color: '#8f8f8f',
+                          fontSize: '13px',
+                          fontWeight: 400,
+                          overflow: 'hidden',
+                          textOverflow: 'ellipsis',
+                          whiteSpace: 'nowrap',
+                        },
+                      },
+                      inlineDesc,
+                    )
+                  : null,
+              ),
+              rightNode || null,
+            );
+
+          const renderCodexSketchPad = () => {
+            const getCanvasPos = (ev) => {
+              const cvs = sketchCanvasRef.current;
+              if (!cvs) return null;
+              const r = cvs.getBoundingClientRect();
+              return {
+                x: ((ev.clientX - r.left) * cvs.width) / Math.max(1, r.width),
+                y: ((ev.clientY - r.top) * cvs.height) / Math.max(1, r.height),
+              };
+            };
+            const onDown = (ev) => {
+              ev.stopPropagation();
+              const cvs = sketchCanvasRef.current;
+              const p = getCanvasPos(ev);
+              if (!cvs || !p) return;
+              const ctx2d = cvs.getContext('2d');
+              if (!ctx2d) return;
+              sketchDrawingRef.current = true;
+              ctx2d.strokeStyle = sketchColorRef.current;
+              ctx2d.lineWidth = 3;
+              ctx2d.lineCap = 'round';
+              ctx2d.lineJoin = 'round';
+              ctx2d.beginPath();
+              ctx2d.moveTo(p.x, p.y);
+            };
+            const onMove = (ev) => {
+              if (!sketchDrawingRef.current) return;
+              const cvs = sketchCanvasRef.current;
+              const p = getCanvasPos(ev);
+              if (!cvs || !p) return;
+              const ctx2d = cvs.getContext('2d');
+              if (!ctx2d) return;
+              ctx2d.lineTo(p.x, p.y);
+              ctx2d.stroke();
+            };
+            const onUp = () => {
+              sketchDrawingRef.current = false;
+            };
+            const clearPad = () => {
+              const cvs = sketchCanvasRef.current;
+              if (!cvs) return;
+              const ctx2d = cvs.getContext('2d');
+              if (ctx2d) ctx2d.clearRect(0, 0, cvs.width, cvs.height);
+            };
+            const attachSketch = () => {
+              const cvs = sketchCanvasRef.current;
+              if (!cvs) return;
+              const exportCvs = document.createElement('canvas');
+              exportCvs.width = cvs.width;
+              exportCvs.height = cvs.height;
+              const ectx = exportCvs.getContext('2d');
+              if (!ectx) return;
+              ectx.fillStyle = '#181818';
+              ectx.fillRect(0, 0, exportCvs.width, exportCvs.height);
+              ectx.drawImage(cvs, 0, 0);
+              const dataUrl = exportCvs.toDataURL('image/png');
+              tauriInvoke('app_save_clipboard_image', {
+                base64Data: dataUrl,
+                mime: 'image/png',
+              })
+                .then((att) => {
+                  if (att) addExtAttachments([att]);
+                  setComposerSubView(null);
+                  setComposerPopover(null);
+                  focusComposerElement();
+                })
+                .catch(() => {});
+            };
+            return [
+              h(
+                'div',
+                {
+                  key: 'sk-hdr',
+                  style: {
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    padding: '4px 10px 8px',
+                  },
+                },
+                h(
+                  'div',
+                  { style: { display: 'flex', alignItems: 'center', gap: '8px' } },
+                  h(
+                    'button',
+                    {
+                      type: 'button',
+                      onClick: (ev) => {
+                        ev.stopPropagation();
+                        setComposerSubView(null);
+                      },
+                      style: {
+                        border: 'none',
+                        background: 'rgba(255,255,255,0.07)',
+                        color: '#e5e7eb',
+                        borderRadius: '7px',
+                        padding: '3px 8px',
+                        fontSize: '12px',
+                        cursor: 'pointer',
+                      },
+                    },
+                    '← 返回',
+                  ),
+                  h('span', { style: { fontSize: '12.5px', fontWeight: 500, color: '#ededed' } }, '绘制草图（将作为图片附件发送给 Codex）'),
+                ),
+                h(
+                  'div',
+                  { style: { display: 'flex', alignItems: 'center', gap: '6px' } },
+                  ['#38bdf8', '#f43f5e', '#34d399', '#facc15', '#ffffff'].map((col) =>
+                    h('button', {
+                      key: col,
+                      type: 'button',
+                      onClick: (ev) => {
+                        ev.stopPropagation();
+                        sketchColorRef.current = col;
+                        setSketchColor(col);
+                      },
+                      style: {
+                        width: '16px',
+                        height: '16px',
+                        borderRadius: '999px',
+                        border: sketchColor === col ? '2px solid #ffffff' : '1px solid rgba(255,255,255,0.25)',
+                        background: col,
+                        cursor: 'pointer',
+                        padding: 0,
+                      },
+                    }),
+                  ),
+                  h(
+                    'button',
+                    {
+                      type: 'button',
+                      onClick: (ev) => {
+                        ev.stopPropagation();
+                        clearPad();
+                      },
+                      style: {
+                        border: 'none',
+                        background: 'rgba(255,255,255,0.08)',
+                        color: '#d4d4d8',
+                        borderRadius: '7px',
+                        padding: '3px 9px',
+                        fontSize: '12px',
+                        cursor: 'pointer',
+                      },
+                    },
+                    '清空',
+                  ),
+                  h(
+                    'button',
+                    {
+                      type: 'button',
+                      onClick: (ev) => {
+                        ev.stopPropagation();
+                        attachSketch();
+                      },
+                      style: {
+                        border: 'none',
+                        background: '#0169cc',
+                        color: '#ffffff',
+                        borderRadius: '7px',
+                        padding: '3px 11px',
+                        fontSize: '12px',
+                        fontWeight: 550,
+                        cursor: 'pointer',
+                      },
+                    },
+                    '附加草图',
+                  ),
+                ),
+              ),
+              h('canvas', {
+                key: 'sk-cvs',
+                ref: sketchCanvasRef,
+                width: 760,
+                height: 210,
+                onMouseDown: onDown,
+                onMouseMove: onMove,
+                onMouseUp: onUp,
+                onMouseLeave: onUp,
+                style: {
+                  width: '100%',
+                  height: '210px',
+                  borderRadius: '12px',
+                  background: '#181818',
+                  border: '1px solid rgba(255,255,255,0.08)',
+                  cursor: 'crosshair',
+                  display: 'block',
+                },
+              }),
+            ];
+          };
 
           let content = null;
           let panelWidth = 256;
 
           if (composerPopover.kind === 'plus') {
             if (activeHarness === 'antigravity') {
-              panelWidth = 236;
-              const actions = Array.isArray(opts.actions) ? opts.actions : [];
-              content = [
-                h('div', { key: 'hdr', style: { fontSize: '11px', color: 'rgba(209,213,219,0.52)', padding: '3px 10px 5px', fontWeight: 500 } }, 'Add Context'),
-                rowBtn('files', '📎', 'Files', '选择本地文件或图片', false, () => {
-                  setComposerPopover(null);
-                  pickFilesForExtComposer(false);
-                }),
-                rowBtn('folder', '📁', 'Folder', '附加文件夹上下文', false, () => {
-                  setComposerPopover(null);
-                  pickFolderForExtComposer();
-                }),
-                rowBtn('mentions', '@', 'Mentions', '插入 @ 引用文件或上下文', false, () => {
-                  setComposerPopover(null);
-                  insertTextIntoExtComposer('@');
-                }),
-                rowBtn('browser', '🌐', 'Browser', '插入 /browser 浏览网页', false, () => {
-                  setComposerPopover(null);
-                  insertTextIntoExtComposer('/browser ');
-                }),
-                actions.length > 0
-                  ? h('div', { key: 'act-hdr', style: { fontSize: '11px', color: 'rgba(209,213,219,0.48)', padding: '7px 10px 3px', borderTop: '1px solid rgba(255,255,255,0.07)', marginTop: '4px' } }, 'Actions')
-                  : null,
-                ...actions.map((a) =>
-                  rowBtn('act-' + a.id, '◫', a.label, a.desc, false, () => {
+              panelWidth = 216;
+              const actions =
+                Array.isArray(opts.actions) && opts.actions.length > 0
+                  ? opts.actions
+                  : [
+                      { id: '/plan', label: '/plan', desc: '先出步骤规划再执行' },
+                      { id: '/goal', label: '/goal', desc: '长期目标自主推进模式' },
+                      { id: '/grill-me', label: '/grill-me', desc: '交互式需求对齐访谈' },
+                      { id: '/boost', label: '/boost', desc: '深度推理与多维验证' },
+                      { id: '/compact', label: '/compact', desc: '压缩上下文释放窗口' },
+                      { id: '/learn', label: '/learn', desc: '沉淀规则到长期记忆' },
+                    ];
+              if (composerSubView === 'ag-actions') {
+                panelWidth = 252;
+                content = [
+                  h(
+                    'div',
+                    {
+                      key: 'act-back',
+                      style: {
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'space-between',
+                        padding: '3px 8px 6px',
+                      },
+                    },
+                    h(
+                      'button',
+                      {
+                        type: 'button',
+                        onClick: (ev) => {
+                          ev.stopPropagation();
+                          setComposerSubView(null);
+                        },
+                        style: {
+                          border: 'none',
+                          background: 'transparent',
+                          color: '#8b8d94',
+                          fontSize: '12px',
+                          cursor: 'pointer',
+                          padding: 0,
+                        },
+                      },
+                      '← Add Context',
+                    ),
+                    h('span', { style: { fontSize: '11.5px', color: '#8b8d94', fontWeight: 500 } }, 'Actions'),
+                  ),
+                  ...actions.map((a) =>
+                    rowBtn('act-' + a.id, POP_ICONS.actionsBox('#a1a1aa', 15), a.label, a.desc, false, () => {
+                      setComposerSubView(null);
+                      setComposerPopover(null);
+                      insertTextIntoExtComposer(a.id + ' ');
+                    }),
+                  ),
+                ];
+              } else {
+                content = [
+                  h(
+                    'div',
+                    {
+                      key: 'hdr',
+                      style: {
+                        fontSize: '12px',
+                        color: '#8b8d94',
+                        padding: '3px 10px 6px',
+                        fontWeight: 500,
+                      },
+                    },
+                    'Add Context',
+                  ),
+                  rowBtn('files', POP_ICONS.paperclip('#d4d4d8', 15), 'Files', '', false, () => {
                     setComposerPopover(null);
-                    insertTextIntoExtComposer(a.id + ' ');
+                    pickFilesForExtComposer(false);
                   }),
-                ),
-              ];
+                  rowBtn('folder', POP_ICONS.folder('#d4d4d8', 15), 'Folder', '', false, () => {
+                    setComposerPopover(null);
+                    pickFolderForExtComposer();
+                  }),
+                  rowBtn('mentions', POP_ICONS.atSign('#d4d4d8', 15), 'Mentions', '', false, () => {
+                    setComposerPopover(null);
+                    insertTextIntoExtComposer('@');
+                  }),
+                  rowBtn('actions', POP_ICONS.actionsBox('#d4d4d8', 15), 'Actions', '', false, () => {
+                    setComposerSubView('ag-actions');
+                    scheduleLayoutReport(220);
+                  }),
+                  rowBtn('browser', POP_ICONS.chrome('#d4d4d8', 15), 'Browser', '', false, () => {
+                    setComposerPopover(null);
+                    insertTextIntoExtComposer('/browser ');
+                  }),
+                  rowBtn(
+                    'drive',
+                    POP_ICONS.drive('#d4d4d8', 15),
+                    'Drive',
+                    '',
+                    false,
+                    () => {
+                      setComposerPopover(null);
+                      const agSel = dsbRuntime.externalSelection.antigravity || {};
+                      tauriInvoke('harness_focus_desktop', {
+                        harness: 'antigravity',
+                        sessionId: agSel.sessionId || '',
+                        title: agSel.title || '',
+                        workspacePath: agSel.workspacePath || '',
+                      }).catch(() => {});
+                    },
+                    h('span', { style: { color: '#3b82f6', fontSize: '12.5px', fontWeight: 500, flexShrink: 0 } }, 'Set up'),
+                  ),
+                ];
+              }
             } else if (activeHarness === 'codex') {
-              panelWidth = 286;
-              const plugins = Array.isArray(opts.plugins) ? opts.plugins : [];
-              content = [
-                h('div', { key: 'hdr-add', style: { fontSize: '11px', color: 'rgba(209,213,219,0.52)', padding: '3px 10px 5px' } }, '添加'),
-                rowBtn('cx-files', '📎', '文件和文件夹', '选择图片 / 文件附加给 Codex', false, () => {
-                  setComposerPopover(null);
-                  pickFilesForExtComposer(false);
-                }),
-                rowBtn('cx-folder', '📁', '附加文件夹', '选择目录路径作为上下文', false, () => {
-                  setComposerPopover(null);
-                  pickFolderForExtComposer();
-                }),
-                rowBtn('cx-goal', '🎯', '目标', '设置要持续追求的目标', false, () => {
-                  setComposerPopover(null);
-                  insertTextIntoExtComposer('/goal ');
-                }),
-                rowBtn('cx-plan', '💡', '计划模式', '开启计划模式（先出方案再动手）', false, () => {
-                  setComposerPopover(null);
-                  insertTextIntoExtComposer('/plan ');
-                }),
-                plugins.length > 0
-                  ? h('div', { key: 'hdr-plg', style: { fontSize: '11px', color: 'rgba(209,213,219,0.52)', padding: '7px 10px 4px', borderTop: '1px solid rgba(255,255,255,0.07)', marginTop: '4px' } }, '插件')
-                  : null,
-                ...plugins.slice(0, 6).map((p) =>
-                  rowBtn('plg-' + p.id, '🧩', p.label, p.desc, false, () => {
-                    setComposerPopover(null);
-                    insertTextIntoExtComposer('使用 ' + p.label + ' 插件：');
-                  }),
-                ),
-              ];
+              if (composerSubView === 'codex-sketch') {
+                content = renderCodexSketchPad();
+              } else {
+                const builtinCodexPlugins = [
+                  { id: 'documents', label: 'Documents', desc: 'Create and edit documents' },
+                  { id: 'pdf', label: 'PDF', desc: 'Read, create, and verify PDFs' },
+                  { id: 'spreadsheets', label: 'Spreadsheets', desc: 'Create and edit spreadsheets' },
+                  { id: 'presentations', label: 'Presentations', desc: 'Create and edit presentations' },
+                ];
+                const seenPlg = new Set(builtinCodexPlugins.map((p) => p.label.toLowerCase()));
+                const discovered = Array.isArray(opts.plugins) ? opts.plugins : [];
+                const mergedPlugins = builtinCodexPlugins.concat(
+                  discovered.filter((p) => p && p.label && !seenPlg.has(String(p.label).toLowerCase())),
+                );
+
+                content = [
+                  h(
+                    'div',
+                    { key: 'hdr-add', style: { fontSize: '12px', color: '#8f8f8f', padding: '4px 14px 6px', fontWeight: 500 } },
+                    '添加',
+                  ),
+                  codexRowBtn(
+                    'cx-files',
+                    POP_ICONS.paperclip('#a3a3a3', 16),
+                    '文件和文件夹',
+                    '',
+                    true,
+                    () => {
+                      setComposerPopover(null);
+                      pickFilesForExtComposer(false);
+                    },
+                    h(
+                      'span',
+                      {
+                        role: 'button',
+                        title: '选择整个文件夹作为上下文',
+                        onClick: (ev) => {
+                          ev.stopPropagation();
+                          setComposerPopover(null);
+                          pickFolderForExtComposer();
+                        },
+                        style: {
+                          fontSize: '11.5px',
+                          color: '#a3a3a3',
+                          padding: '2px 8px',
+                          borderRadius: '999px',
+                          background: 'rgba(255,255,255,0.06)',
+                          border: '1px solid rgba(255,255,255,0.08)',
+                          flexShrink: 0,
+                        },
+                      },
+                      '选文件夹',
+                    ),
+                  ),
+                  codexRowBtn(
+                    'cx-ag',
+                    POP_ICONS.antigravityMark(18),
+                    '附加 Antigravity',
+                    '',
+                    false,
+                    () => {
+                      setComposerPopover(null);
+                      const agWs =
+                        dsbRuntime.externalSelection.antigravity &&
+                        dsbRuntime.externalSelection.antigravity.workspacePath;
+                      if (agWs) {
+                        tauriInvoke('app_describe_paths', { paths: [agWs] })
+                          .then((list) => {
+                            if (Array.isArray(list) && list.length > 0) addExtAttachments(list);
+                            focusComposerElement();
+                          })
+                          .catch(() => {});
+                      } else {
+                        pickFolderForExtComposer();
+                      }
+                    },
+                  ),
+                  codexRowBtn(
+                    'cx-goal',
+                    POP_ICONS.target('#a3a3a3', 17),
+                    '目标',
+                    '设置要持续追求的目标',
+                    false,
+                    () => {
+                      setComposerPopover(null);
+                      insertTextIntoExtComposer('/goal ');
+                    },
+                  ),
+                  codexRowBtn(
+                    'cx-plan',
+                    POP_ICONS.bulb('#a3a3a3', 17),
+                    '计划模式',
+                    '开启计划模式',
+                    false,
+                    () => {
+                      setComposerPopover(null);
+                      insertTextIntoExtComposer('/plan ');
+                    },
+                  ),
+                  codexRowBtn(
+                    'cx-draw',
+                    POP_ICONS.squiggle(18),
+                    '绘图',
+                    '绘制草图',
+                    false,
+                    () => {
+                      setComposerSubView('codex-sketch');
+                      scheduleLayoutReport(220);
+                    },
+                  ),
+                  h(
+                    'div',
+                    {
+                      key: 'hdr-plg',
+                      style: {
+                        fontSize: '12px',
+                        color: '#8f8f8f',
+                        padding: '12px 14px 6px',
+                        fontWeight: 500,
+                      },
+                    },
+                    '插件',
+                  ),
+                  ...mergedPlugins.slice(0, 8).map((p) =>
+                    codexRowBtn(
+                      'plg-' + p.id,
+                      POP_ICONS.pluginBadge(p.id || p.label, 18),
+                      p.label,
+                      p.desc || '',
+                      false,
+                      () => {
+                        setComposerPopover(null);
+                        insertTextIntoExtComposer('使用 ' + p.label + ' 插件：');
+                      },
+                    ),
+                  ),
+                ];
+              }
             } else {
-              panelWidth = 250;
-              const actions = Array.isArray(opts.actions) ? opts.actions : [];
+              panelWidth = 248;
+              const actions =
+                Array.isArray(opts.actions) && opts.actions.length > 0
+                  ? opts.actions
+                  : [
+                      { id: '/compact', label: '/compact', desc: '压缩当前上下文' },
+                      { id: '/plan', label: '/plan', desc: '进入只读规划模式' },
+                      { id: '/review', label: '/review', desc: '代码审查当前改动' },
+                      { id: '/cost', label: '/cost', desc: '查看本次会话 Token 用量' },
+                      { id: '/clear', label: '/clear', desc: '清空会话重新开始' },
+                    ];
               content = [
-                h('div', { key: 'hdr-cc', style: { fontSize: '11px', color: 'rgba(234,230,223,0.52)', padding: '3px 10px 5px' } }, '添加上下文'),
-                rowBtn('cc-files', '📎', '添加文件', '选择任意本地文件', false, () => {
+                h(
+                  'div',
+                  { key: 'hdr-cc', style: { fontSize: '11.5px', color: 'rgba(234,230,223,0.52)', padding: '3px 10px 5px', fontWeight: 500 } },
+                  '添加上下文',
+                ),
+                rowBtn('cc-files', POP_ICONS.paperclip('#D8D4CA', 15), '添加文件', '', false, () => {
                   setComposerPopover(null);
                   pickFilesForExtComposer(false);
                 }),
-                rowBtn('cc-imgs', '🖼', '添加图片', '选择截图或图片附件', false, () => {
+                rowBtn('cc-imgs', POP_ICONS.image('#D8D4CA', 15), '添加图片', '', false, () => {
                   setComposerPopover(null);
                   pickFilesForExtComposer(true);
                 }),
-                rowBtn('cc-dir', '📁', '添加工作目录', '以 --add-dir 授权给 Claude', false, () => {
+                rowBtn('cc-dir', POP_ICONS.folder('#D8D4CA', 15), '添加工作目录', '以 --add-dir 授权给 Claude', false, () => {
                   setComposerPopover(null);
                   pickFolderForExtComposer();
                 }),
-                actions.length > 0
-                  ? h('div', { key: 'cc-act-hdr', style: { fontSize: '11px', color: 'rgba(234,230,223,0.48)', padding: '7px 10px 3px', borderTop: '1px solid rgba(255,248,240,0.08)', marginTop: '4px' } }, '斜杠指令')
-                  : null,
+                h(
+                  'div',
+                  {
+                    key: 'cc-act-hdr',
+                    style: {
+                      fontSize: '11.5px',
+                      color: 'rgba(234,230,223,0.48)',
+                      padding: '8px 10px 4px',
+                      borderTop: '1px solid rgba(255,248,240,0.08)',
+                      marginTop: '4px',
+                      fontWeight: 500,
+                    },
+                  },
+                  '斜杠指令',
+                ),
                 ...actions.map((a) =>
-                  rowBtn('cc-act-' + a.id, '/', a.label, a.desc, false, () => {
+                  rowBtn('cc-act-' + a.id, POP_ICONS.slash('#D97757', 14), a.label, a.desc, false, () => {
                     setComposerPopover(null);
                     insertTextIntoExtComposer(a.id + ' ');
                   }),
@@ -5284,9 +6043,9 @@ window.__ModuleLoader__.load({
             const curModel = prefs.model || opts.defaultModel || (models[0] && models[0].id) || '';
             const curEffort = prefs.effort || opts.defaultEffort || (efforts[0] && efforts[0].id) || '';
             content = [
-              h('div', { key: 'hdr-m', style: { fontSize: '11px', color: 'rgba(209,213,219,0.52)', padding: '3px 10px 5px' } }, '选择模型'),
+              h('div', { key: 'hdr-m', style: { fontSize: '11.5px', color: 'rgba(209,213,219,0.52)', padding: '3px 10px 5px', fontWeight: 500 } }, '选择模型'),
               ...models.map((m) =>
-                rowBtn('m-' + m.id, '', m.label, m.desc, m.id === curModel, () => {
+                rowBtn('m-' + m.id, null, m.label, m.desc, m.id === curModel, () => {
                   updateHarnessPrefs(activeHarness, { model: m.id });
                 }),
               ),
@@ -5340,9 +6099,13 @@ window.__ModuleLoader__.load({
             const modes = Array.isArray(opts.modes) ? opts.modes : [];
             const curMode = prefs.mode || opts.defaultMode || (modes[0] && modes[0].id) || '';
             content = [
-              h('div', { key: 'hdr-mode', style: { fontSize: '11px', color: 'rgba(209,213,219,0.52)', padding: '3px 10px 5px' } }, activeHarness === 'codex' ? '沙箱权限' : '执行模式'),
+              h(
+                'div',
+                { key: 'hdr-mode', style: { fontSize: '11.5px', color: 'rgba(209,213,219,0.52)', padding: '3px 10px 5px', fontWeight: 500 } },
+                activeHarness === 'codex' ? '沙箱权限' : '执行模式',
+              ),
               ...modes.map((md) =>
-                rowBtn('md-' + md.id, '🛡', md.label, md.desc, md.id === curMode, () => {
+                rowBtn('md-' + md.id, HARNESS_SDK_ICONS.shield(md.id === curMode ? meta.accent : '#9ca3af'), md.label, md.desc, md.id === curMode, () => {
                   updateHarnessPrefs(activeHarness, { mode: md.id });
                   setComposerPopover(null);
                 }),
@@ -5350,7 +6113,10 @@ window.__ModuleLoader__.load({
             ];
           }
 
-          const clampedLeft = Math.max(8, Math.min(window.innerWidth - panelWidth - 8, composerPopover.left));
+          const isFullWidth = Boolean(composerPopover.fullWidth || isCodexPlus);
+          const clampedLeft = isFullWidth
+            ? 0
+            : Math.max(8, Math.min(window.innerWidth - panelWidth - 8, composerPopover.left));
           const pop = h(
             'div',
             {
@@ -5360,15 +6126,16 @@ window.__ModuleLoader__.load({
               style: {
                 position: 'fixed',
                 left: clampedLeft + 'px',
+                right: isFullWidth ? '0px' : 'auto',
                 bottom: composerPopover.bottom + 'px',
-                width: panelWidth + 'px',
-                maxHeight: '340px',
+                width: isFullWidth ? '100vw' : panelWidth + 'px',
+                maxHeight: isCodexPlus ? '352px' : '340px',
                 overflowY: 'auto',
                 background: panelBg,
                 border: '1px solid ' + panelBorder,
-                borderRadius: '14px',
-                padding: '6px',
-                boxShadow: '0 18px 46px rgba(0,0,0,0.58)',
+                borderRadius: isCodexPlus ? '18px' : '14px',
+                padding: isCodexPlus ? '10px 8px' : isAgPlus ? '8px 6px' : '7px 6px',
+                boxShadow: '0 16px 42px rgba(0, 0, 0, 0.58)',
                 zIndex: 9999,
                 boxSizing: 'border-box',
                 fontFamily: '"Segoe UI", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif',
@@ -6750,7 +7517,7 @@ window.__ModuleLoader__.load({
           const browsedTheme = browsedMeta;
 
           const snap = dsbRuntime.appSettings || {
-            version: '0.5.3',
+            version: '0.5.4',
             isElevated: false,
             dshStatus: '已连接',
             config: {
@@ -6903,7 +7670,7 @@ window.__ModuleLoader__.load({
                         border: '1px solid ' + harnessTheme.accentBorder,
                       },
                     },
-                    'v' + (snap.version || '0.5.3'),
+                    'v' + (snap.version || '0.5.4'),
                   ),
                   actionToast
                     ? h('span', { style: { fontSize: '11px', color: '#34d399', marginLeft: '4px' } }, actionToast)
@@ -7367,7 +8134,7 @@ window.__ModuleLoader__.load({
                         h('span', { style: { fontSize: '12.5px', opacity: 0.85 } }, '⚙'),
                         h('span', null, '设置'),
                       ),
-                      h('span', { style: { fontSize: '10.5px', opacity: 0.45 } }, 'v' + (snap.version || '0.5.3')),
+                      h('span', { style: { fontSize: '10.5px', opacity: 0.45 } }, 'v' + (snap.version || '0.5.4')),
                     ),
                   ),
 
