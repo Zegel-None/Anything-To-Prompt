@@ -1333,6 +1333,7 @@ pub fn run() {
             } else if !forwarded.dev_dump
                 && forwarded.dev_pick_tap.is_none()
                 && forwarded.dev_pick_stroke.is_none()
+                && forwarded.dev_pick_lasso.is_none()
             {
                 dispatch_state_event(app, StateEvent::DoubleCtrlOpen);
             }

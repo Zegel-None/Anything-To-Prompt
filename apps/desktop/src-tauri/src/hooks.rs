@@ -1,21 +1,26 @@
 use std::collections::HashSet;
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, AtomicU8, Ordering};
 use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
-use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
+use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
+use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::System::Threading::{
+    GetCurrentThread, GetCurrentThreadId, SetThreadPriority, THREAD_PRIORITY_HIGHEST,
+};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, VK_CONTROL, VK_LCONTROL, VK_LMENU, VK_LSHIFT, VK_LWIN, VK_MENU, VK_RCONTROL,
     VK_RMENU, VK_RSHIFT, VK_RWIN, VK_SHIFT,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CallNextHookEx, DispatchMessageW, GetForegroundWindow, GetMessageW, GetWindowRect,
-    SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx, HHOOK, KBDLLHOOKSTRUCT,
-    LLKHF_INJECTED, LLMHF_INJECTED, MSG, MSLLHOOKSTRUCT, WH_KEYBOARD_LL, WH_MOUSE_LL, WM_KEYDOWN,
-    WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MOUSEMOVE, WM_RBUTTONDOWN,
-    WM_RBUTTONUP, WM_SYSKEYDOWN, WM_SYSKEYUP,
+    CallNextHookEx, DispatchMessageW, GetCursorPos, GetForegroundWindow, GetMessageW,
+    GetWindowRect, PostThreadMessageW, SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx,
+    HHOOK, KBDLLHOOKSTRUCT, LLKHF_INJECTED, MSG, MSLLHOOKSTRUCT, WH_KEYBOARD_LL, WH_MOUSE_LL,
+    WM_APP, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MOUSEMOVE,
+    WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSKEYDOWN, WM_SYSKEYUP,
 };
 
 const DUMMY_EXTRA_INFO: usize = 0xD5B0_00E8;
+const WM_APP_REINSTALL_HOOKS: u32 = WM_APP + 1;
 
 const VK_CONTROL_U32: u32 = 0x11;
 const VK_LCONTROL_U32: u32 = 0xA2;
@@ -572,6 +577,9 @@ struct GlobalHookBridge {
     first_ctrl_tainted: AtomicBool,
     second_ctrl_fast: AtomicBool,
     last_move_sent_ms: AtomicU64,
+    hook_thread_id: AtomicU32,
+    mouse_hook_events: AtomicU64,
+    kb_hook_events: AtomicU64,
 }
 
 static HOOK_BRIDGE: std::sync::OnceLock<GlobalHookBridge> = std::sync::OnceLock::new();
@@ -597,6 +605,7 @@ unsafe extern "system" fn low_level_keyboard_proc(
 ) -> LRESULT {
     if code >= 0 {
         if let Some(bridge) = HOOK_BRIDGE.get() {
+            bridge.kb_hook_events.fetch_add(1, Ordering::Relaxed);
             let kb = &*(lparam.0 as *const KBDLLHOOKSTRUCT);
             if kb.dwExtraInfo != DUMMY_EXTRA_INFO {
                 let is_injected = (kb.flags.0 & LLKHF_INJECTED.0) != 0;
@@ -649,9 +658,12 @@ unsafe extern "system" fn low_level_mouse_proc(
 ) -> LRESULT {
     if code >= 0 {
         if let Some(bridge) = HOOK_BRIDGE.get() {
+            bridge.mouse_hook_events.fetch_add(1, Ordering::Relaxed);
             let ms = &*(lparam.0 as *const MSLLHOOKSTRUCT);
-            let is_injected = (ms.flags & LLMHF_INJECTED) != 0;
-            if !is_injected || bridge.shared.accept_injected.load(Ordering::Relaxed) {
+            // Only skip our own synthetic events (DUMMY_EXTRA_INFO). Do NOT block LLMHF_INJECTED:
+            // Logitech Options+, Windows Precision Touchpads/Styluses, remote desktop tools, and
+            // Computer-Use agents legitimately set LLMHF_INJECTED on real pointer moves/clicks.
+            if ms.dwExtraInfo != DUMMY_EXTRA_INFO {
                 let msg = wparam.0 as u32;
                 let now_ms = bridge.epoch.elapsed().as_millis() as u64;
                 let x = ms.pt.x;
@@ -696,6 +708,9 @@ unsafe extern "system" fn low_level_mouse_proc(
                                 .swallowing_button
                                 .store(SWALLOW_LEFT, Ordering::Release);
                         } else {
+                            bridge
+                                .swallowing_button
+                                .store(SWALLOW_NONE, Ordering::Release);
                             bridge.first_ctrl_tainted.store(true, Ordering::Release);
                             if bar_vis && !on_bar {
                                 let _ = bridge.raw_tx.send(RawSignal::OutsideClick);
@@ -756,6 +771,9 @@ unsafe extern "system" fn low_level_mouse_proc(
                             return LRESULT(1);
                         }
 
+                        bridge
+                            .swallowing_button
+                            .store(SWALLOW_NONE, Ordering::Release);
                         bridge.first_ctrl_tainted.store(true, Ordering::Release);
                         if bar_vis && !on_bar {
                             let _ = bridge.raw_tx.send(RawSignal::OutsideClick);
@@ -856,7 +874,7 @@ pub fn start_input_hooks(shared: Arc<HookSharedConfig>, event_tx: mpsc::Sender<H
 
     let mut cur_pt = POINT::default();
     unsafe {
-        let _ = windows::Win32::UI::WindowsAndMessaging::GetCursorPos(&mut cur_pt);
+        let _ = GetCursorPos(&mut cur_pt);
     }
     shared.last_cursor_x.store(cur_pt.x, Ordering::Relaxed);
     shared.last_cursor_y.store(cur_pt.y, Ordering::Relaxed);
@@ -870,36 +888,72 @@ pub fn start_input_hooks(shared: Arc<HookSharedConfig>, event_tx: mpsc::Sender<H
         first_ctrl_tainted: AtomicBool::new(false),
         second_ctrl_fast: AtomicBool::new(false),
         last_move_sent_ms: AtomicU64::new(0),
+        hook_thread_id: AtomicU32::new(0),
+        mouse_hook_events: AtomicU64::new(0),
+        kb_hook_events: AtomicU64::new(0),
     });
 
     std::thread::Builder::new()
         .name("dsb-win32-hooks".to_string())
         .spawn(move || unsafe {
-            let kb_hook: HHOOK =
-                match SetWindowsHookExW(WH_KEYBOARD_LL, Some(low_level_keyboard_proc), None, 0) {
+            let tid = GetCurrentThreadId();
+            if let Some(b) = HOOK_BRIDGE.get() {
+                b.hook_thread_id.store(tid, Ordering::Release);
+            }
+            // Keep the low-level Win32 hook message pump above background NTFS/index threads so
+            // startup CPU spikes can never stall WH_MOUSE_LL / WH_KEYBOARD_LL callbacks.
+            let _ = SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
+            let hmod: Option<HINSTANCE> = GetModuleHandleW(None).ok().map(HINSTANCE::from);
+
+            let install_pair = || -> Option<(HHOOK, HHOOK)> {
+                let kb = match SetWindowsHookExW(
+                    WH_KEYBOARD_LL,
+                    Some(low_level_keyboard_proc),
+                    hmod,
+                    0,
+                ) {
                     Ok(h) => h,
                     Err(e) => {
                         log::error!("SetWindowsHookExW(WH_KEYBOARD_LL) failed: {e}");
-                        return;
+                        return None;
                     }
                 };
-            let ms_hook: HHOOK =
-                match SetWindowsHookExW(WH_MOUSE_LL, Some(low_level_mouse_proc), None, 0) {
+                let ms = match SetWindowsHookExW(WH_MOUSE_LL, Some(low_level_mouse_proc), hmod, 0) {
                     Ok(h) => h,
                     Err(e) => {
                         log::error!("SetWindowsHookExW(WH_MOUSE_LL) failed: {e}");
-                        let _ = UnhookWindowsHookEx(kb_hook);
-                        return;
+                        let _ = UnhookWindowsHookEx(kb);
+                        return None;
                     }
                 };
+                Some((kb, ms))
+            };
 
-            log::info!("Installed WH_KEYBOARD_LL and WH_MOUSE_LL hooks successfully.");
+            let Some((mut kb_hook, mut ms_hook)) = install_pair() else {
+                return;
+            };
+
+            log::info!("Installed WH_KEYBOARD_LL and WH_MOUSE_LL hooks successfully (tid={tid}).");
             let mut msg = MSG::default();
             while GetMessageW(&mut msg, Some(HWND::default()), 0, 0).as_bool() {
+                if msg.message == WM_APP_REINSTALL_HOOKS {
+                    let _ = UnhookWindowsHookEx(ms_hook);
+                    let _ = UnhookWindowsHookEx(kb_hook);
+                    if let Some((new_kb, new_ms)) = install_pair() {
+                        kb_hook = new_kb;
+                        ms_hook = new_ms;
+                        log::info!("[HOOK-WATCHDOG] Reinstalled WH_KEYBOARD_LL and WH_MOUSE_LL successfully (tid={tid}).");
+                    } else {
+                        log::error!("[HOOK-WATCHDOG] Failed to reinstall low-level hooks!");
+                        return;
+                    }
+                    continue;
+                }
                 let _ = TranslateMessage(&msg);
                 DispatchMessageW(&msg);
             }
 
+            log::warn!("dsb-win32-hooks message loop exited unexpectedly; unhooking.");
             let _ = UnhookWindowsHookEx(ms_hook);
             let _ = UnhookWindowsHookEx(kb_hook);
         })
@@ -921,6 +975,12 @@ pub fn start_input_hooks(shared: Arc<HookSharedConfig>, event_tx: mpsc::Sender<H
             let mut max_drag_dist_sq: i64 = 0;
             let mut ctrl_physically_down = false;
 
+            // Watchdog state: detects if Windows silently evicted WH_MOUSE_LL (e.g. after UAC/desktop switch)
+            let mut wd_last_check_ms: u64 = 0;
+            let mut wd_last_reinstall_ms: u64 = 0;
+            let mut wd_prev_os_pt: (i32, i32) = (cur_pt.x, cur_pt.y);
+            let mut wd_prev_mouse_events: u64 = 0;
+
             let handle_ctrl_event = |ev: CtrlEvent,
                                      picked: &mut bool,
                                      strokes: &mut Vec<(i32, i32)>,
@@ -940,8 +1000,20 @@ pub fn start_input_hooks(shared: Arc<HookSharedConfig>, event_tx: mpsc::Sender<H
                     CtrlEvent::HoldStart => {
                         shared.pen_overlay_active.store(true, Ordering::Release);
                         *picked = false;
-                        let cx = shared.last_cursor_x.load(Ordering::Relaxed);
-                        let cy = shared.last_cursor_y.load(Ordering::Relaxed);
+                        // Query OS cursor position fresh so PenStart never uses a stale startup coord
+                        let mut live_pt = POINT::default();
+                        let (cx, cy) = unsafe {
+                            if GetCursorPos(&mut live_pt).is_ok() {
+                                shared.last_cursor_x.store(live_pt.x, Ordering::Relaxed);
+                                shared.last_cursor_y.store(live_pt.y, Ordering::Relaxed);
+                                (live_pt.x, live_pt.y)
+                            } else {
+                                (
+                                    shared.last_cursor_x.load(Ordering::Relaxed),
+                                    shared.last_cursor_y.load(Ordering::Relaxed),
+                                )
+                            }
+                        };
                         let _ = event_tx.send(HookEvent::PenStart {
                             cursor_x: cx,
                             cursor_y: cy,
@@ -1240,10 +1312,64 @@ pub fn start_input_hooks(shared: Arc<HookSharedConfig>, event_tx: mpsc::Sender<H
                     if ctrl.is_ctrl_held() && ctrl.held_info(now_ms).1 {
                         b.first_ctrl_tainted.store(true, Ordering::Release);
                     }
+                    if now_ms.saturating_sub(wd_last_check_ms) >= 500 {
+                        wd_last_check_ms = now_ms;
+                        let mut os_pt = POINT::default();
+                        if unsafe { GetCursorPos(&mut os_pt).is_ok() } {
+                            let cur_events = b.mouse_hook_events.load(Ordering::Relaxed);
+                            if should_trigger_hook_watchdog(
+                                wd_prev_os_pt,
+                                (os_pt.x, os_pt.y),
+                                wd_prev_mouse_events,
+                                cur_events,
+                                now_ms,
+                                wd_last_reinstall_ms,
+                            ) {
+                                let tid = b.hook_thread_id.load(Ordering::Acquire);
+                                if tid != 0 {
+                                    wd_last_reinstall_ms = now_ms;
+                                    log::warn!(
+                                        "[HOOK-WATCHDOG] OS cursor moved {:?} -> ({},{}) with 0 WH_MOUSE_LL events (total={cur_events}); requesting hook reinstall on tid={tid}",
+                                        wd_prev_os_pt,
+                                        os_pt.x,
+                                        os_pt.y
+                                    );
+                                    unsafe {
+                                        let _ = PostThreadMessageW(
+                                            tid,
+                                            WM_APP_REINSTALL_HOOKS,
+                                            WPARAM(0),
+                                            LPARAM(0),
+                                        );
+                                    }
+                                }
+                            }
+                            wd_prev_os_pt = (os_pt.x, os_pt.y);
+                            wd_prev_mouse_events = cur_events;
+                        }
+                    }
                 }
             }
         })
         .expect("failed to spawn hook worker thread");
+}
+
+/// Pure helper deciding whether the hook watchdog should reinstall WH_KEYBOARD_LL/WH_MOUSE_LL:
+/// fires when OS cursor physically moved >= 20px Manhattan distance while WH_MOUSE_LL delivered
+/// zero callbacks, throttled by a 3-second cooldown so it can never spam.
+pub fn should_trigger_hook_watchdog(
+    prev_os_pt: (i32, i32),
+    cur_os_pt: (i32, i32),
+    prev_mouse_events: u64,
+    cur_mouse_events: u64,
+    now_ms: u64,
+    last_reinstall_ms: u64,
+) -> bool {
+    let manhattan =
+        (cur_os_pt.0 - prev_os_pt.0).abs() + (cur_os_pt.1 - prev_os_pt.1).abs();
+    manhattan >= 20
+        && cur_mouse_events == prev_mouse_events
+        && (last_reinstall_ms == 0 || now_ms.saturating_sub(last_reinstall_ms) >= 3000)
 }
 
 /// Returns `true` if a pen gesture is a tap (click), `false` if freehand stroke.
@@ -1435,5 +1561,19 @@ mod tests {
         assert!(classify_tap_or_stroke(16, 350)); // deliberate slow click without dragging stays Tap
         assert!(!classify_tap_or_stroke(144, 120));
         assert!(!classify_tap_or_stroke(144, 300));
+    }
+
+    #[test]
+    fn hook_watchdog_triggers_only_when_cursor_moves_with_zero_hook_events() {
+        // Cursor stationary -> no reinstall
+        assert!(!should_trigger_hook_watchdog((500, 500), (505, 504), 10, 10, 1000, 0));
+        // Cursor moved AND WH_MOUSE_LL events incremented -> healthy, no reinstall
+        assert!(!should_trigger_hook_watchdog((500, 500), (620, 540), 10, 14, 1000, 0));
+        // Cursor moved >= 20px with 0 new WH_MOUSE_LL events -> trigger self-heal!
+        assert!(should_trigger_hook_watchdog((500, 500), (620, 540), 10, 10, 1000, 0));
+        // Inside 3000ms cooldown -> throttled
+        assert!(!should_trigger_hook_watchdog((620, 540), (800, 600), 10, 10, 2500, 1000));
+        // After 3000ms cooldown -> allowed again
+        assert!(should_trigger_hook_watchdog((620, 540), (800, 600), 10, 10, 4000, 1000));
     }
 }
