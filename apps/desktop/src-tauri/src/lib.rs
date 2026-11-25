@@ -1285,6 +1285,7 @@ pub fn run() {
     );
     let initial_width = config.bar_width;
     let exclude_capture = config.hide_from_screen_capture && !cli.dev_allow_capture;
+    let startup_breath_pulse = config.startup_breath_pulse;
 
     let initial_mode_str = match cli.dev_state {
         Some(DevTargetState::Lip) | Some(DevTargetState::Hidden) => "lip",
@@ -1599,6 +1600,9 @@ pub fn run() {
 
             if let Some(target) = startup_dev_state {
                 dispatch_state_event(&app_handle, StateEvent::DevForceState(target));
+            } else if startup_breath_pulse && !startup_dev_dump {
+                // Subtle breathing-light cursor pulse once hooks & tray are armed
+                cursor::play_ready_breath_pulse();
             }
             if startup_dev_dump {
                 let dump_app = app_handle.clone();

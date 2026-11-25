@@ -32,6 +32,8 @@ pub struct AppConfig {
     /// Defaults to `false` so remote desktop / virtual display / screen-streaming users
     /// (GameViewer, Parsec, Moonlight, ToDesk, RustDesk, OBS) can see the Bar & selection overlay!
     pub hide_from_screen_capture: bool,
+    /// Play a gentle ~1.5s electric-blue cursor breathing pulse when the app starts ready.
+    pub startup_breath_pulse: bool,
     pub accept_injected_input: bool,
     pub output_target: OutputTarget,
     pub active_harness: String,
@@ -52,6 +54,7 @@ impl Default for AppConfig {
             capture_keep_messages: 20,
             capture_orphan_ttl_minutes: 60,
             hide_from_screen_capture: false,
+            startup_breath_pulse: true,
             accept_injected_input: false,
             output_target: OutputTarget::Dsh,
             active_harness: "dsh".to_string(),
