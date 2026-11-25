@@ -1404,6 +1404,8 @@ window.__ModuleLoader__.load({
         const quickReqSeqRef = useRef(0);
         const quickDismissedQueryRef = useRef('');
         const quickQueryRef = useRef('');
+        const quickTypedQueryRef = useRef('');
+        const quickSyncedPreviewRef = useRef(null);
 
         useEffect(() => {
           const bump = () => setHarnessTick((n) => n + 1);
@@ -2544,6 +2546,8 @@ window.__ModuleLoader__.load({
         // Listary-style instant pure-text file & app quick search (Option B: Tab selects, Enter inserts blue capsule, Ctrl+Enter opens)
         const insertQuickSearchHitAsCapsule = useCallback((hit) => {
           if (!hit || !hit.path) return;
+          quickSyncedPreviewRef.current = null;
+          quickTypedQueryRef.current = '';
           setQuickHits([]);
           setQuickSelectedIdx(-1);
           quickHitsRef.current = [];
@@ -2581,6 +2585,8 @@ window.__ModuleLoader__.load({
 
         const openQuickSearchHitDirectly = useCallback((hit) => {
           if (!hit || !hit.path) return;
+          quickSyncedPreviewRef.current = null;
+          quickTypedQueryRef.current = '';
           setQuickHits([]);
           setQuickSelectedIdx(-1);
           quickHitsRef.current = [];
@@ -2634,12 +2640,24 @@ window.__ModuleLoader__.load({
           if (!isPureQuery) {
             quickQueryRef.current = '';
             quickDismissedQueryRef.current = '';
+            quickTypedQueryRef.current = '';
+            quickSyncedPreviewRef.current = null;
             if (quickHitsRef.current.length > 0) {
               setQuickHits([]);
               setQuickSelectedIdx(-1);
             }
             return undefined;
           }
+
+          // When Tab/Arrow selection synced a candidate filename into the composer,
+          // keep the current candidate list intact instead of re-querying on the synced filename!
+          if (
+            quickSyncedPreviewRef.current !== null &&
+            trimmed === String(quickSyncedPreviewRef.current).trim()
+          ) {
+            return undefined;
+          }
+          quickSyncedPreviewRef.current = null;
 
           if (quickDismissedQueryRef.current && quickDismissedQueryRef.current === trimmed) {
             return undefined;
@@ -2649,6 +2667,7 @@ window.__ModuleLoader__.load({
           }
 
           quickQueryRef.current = trimmed;
+          quickTypedQueryRef.current = raw;
           const seq = ++quickReqSeqRef.current;
           const timer = setTimeout(() => {
             tauriInvoke('quick_search_query', { query: trimmed, limit: 8 })
@@ -2688,14 +2707,32 @@ window.__ModuleLoader__.load({
             if (!hits || hits.length === 0) return;
             if (e.isComposing) return;
 
+            const syncCandidateFilenameToComposer = (nextIdx) => {
+              const target = nextIdx >= 0 ? hits[nextIdx] : null;
+              const nextText = target && target.name ? String(target.name) : '';
+              if (!nextText) return;
+              quickSyncedPreviewRef.current = nextText;
+              dsbRuntime.localDraftProtectUntil = Date.now() + 900;
+              const bridge = window.__DSB_BRIDGE__;
+              if (bridge && typeof bridge.setDraft === 'function') {
+                bridge.setDraft(nextText);
+              }
+            };
+
             if (e.key === 'Tab' && !e.ctrlKey && !e.altKey && !e.metaKey) {
               e.preventDefault();
               e.stopPropagation();
               if (typeof e.stopImmediatePropagation === 'function') e.stopImmediatePropagation();
-              setQuickSelectedIdx((prev) => {
-                if (prev < 0) return e.shiftKey ? hits.length - 1 : 0;
-                return (prev + (e.shiftKey ? -1 : 1) + hits.length) % hits.length;
-              });
+              const prev = quickSelectedRef.current;
+              const nextIdx =
+                prev < 0
+                  ? e.shiftKey
+                    ? hits.length - 1
+                    : 0
+                  : (prev + (e.shiftKey ? -1 : 1) + hits.length) % hits.length;
+              quickSelectedRef.current = nextIdx;
+              setQuickSelectedIdx(nextIdx);
+              syncCandidateFilenameToComposer(nextIdx);
               return;
             }
 
@@ -2704,10 +2741,11 @@ window.__ModuleLoader__.load({
               e.preventDefault();
               e.stopPropagation();
               if (typeof e.stopImmediatePropagation === 'function') e.stopImmediatePropagation();
-              setQuickSelectedIdx((prev) => {
-                const delta = e.key === 'ArrowDown' ? 1 : -1;
-                return (prev + delta + hits.length) % hits.length;
-              });
+              const delta = e.key === 'ArrowDown' ? 1 : -1;
+              const nextIdx = (sel + delta + hits.length) % hits.length;
+              quickSelectedRef.current = nextIdx;
+              setQuickSelectedIdx(nextIdx);
+              syncCandidateFilenameToComposer(nextIdx);
               return;
             }
 
@@ -2731,8 +2769,18 @@ window.__ModuleLoader__.load({
               e.stopPropagation();
               if (typeof e.stopImmediatePropagation === 'function') e.stopImmediatePropagation();
               if (sel >= 0) {
+                quickSelectedRef.current = -1;
                 setQuickSelectedIdx(-1);
+                const origTyped = quickTypedQueryRef.current;
+                if (typeof origTyped === 'string' && origTyped.trim()) {
+                  quickSyncedPreviewRef.current = origTyped;
+                  const bridge = window.__DSB_BRIDGE__;
+                  if (bridge && typeof bridge.setDraft === 'function') {
+                    bridge.setDraft(origTyped);
+                  }
+                }
               } else {
+                quickSyncedPreviewRef.current = null;
                 quickDismissedQueryRef.current = quickQueryRef.current;
                 setQuickHits([]);
                 setQuickSelectedIdx(-1);
