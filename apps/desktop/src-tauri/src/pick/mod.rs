@@ -265,10 +265,30 @@ fn find_target_uia_element(
     x: i32,
     y: i32,
 ) -> Option<UIElement> {
+    let is_own_bar = target_pid == std::process::id();
     if let Ok(direct) = automation.element_from_point(UiaPoint::new(x, y)) {
         let el_pid = direct.get_process_id().unwrap_or(0);
         let el_name = direct.get_name().unwrap_or_default();
-        if el_name != "Anything-to-Prompt Overlay" {
+        let el_ct = direct.get_control_type().ok();
+        let direct_is_overlay = el_name == "Anything-to-Prompt Overlay"
+            || direct
+                .get_native_window_handle()
+                .ok()
+                .map(|h| {
+                    let raw: isize = h.into();
+                    if raw == 0 {
+                        false
+                    } else {
+                        let hw = HWND(raw as *mut std::ffi::c_void);
+                        let root = unsafe { GetAncestor(hw, GA_ROOT) };
+                        let top = if root.0.is_null() { hw } else { root };
+                        is_own_overlay_window(top)
+                    }
+                })
+                .unwrap_or(false);
+        let direct_is_coarse_shell = is_own_bar
+            && matches!(el_ct, Some(ControlType::Window) | Some(ControlType::Document));
+        if !direct_is_overlay && !direct_is_coarse_shell {
             if el_pid == target_pid {
                 return Some(direct);
             }

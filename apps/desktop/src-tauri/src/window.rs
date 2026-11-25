@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use tauri::WebviewWindow;
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Dwm::{
@@ -20,11 +20,11 @@ use windows::Win32::UI::WindowsAndMessaging::{
     SetWindowDisplayAffinity, SetWindowLongPtrW, SetWindowPos, ShowWindow, WindowFromPoint,
     GA_ROOT, GWL_EXSTYLE, GWL_STYLE, HWND_TOPMOST, STYLESTRUCT, SWP_FRAMECHANGED, SWP_NOACTIVATE,
     SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SW_HIDE, SW_SHOW, SW_SHOWNOACTIVATE,
-    WDA_EXCLUDEFROMCAPTURE, WDA_NONE, WINDOW_DISPLAY_AFFINITY, WM_NCACTIVATE, WM_NCCALCSIZE,
-    WM_NCDESTROY, WM_NCPAINT, WM_STYLECHANGING, WS_BORDER, WS_CAPTION, WS_CLIPCHILDREN,
-    WS_CLIPSIBLINGS, WS_DLGFRAME, WS_EX_CLIENTEDGE, WS_EX_DLGMODALFRAME, WS_EX_NOACTIVATE,
-    WS_EX_STATICEDGE, WS_EX_TOOLWINDOW, WS_EX_WINDOWEDGE, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_POPUP,
-    WS_SYSMENU, WS_THICKFRAME,
+    WDA_EXCLUDEFROMCAPTURE, WDA_NONE, WINDOWPOS, WINDOW_DISPLAY_AFFINITY, WM_NCACTIVATE,
+    WM_NCCALCSIZE, WM_NCDESTROY, WM_NCPAINT, WM_STYLECHANGING, WM_WINDOWPOSCHANGING, WS_BORDER,
+    WS_CAPTION, WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_DLGFRAME, WS_EX_CLIENTEDGE,
+    WS_EX_DLGMODALFRAME, WS_EX_NOACTIVATE, WS_EX_STATICEDGE, WS_EX_TOOLWINDOW, WS_EX_WINDOWEDGE,
+    WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_POPUP, WS_SYSMENU, WS_THICKFRAME,
 };
 
 pub const BOTTOM_MARGIN_DIP: i32 = 12;
@@ -174,6 +174,43 @@ pub fn get_hwnd_class_name(hwnd: HWND) -> String {
 }
 
 const BAR_SUBCLASS_ID: usize = 0xD5B0_0001;
+static OVERLAY_HWND_RAW: AtomicU64 = AtomicU64::new(0);
+
+unsafe fn visible_overlay_hwnd() -> Option<HWND> {
+    let raw = OVERLAY_HWND_RAW.load(Ordering::Acquire);
+    if raw == 0 {
+        return None;
+    }
+    let hwnd = HWND(raw as usize as *mut std::ffi::c_void);
+    if IsWindowVisible(hwnd).as_bool() {
+        Some(hwnd)
+    } else {
+        None
+    }
+}
+
+/// Returns `overlay_hwnd` while Selection Overlay is visible so Bar always sits strictly
+/// underneath the click-through Overlay (allowing blue highlight boxes & tooltips to draw ON TOP
+/// of Bar's own elements!), otherwise returns `HWND_TOPMOST`.
+unsafe fn bar_z_insert_after() -> HWND {
+    visible_overlay_hwnd().unwrap_or(HWND_TOPMOST)
+}
+
+pub fn raise_overlay_topmost_if_visible() {
+    unsafe {
+        if let Some(ov_hwnd) = visible_overlay_hwnd() {
+            let _ = SetWindowPos(
+                ov_hwnd,
+                Some(HWND_TOPMOST),
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+            );
+        }
+    }
+}
 
 const BAR_STYLE_STRIP_MASK: u32 = WS_CAPTION.0
     | WS_THICKFRAME.0
@@ -216,6 +253,17 @@ unsafe extern "system" fn bar_borderless_subclass_proc(
         WM_NCCALCSIZE => LRESULT(0),
         WM_NCPAINT => LRESULT(0),
         WM_NCACTIVATE => LRESULT(1),
+        WM_WINDOWPOSCHANGING => {
+            if lparam.0 != 0 {
+                if let Some(ov_hwnd) = visible_overlay_hwnd() {
+                    let wp = &mut *(lparam.0 as *mut WINDOWPOS);
+                    if (wp.flags.0 & SWP_NOZORDER.0) == 0 && wp.hwndInsertAfter != ov_hwnd {
+                        wp.hwndInsertAfter = ov_hwnd;
+                    }
+                }
+            }
+            DefSubclassProc(hwnd, msg, wparam, lparam)
+        }
         WM_STYLECHANGING => {
             if lparam.0 != 0 {
                 let kind = wparam.0 as i32;
@@ -293,6 +341,7 @@ pub fn init_overlay_window(overlay_win: &WebviewWindow, exclude_from_capture: bo
     let Some(hwnd) = hwnd_of(overlay_win) else {
         return;
     };
+    OVERLAY_HWND_RAW.store(hwnd.0 as usize as u64, Ordering::Release);
     unsafe {
         let ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
         let next_ex = ex | (WS_EX_TOOLWINDOW.0 as isize) | (WS_EX_NOACTIVATE.0 as isize);
@@ -359,9 +408,10 @@ pub fn apply_bar_layout(
     );
 
     unsafe {
+        let insert_after = bar_z_insert_after();
         let _ = SetWindowPos(
             hwnd,
-            Some(HWND_TOPMOST),
+            Some(insert_after),
             x,
             y,
             phys_w,
@@ -409,7 +459,8 @@ pub fn show_bar_noactivate(bar_win: &WebviewWindow) {
         if changed {
             flags |= SWP_FRAMECHANGED;
         }
-        let _ = SetWindowPos(hwnd, Some(HWND_TOPMOST), 0, 0, 0, 0, flags);
+        let insert_after = bar_z_insert_after();
+        let _ = SetWindowPos(hwnd, Some(insert_after), 0, 0, 0, 0, flags);
         let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
     }
 }
@@ -458,13 +509,16 @@ pub fn activate_and_focus_bar(bar_win: &WebviewWindow) {
         if changed {
             flags |= SWP_FRAMECHANGED;
         }
-        let _ = SetWindowPos(hwnd, Some(HWND_TOPMOST), 0, 0, 0, 0, flags);
+        let insert_after = bar_z_insert_after();
+        let _ = SetWindowPos(hwnd, Some(insert_after), 0, 0, 0, 0, flags);
         let _ = ShowWindow(hwnd, SW_SHOW);
         // Satisfy Windows foreground lock from background hotkey hook
         send_dummy_vk_e8();
         let _ = SetForegroundWindow(hwnd);
     }
     let _ = bar_win.set_focus();
+    // If Selection Mode overlay is active, re-assert Overlay strictly above Bar after SetForegroundWindow/set_focus
+    raise_overlay_topmost_if_visible();
     let _ = bar_win.eval(
         "if (window.__DSB_BRIDGE__) { window.__DSB_BRIDGE__.focusComposer(); setTimeout(() => window.__DSB_BRIDGE__ && window.__DSB_BRIDGE__.focusComposer(), 60); }",
     );
@@ -500,6 +554,7 @@ pub fn position_and_show_overlay(overlay_win: &WebviewWindow) -> (MonitorGeometr
     let Some(hwnd) = hwnd_of(overlay_win) else {
         return (mon, 1.0);
     };
+    OVERLAY_HWND_RAW.store(hwnd.0 as usize as u64, Ordering::Release);
     unsafe {
         let _ = SetWindowPos(
             hwnd,
@@ -511,6 +566,16 @@ pub fn position_and_show_overlay(overlay_win: &WebviewWindow) -> (MonitorGeometr
             SWP_NOACTIVATE,
         );
         let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+        // Re-assert topmost AFTER ShowWindow so Overlay always renders strictly above Bar
+        let _ = SetWindowPos(
+            hwnd,
+            Some(HWND_TOPMOST),
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+        );
     }
     let scale = dpi_scale_for_hwnd(hwnd);
     (mon, scale)
