@@ -169,7 +169,7 @@ impl BarStateMachine {
                 self.composer_focused = false;
                 TransitionEffects {
                     window_action: Some(WindowAction::Hide),
-                    bridge_mode: Some(BridgeMode::Lip),
+                    bridge_mode: None,
                     reset_pick_counter: false,
                     record_sent_message: false,
                 }
@@ -209,7 +209,7 @@ impl BarStateMachine {
                 self.composer_focused = false;
                 TransitionEffects {
                     window_action: Some(WindowAction::Hide),
-                    bridge_mode: Some(BridgeMode::Lip),
+                    bridge_mode: None,
                     reset_pick_counter: false,
                     record_sent_message: false,
                 }
@@ -231,7 +231,7 @@ impl BarStateMachine {
                     self.popup_open = false;
                     TransitionEffects {
                         window_action: Some(WindowAction::Hide),
-                        bridge_mode: Some(BridgeMode::Lip),
+                        bridge_mode: None,
                         reset_pick_counter: false,
                         record_sent_message: false,
                     }
@@ -245,15 +245,13 @@ impl BarStateMachine {
                 match self.visibility {
                     VisibilityState::Hidden => TransitionEffects::none(),
                     VisibilityState::Summon | VisibilityState::Lip => {
-                        // Never leave a lingering Lip bubble on dismiss — Lip is exclusively
-                        // reserved for incoming new-message notifications.
                         self.visibility = VisibilityState::Hidden;
                         self.pinned = false;
                         self.popup_open = false;
                         self.composer_focused = false;
                         TransitionEffects {
                             window_action: Some(WindowAction::Hide),
-                            bridge_mode: Some(BridgeMode::Lip),
+                            bridge_mode: None,
                             reset_pick_counter: false,
                             record_sent_message: false,
                         }
@@ -269,13 +267,11 @@ impl BarStateMachine {
                     record_sent_message: true,
                 };
                 if self.visibility == VisibilityState::Summon && !self.pinned {
-                    // Close cleanly after sending instead of leaving a lingering empty Lip bubble.
-                    // The Lip bubble will pop up automatically when a real new AI reply arrives.
                     self.visibility = VisibilityState::Hidden;
                     self.popup_open = false;
                     self.composer_focused = false;
                     fx.window_action = Some(WindowAction::Hide);
-                    fx.bridge_mode = Some(BridgeMode::Lip);
+                    fx.bridge_mode = None;
                 }
                 fx
             }
@@ -286,41 +282,18 @@ impl BarStateMachine {
                 streaming,
             } => {
                 let same_session = self.last_session_id.as_deref() == Some(session_id.as_str());
-                let had_hydrated_baseline = !self.last_assistant_id.is_empty();
-                let is_new_activity = same_session
-                    && ((had_hydrated_baseline
-                        && !assistant_id.is_empty()
-                        && assistant_id != self.last_assistant_id)
-                        || (streaming && !self.last_streaming));
-
                 self.last_session_id = Some(session_id);
                 if !assistant_id.is_empty() || !same_session {
                     self.last_assistant_id = assistant_id;
                 }
                 self.last_streaming = streaming;
-
-                if is_new_activity && self.visibility == VisibilityState::Hidden {
-                    self.visibility = VisibilityState::Lip;
-                    return TransitionEffects {
-                        window_action: Some(WindowAction::ShowNoActivate),
-                        bridge_mode: Some(BridgeMode::Lip),
-                        reset_pick_counter: false,
-                        record_sent_message: false,
-                    };
-                }
+                // Scheme B: never ambush the user with the obsolete 56px Lip-only pill;
+                // unread replies surface cleanly as the top unread dot + detached toast on summon.
                 TransitionEffects::none()
             }
 
             StateEvent::IncomingBubbleNotice => {
-                if self.visibility == VisibilityState::Hidden {
-                    self.visibility = VisibilityState::Lip;
-                    return TransitionEffects {
-                        window_action: Some(WindowAction::ShowNoActivate),
-                        bridge_mode: Some(BridgeMode::Lip),
-                        reset_pick_counter: false,
-                        record_sent_message: false,
-                    };
-                }
+                // Scheme B: never wake Hidden Bar into the obsolete composer-less 56px Lip pill.
                 TransitionEffects::none()
             }
 
@@ -570,7 +543,7 @@ mod tests {
     }
 
     #[test]
-    fn assistant_activity_ignores_two_stage_async_hydration_and_wakes_on_new_reply() {
+    fn assistant_activity_never_pops_obsolete_lip_pill_while_hidden() {
         let mut sm = BarStateMachine::new();
         // Stage 1: session selected before messages load (assistant_id = "")
         let fx0 = sm.apply(StateEvent::AssistantActivity {
@@ -581,7 +554,7 @@ mod tests {
         assert_eq!(sm.visibility, VisibilityState::Hidden);
         assert!(fx0.window_action.is_none());
 
-        // Stage 2: existing history finishes loading ("" -> "m1", not streaming) -> MUST stay Hidden!
+        // Stage 2: existing history finishes loading -> MUST stay Hidden
         let fx = sm.apply(StateEvent::AssistantActivity {
             session_id: "s1".into(),
             assistant_id: "m1".into(),
@@ -590,14 +563,15 @@ mod tests {
         assert_eq!(sm.visibility, VisibilityState::Hidden);
         assert!(fx.window_action.is_none());
 
-        // Real new reply ("m1" -> "m2") -> wakes to Lip!
+        // Real new reply ("m1" -> "m2") -> Scheme B never pops up a composer-less 56px Lip pill
         let fx = sm.apply(StateEvent::AssistantActivity {
             session_id: "s1".into(),
             assistant_id: "m2".into(),
             streaming: true,
         });
-        assert_eq!(sm.visibility, VisibilityState::Lip);
-        assert_eq!(fx.window_action, Some(WindowAction::ShowNoActivate));
+        assert_eq!(sm.visibility, VisibilityState::Hidden);
+        assert!(fx.window_action.is_none());
+        assert!(fx.bridge_mode.is_none());
     }
 
     #[test]
@@ -626,7 +600,7 @@ mod tests {
         assert!(fx_sub.window_action.is_none());
         assert_eq!(sm.visibility, VisibilityState::Summon);
 
-        // Unpin -> outside click closes normally again
+        // Unpin -> outside click closes normally again without switching to Lip mode
         sm.apply(StateEvent::UiUpdated {
             hovered: false,
             pinned: false,
@@ -637,23 +611,26 @@ mod tests {
         let fx_hide = sm.apply(StateEvent::OutsideClickHide);
         assert_eq!(sm.visibility, VisibilityState::Hidden);
         assert_eq!(fx_hide.window_action, Some(WindowAction::Hide));
+        assert!(fx_hide.bridge_mode.is_none());
     }
 
     #[test]
-    fn incoming_bubble_notice_wakes_only_when_hidden() {
+    fn incoming_bubble_notice_never_pops_obsolete_lip_pill() {
         let mut sm = BarStateMachine::new();
         assert_eq!(sm.visibility, VisibilityState::Hidden);
 
         let fx = sm.apply(StateEvent::IncomingBubbleNotice);
-        assert_eq!(sm.visibility, VisibilityState::Lip);
-        assert_eq!(fx.window_action, Some(WindowAction::ShowNoActivate));
+        assert_eq!(sm.visibility, VisibilityState::Hidden);
+        assert!(fx.window_action.is_none());
+        assert!(fx.bridge_mode.is_none());
 
-        // Clicking the bubble summons Bar
-        let fx2 = sm.apply(StateEvent::SummonFromLip);
+        // Double-Ctrl still summons directly into Summon
+        let fx2 = sm.apply(StateEvent::DoubleCtrlOpen);
         assert_eq!(sm.visibility, VisibilityState::Summon);
         assert_eq!(fx2.window_action, Some(WindowAction::ActivateAndFocus));
+        assert_eq!(fx2.bridge_mode, Some(BridgeMode::Summon));
 
-        // While Summon, another conversation's IncomingBubbleNotice must NOT alter visibility
+        // While Summon, IncomingBubbleNotice must NOT alter visibility
         let fx3 = sm.apply(StateEvent::IncomingBubbleNotice);
         assert_eq!(sm.visibility, VisibilityState::Summon);
         assert!(fx3.window_action.is_none());

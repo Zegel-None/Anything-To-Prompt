@@ -328,8 +328,8 @@ window.__ModuleLoader__.load({
 
     // Shared runtime handles between Dock, Picker Chip, and Tauri Bridge
     const dsbRuntime = {
-      barMode: INITIAL_BAR_MODE,
-      barVisibility: INITIAL_BAR_MODE === 'lip' ? 'hidden' : 'summon',
+      barMode: IS_BAR ? 'summon' : INITIAL_BAR_MODE,
+      barVisibility: 'hidden',
       pendingBubbleTarget: null,
       lastSeenSessionReply: {},
       previewExpanded: false,
@@ -822,9 +822,7 @@ window.__ModuleLoader__.load({
         dsbRuntime.lastSeenSessionReply[sessionKey] = replySig;
       }
       const isNewReply = Boolean(
-        replySig &&
-          ((prevSig !== undefined && prevSig !== replySig) ||
-            (evt.source === 'hook' && prevSig !== replySig)),
+        replySig && prevSig !== undefined && prevSig !== replySig,
       );
 
       const catHit = incomingSessionId ? findExternalCatalogEntry(hId, incomingSessionId) : null;
@@ -868,16 +866,9 @@ window.__ModuleLoader__.load({
         if (incomingMsgs.length > 0) {
           dsbRuntime.externalMessages[hId] = incomingMsgs;
         }
-        // If user is currently on a DIFFERENT harness while Bar is hidden and this bound session replied,
-        // pop up a clickable Lip bubble pointing to this session.
-        if (
-          hId !== dsbRuntime.activeHarness &&
-          barIsHiddenOrLip &&
-          !dsbRuntime.pinned &&
-          !hasDraftOrCapsules &&
-          isNewReply &&
-          latestReply
-        ) {
+        // Scheme B: if a genuinely new reply arrives on another harness, record it for the
+        // detached floating unread toast above the composer (never pop up the obsolete 56px Lip pill).
+        if (hId !== dsbRuntime.activeHarness && isNewReply && latestReply) {
           dsbRuntime.pendingBubbleTarget = {
             harness: hId,
             workspaceId: resolvedWsId,
@@ -887,7 +878,10 @@ window.__ModuleLoader__.load({
             previewText: stripMarkdownForLip(latestReply.text),
             assistantId: String(latestReply.id || ''),
           };
-          sendBarReport({ kind: 'bubble_notify' });
+          dsbRuntime.unreadCount = (dsbRuntime.unreadCount || 0) + 1;
+          dsbRuntime.unreadPreview =
+            (resolvedTitle ? '[' + resolvedTitle + '] ' : '') +
+            stripMarkdownForLip(latestReply.text);
         }
       } else if (!curSel.sessionId && incomingSessionId && barIsHiddenOrLip && !hasDraftOrCapsules) {
         // Brand-new unbound harness bootstrap only when Bar is not actively being used
@@ -900,17 +894,9 @@ window.__ModuleLoader__.load({
         if (incomingMsgs.length > 0) {
           dsbRuntime.externalMessages[hId] = incomingMsgs;
         }
-      } else if (
-        incomingSessionId &&
-        barIsHiddenOrLip &&
-        !dsbRuntime.pinned &&
-        !hasDraftOrCapsules &&
-        isNewReply &&
-        latestReply
-      ) {
-        // Another conversation replied while Bar is NOT summoned:
-        // NEVER auto-switch active selection in the background; only show a clickable Lip bubble.
-        // Clicking the bubble switches to this replying conversation.
+      } else if (incomingSessionId && isNewReply && latestReply) {
+        // Another conversation replied: never auto-switch active selection in the background,
+        // and never pop up the obsolete 56px Lip pill. Surface it in Scheme B's unread toast instead.
         dsbRuntime.pendingBubbleTarget = {
           harness: hId,
           workspaceId: resolvedWsId,
@@ -920,7 +906,10 @@ window.__ModuleLoader__.load({
           previewText: stripMarkdownForLip(latestReply.text),
           assistantId: String(latestReply.id || ''),
         };
-        sendBarReport({ kind: 'bubble_notify' });
+        dsbRuntime.unreadCount = (dsbRuntime.unreadCount || 0) + 1;
+        dsbRuntime.unreadPreview =
+          (resolvedTitle ? '[' + resolvedTitle + '] ' : '') +
+          stripMarkdownForLip(latestReply.text);
       }
 
       dsbRuntime.liveSyncMeta[hId] = {
@@ -1043,12 +1032,12 @@ window.__ModuleLoader__.load({
     }
 
     function setBarMode(mode) {
-      const normalized = mode === 'lip' ? 'lip' : 'summon';
+      // Scheme B: in Bar mode, the composer is ALWAYS kept mounted & sized ('summon');
+      // the obsolete 56px Lip-only pill is never shown.
+      const normalized = IS_BAR ? 'summon' : mode === 'lip' ? 'lip' : 'summon';
       const wantExpanded = mode === 'preview' || mode === 'expanded';
       dsbRuntime.barMode = normalized;
       dsbRuntime.previewExpanded = wantExpanded;
-      // Always invalidate cached layout dedupe key on mode switches (e.g. Hidden -> Summon)
-      // so the physical Win32 window never stays stuck at 56px Lip height.
       dsbRuntime.lastReportKeys.delete('layout');
       if (typeof document !== 'undefined') {
         document.documentElement.setAttribute('data-dsb-mode', normalized);
@@ -1064,9 +1053,8 @@ window.__ModuleLoader__.load({
 
     function installGlobalBridge() {
       if (!IS_BAR || typeof window === 'undefined') return;
-      if (!document.documentElement.getAttribute('data-dsb-mode')) {
-        document.documentElement.setAttribute('data-dsb-mode', dsbRuntime.barMode);
-      }
+      dsbRuntime.barMode = 'summon';
+      document.documentElement.setAttribute('data-dsb-mode', 'summon');
       applyHarnessThemeAttribute(dsbRuntime.activeHarness);
       window.__DSB_HARNESS_EVENT__ = handleIncomingHarnessEvent;
       window.__DSB_HARNESS_SYNC__ = handleIncomingHarnessSync;
@@ -1076,12 +1064,10 @@ window.__ModuleLoader__.load({
           return dsbRuntime.barMode;
         },
         setVisibility(vis) {
-          const prev = dsbRuntime.barVisibility;
           const next = vis === 'hidden' || vis === 'lip' || vis === 'summon' ? vis : 'hidden';
           dsbRuntime.barVisibility = next;
-          // Clear stale bubble target when Bar hides or is summoned directly (e.g. Double-Ctrl)
-          if (next === 'hidden' || (next === 'summon' && prev !== 'lip')) {
-            dsbRuntime.pendingBubbleTarget = null;
+          if (next === 'hidden' && typeof dsbRuntime.onHiddenReset === 'function') {
+            dsbRuntime.onHiddenReset();
           }
           notifyBarRuntime();
           return dsbRuntime.barVisibility;
@@ -2761,30 +2747,40 @@ window.__ModuleLoader__.load({
         }, [liveDraft, sessionId, dsbRuntime.activeHarness, (dsbRuntime.extCapsules || []).length]);
 
         useEffect(() => {
+          const resetTransientUi = () => {
+            setComposerPopover(null);
+            setHoverPeek(false);
+            setHovered(false);
+            setHistoryOpen(false);
+            setPreviewExpanded(false);
+            setPinned((prev) => {
+              if (prev) {
+                try { localStorage.setItem(STORAGE_KEY_PINNED, '0'); } catch {}
+              }
+              return false;
+            });
+            if (typeof dsbRuntime.setPopupCloseListener === 'function') {
+              dsbRuntime.setPopupCloseListener();
+            }
+          };
+          dsbRuntime.onHiddenReset = resetTransientUi;
           dsbRuntime.setModeListener = (nextMode, wantExpanded = false) => {
-            setBarModeState(nextMode);
+            setBarModeState(IS_BAR ? 'summon' : nextMode);
             setPreviewExpanded(Boolean(wantExpanded));
             setComposerPopover(null);
             setHoverPeek(false);
-            if (nextMode === 'lip') {
-              setHovered(false);
-              setHistoryOpen(false);
-              setPinned((prev) => {
-                if (prev) {
-                  try { localStorage.setItem(STORAGE_KEY_PINNED, '0'); } catch {}
-                }
-                return false;
-              });
-              if (typeof dsbRuntime.setPopupCloseListener === 'function') {
-                dsbRuntime.setPopupCloseListener();
-              }
+            if (nextMode === 'lip' && !IS_BAR) {
+              resetTransientUi();
             } else if (wantExpanded) {
               setHistoryOpen(true);
               dsbRuntime.unreadCount = 0;
+              dsbRuntime.unreadPreview = '';
+              dsbRuntime.pendingBubbleTarget = null;
             }
           };
           return () => {
             dsbRuntime.setModeListener = null;
+            dsbRuntime.onHiddenReset = null;
           };
         }, []);
 
@@ -3223,15 +3219,17 @@ window.__ModuleLoader__.load({
           }
 
           // Compute exact bottom-up window height (zero dead Lip height when History is closed!)
+          const liveMode = IS_BAR ? 'summon' : dsbRuntime.barMode;
           let targetHeight = COLLAPSED_LIP_PX;
-          if (barMode === 'lip') {
+          if (liveMode === 'lip') {
             targetHeight = COLLAPSED_LIP_PX;
           } else {
-            let baseSpan = 0;
-            if (ir && ir.height > 0) {
-              const anchorTop = hasQueue && qr ? Math.min(ir.top, qr.top) : ir.top;
-              baseSpan = Math.ceil(Math.max(ir.height, ir.bottom - anchorTop));
+            if (!ir || ir.height <= 10) {
+              // Composer is transiently mounting/switching; never collapse Win32 window to 56px!
+              return;
             }
+            const anchorTop = hasQueue && qr ? Math.min(ir.top, qr.top) : ir.top;
+            const baseSpan = Math.ceil(Math.max(ir.height, ir.bottom - anchorTop));
             let detachedTop = 0;
             if (isExpanded) {
               detachedTop = expandedHeight + DETACHED_GAP_PX;
@@ -5939,6 +5937,22 @@ window.__ModuleLoader__.load({
                     {
                       'data-dsb-floating-toast': '1',
                       onClick: () => {
+                        const bubble = dsbRuntime.pendingBubbleTarget;
+                        dsbRuntime.pendingBubbleTarget = null;
+                        if (bubble && bubble.harness && bubble.sessionId) {
+                          const targetH = normalizeHarnessId(bubble.harness);
+                          if (targetH !== dsbRuntime.activeHarness) {
+                            setActiveHarness(targetH, true);
+                          }
+                          dsbRuntime.externalSelection[targetH] = {
+                            workspaceId: bubble.workspaceId || '',
+                            workspacePath: bubble.workspacePath || '',
+                            sessionId: bubble.sessionId,
+                            title: bubble.title || HARNESS_META[targetH].label,
+                          };
+                          writeStoredExtSelection(targetH, dsbRuntime.externalSelection[targetH]);
+                          loadExternalConversationMessages(targetH, bubble.sessionId);
+                        }
                         setHistoryOpen(true);
                         dsbRuntime.unreadCount = 0;
                         dsbRuntime.unreadPreview = '';
@@ -5986,6 +6000,7 @@ window.__ModuleLoader__.load({
                           ev.stopPropagation();
                           dsbRuntime.unreadCount = 0;
                           dsbRuntime.unreadPreview = '';
+                          dsbRuntime.pendingBubbleTarget = null;
                           notifyBarRuntime();
                           scheduleLayoutReport(220);
                         },
@@ -7863,7 +7878,7 @@ window.__ModuleLoader__.load({
             return '';
           };
           const tryRestore = (fromTimer) => {
-            if (typeof document !== 'undefined' && document.querySelector('[data-dsb-card]')) {
+            if (typeof document !== 'undefined' && document.querySelector('[data-dsb-stack="1"]')) {
               if (offRestore) {
                 try { offRestore(); } catch {}
                 offRestore = null;
@@ -7883,7 +7898,7 @@ window.__ModuleLoader__.load({
             writeStoredString(STORAGE_KEY_LAST_SESSION, targetId);
             setTimeout(() => {
               try {
-                if (!document.querySelector('[data-dsb-card]')) {
+                if (!document.querySelector('[data-dsb-stack="1"]')) {
                   sendBarReport({
                     kind: 'diag',
                     detail: 'tryRestore opening session=' + targetId + ' attempt=' + openAttempts + ' path=' + window.location.pathname,
