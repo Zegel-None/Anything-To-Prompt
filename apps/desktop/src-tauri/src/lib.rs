@@ -1323,7 +1323,14 @@ fn start_hook_event_router(app: AppHandle, rx: mpsc::Receiver<HookEvent>) {
                             });
                         }
                     }
-                    HookEvent::OutsideClick => {
+                    HookEvent::OutsideClick { x, y } => {
+                        let click_pt = windows::Win32::Foundation::POINT { x, y };
+                        if window::is_ime_or_voice_helper_at_point(click_pt) {
+                            log::info!(
+                                "OutsideClick at ({x}, {y}) hit IME/voice helper popup -> keeping Bar open"
+                            );
+                            continue;
+                        }
                         log::info!("OutsideClick received -> hiding Bar");
                         let was_vis = app
                             .try_state::<AppShared>()
@@ -1553,10 +1560,15 @@ fn start_hook_event_router(app: AppHandle, rx: mpsc::Receiver<HookEvent>) {
                             pick::execute_stroke_pick(&stroke_app, points, button, pre);
                         });
                     }
-                    HookEvent::PenEnd { picked_any } => {
+                    HookEvent::PenEnd {
+                        picked_any,
+                        cancelled_by_other_key,
+                    } => {
                         pen_active.store(false, Ordering::Release);
                         pen_gen.fetch_add(1, Ordering::AcqRel);
-                        log::info!("PenEnd (picked_any={picked_any})");
+                        log::info!(
+                            "PenEnd (picked_any={picked_any}, cancelled_by_other_key={cancelled_by_other_key})"
+                        );
                         pending_raw_capture = None;
                         pending_tap_allow_bg = false;
                         active_drag_mode = pick::adapters::office::OfficeDragMode::NormalStroke;
@@ -1576,7 +1588,13 @@ fn start_hook_event_router(app: AppHandle, rx: mpsc::Receiver<HookEvent>) {
                             let _ = ov.emit("pen:hide", serde_json::json!({}));
                             hide_overlay(&ov);
                         }
-                        dispatch_state_event(&app, StateEvent::PenEnded { picked_any });
+                        dispatch_state_event(
+                            &app,
+                            StateEvent::PenEnded {
+                                picked_any,
+                                cancelled_by_other_key,
+                            },
+                        );
                     }
                 }
             }
@@ -1830,7 +1848,13 @@ pub fn run() {
                         let _ = ov.emit("pen:hide", serde_json::json!({}));
                         hide_overlay(&ov);
                     }
-                    dispatch_state_event(&handle, StateEvent::PenEnded { picked_any: true });
+                    dispatch_state_event(
+                        &handle,
+                        StateEvent::PenEnded {
+                            picked_any: true,
+                            cancelled_by_other_key: false,
+                        },
+                    );
                 });
             }
             if let Some((x1, y1, x2, y2)) = forwarded.dev_pick_stroke {
@@ -1858,7 +1882,13 @@ pub fn run() {
                         let _ = ov.emit("pen:hide", serde_json::json!({}));
                         hide_overlay(&ov);
                     }
-                    dispatch_state_event(&handle, StateEvent::PenEnded { picked_any: true });
+                    dispatch_state_event(
+                        &handle,
+                        StateEvent::PenEnded {
+                            picked_any: true,
+                            cancelled_by_other_key: false,
+                        },
+                    );
                 });
             }
             if let Some(lasso_pts) = forwarded.dev_pick_lasso {
@@ -1886,7 +1916,13 @@ pub fn run() {
                         let _ = ov.emit("pen:hide", serde_json::json!({}));
                         hide_overlay(&ov);
                     }
-                    dispatch_state_event(&handle, StateEvent::PenEnded { picked_any: true });
+                    dispatch_state_event(
+                        &handle,
+                        StateEvent::PenEnded {
+                            picked_any: true,
+                            cancelled_by_other_key: false,
+                        },
+                    );
                 });
             }
             if forwarded.dev_dump {

@@ -917,7 +917,7 @@ fn bring_hwnd_to_front_force(target_hwnd: HWND) {
         } else {
             let _ = ShowWindow(target_hwnd, SW_SHOW);
         }
-        crate::window::send_dummy_vk_e8();
+        crate::window::focus_hwnd_without_sendinput(target_hwnd);
         let _ = BringWindowToTop(target_hwnd);
         // Temporary TOPMOST -> NOTOPMOST pulse guarantees the desktop app rises to the very front
         let _ = SetWindowPos(

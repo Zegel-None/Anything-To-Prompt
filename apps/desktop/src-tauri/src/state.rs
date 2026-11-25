@@ -85,6 +85,7 @@ pub enum StateEvent {
     PenStarted,
     PenEnded {
         picked_any: bool,
+        cancelled_by_other_key: bool,
     },
     PickInserted,
     TrayToggle,
@@ -339,8 +340,16 @@ impl BarStateMachine {
                 }
             }
 
-            StateEvent::PenEnded { picked_any } => {
+            StateEvent::PenEnded {
+                picked_any,
+                cancelled_by_other_key,
+            } => {
                 self.pen_active = false;
+                if cancelled_by_other_key {
+                    // Cancelled because another key was pressed (e.g. Ctrl+Alt for Chatterfly voice input):
+                    // silently dismiss Selection Mode without stealing foreground focus or re-activating Bar!
+                    return TransitionEffects::none();
+                }
                 if picked_any || self.visibility == VisibilityState::Summon {
                     self.visibility = VisibilityState::Summon;
                     return TransitionEffects {
@@ -481,7 +490,10 @@ mod tests {
             .is_none());
 
         // Releasing Ctrl keeps Summon focused even if nothing was clicked
-        let fx_end = sm.apply(StateEvent::PenEnded { picked_any: true });
+        let fx_end = sm.apply(StateEvent::PenEnded {
+            picked_any: true,
+            cancelled_by_other_key: false,
+        });
         assert!(!sm.pen_active);
         assert_eq!(fx_end.window_action, Some(WindowAction::ActivateAndFocus));
 
@@ -493,6 +505,27 @@ mod tests {
         let fx_close = sm.apply(StateEvent::SingleCtrlClose);
         assert_eq!(sm.visibility, VisibilityState::Hidden);
         assert_eq!(fx_close.window_action, Some(WindowAction::Hide));
+    }
+
+    #[test]
+    fn pen_ended_cancelled_by_other_key_does_not_steal_focus() {
+        let mut sm = BarStateMachine::new();
+        sm.apply(StateEvent::DoubleCtrlOpen);
+        assert_eq!(sm.visibility, VisibilityState::Summon);
+
+        // User held Ctrl slightly >= hold_ms before pressing Alt (Chatterfly Ctrl+Alt)
+        sm.apply(StateEvent::PenStarted);
+        assert!(sm.pen_active);
+
+        // Alt cancels Pen -> MUST NOT emit ActivateAndFocus or hide Bar!
+        let fx = sm.apply(StateEvent::PenEnded {
+            picked_any: false,
+            cancelled_by_other_key: true,
+        });
+        assert!(!sm.pen_active);
+        assert_eq!(sm.visibility, VisibilityState::Summon);
+        assert!(fx.window_action.is_none());
+        assert!(fx.bridge_mode.is_none());
     }
 
     #[test]

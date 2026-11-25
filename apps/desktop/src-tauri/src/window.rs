@@ -1,7 +1,8 @@
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use tauri::WebviewWindow;
-use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
+use windows::core::PWSTR;
+use windows::Win32::Foundation::{CloseHandle, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Dwm::{
     DwmSetWindowAttribute, DWMNCRP_DISABLED, DWMWA_NCRENDERING_POLICY,
 };
@@ -9,22 +10,24 @@ use windows::Win32::Graphics::Gdi::{
     CombineRgn, CreateRoundRectRgn, DeleteObject, GetMonitorInfoW, MonitorFromPoint,
     MonitorFromWindow, SetWindowRgn, HRGN, MONITORINFO, MONITOR_DEFAULTTONEAREST, RGN_OR,
 };
-use windows::Win32::UI::HiDpi::GetDpiForWindow;
-use windows::Win32::UI::Input::KeyboardAndMouse::{
-    SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, VIRTUAL_KEY,
+use windows::Win32::System::Threading::{
+    AttachThreadInput, GetCurrentThreadId, OpenProcess, QueryFullProcessImageNameW,
+    PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
 };
+use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetAncestor, GetClientRect, GetCursorPos, GetForegroundWindow, GetWindowLongPtrW,
-    GetWindowRect, GetWindowThreadProcessId, IsWindowVisible, SetForegroundWindow,
-    SetWindowDisplayAffinity, SetWindowLongPtrW, SetWindowPos, ShowWindow, WindowFromPoint,
-    GA_ROOT, GWL_EXSTYLE, GWL_STYLE, HWND_TOPMOST, STYLESTRUCT, SWP_FRAMECHANGED, SWP_NOACTIVATE,
-    SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SW_HIDE, SW_SHOW, SW_SHOWNOACTIVATE,
-    WDA_EXCLUDEFROMCAPTURE, WDA_NONE, WINDOWPOS, WINDOW_DISPLAY_AFFINITY, WM_NCACTIVATE,
-    WM_NCCALCSIZE, WM_NCDESTROY, WM_NCPAINT, WM_STYLECHANGING, WM_WINDOWPOSCHANGING, WS_BORDER,
-    WS_CAPTION, WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_DLGFRAME, WS_EX_CLIENTEDGE,
-    WS_EX_DLGMODALFRAME, WS_EX_NOACTIVATE, WS_EX_STATICEDGE, WS_EX_TOOLWINDOW, WS_EX_WINDOWEDGE,
-    WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_POPUP, WS_SYSMENU, WS_THICKFRAME,
+    BringWindowToTop, GetAncestor, GetClientRect, GetCursorPos, GetForegroundWindow,
+    GetWindowLongPtrW, GetWindowRect, GetWindowThreadProcessId, IsWindowVisible,
+    SetForegroundWindow, SetWindowDisplayAffinity, SetWindowLongPtrW, SetWindowPos, ShowWindow,
+    WindowFromPoint, GA_ROOT, GWL_EXSTYLE, GWL_STYLE, HWND_TOPMOST, SC_KEYMENU, STYLESTRUCT,
+    SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SW_HIDE, SW_SHOW,
+    SW_SHOWNOACTIVATE, WDA_EXCLUDEFROMCAPTURE, WDA_NONE, WINDOWPOS, WINDOW_DISPLAY_AFFINITY,
+    WM_NCACTIVATE, WM_NCCALCSIZE, WM_NCDESTROY, WM_NCPAINT, WM_STYLECHANGING, WM_SYSCOMMAND,
+    WM_WINDOWPOSCHANGING, WS_BORDER, WS_CAPTION, WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_DLGFRAME,
+    WS_EX_APPWINDOW, WS_EX_CLIENTEDGE, WS_EX_DLGMODALFRAME, WS_EX_NOACTIVATE, WS_EX_STATICEDGE,
+    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_WINDOWEDGE, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_POPUP,
+    WS_SYSMENU, WS_THICKFRAME,
 };
 
 pub const BOTTOM_MARGIN_DIP: i32 = 12;
@@ -220,8 +223,11 @@ const BAR_STYLE_STRIP_MASK: u32 = WS_CAPTION.0
     | WS_BORDER.0
     | WS_DLGFRAME.0;
 
-const BAR_EXSTYLE_STRIP_MASK: u32 =
-    WS_EX_WINDOWEDGE.0 | WS_EX_DLGMODALFRAME.0 | WS_EX_CLIENTEDGE.0 | WS_EX_STATICEDGE.0;
+const BAR_EXSTYLE_STRIP_MASK: u32 = WS_EX_APPWINDOW.0
+    | WS_EX_WINDOWEDGE.0
+    | WS_EX_DLGMODALFRAME.0
+    | WS_EX_CLIENTEDGE.0
+    | WS_EX_STATICEDGE.0;
 
 fn clean_bar_style(style: u32) -> u32 {
     (style & !BAR_STYLE_STRIP_MASK) | WS_POPUP.0 | WS_CLIPCHILDREN.0 | WS_CLIPSIBLINGS.0
@@ -253,6 +259,8 @@ unsafe extern "system" fn bar_borderless_subclass_proc(
         WM_NCCALCSIZE => LRESULT(0),
         WM_NCPAINT => LRESULT(0),
         WM_NCACTIVATE => LRESULT(1),
+        // Prevent pressing Alt / Ctrl+Alt while Bar is focused from entering Win32's modal menu loop
+        WM_SYSCOMMAND if (wparam.0 & 0xFFF0) == (SC_KEYMENU as usize) => LRESULT(0),
         WM_WINDOWPOSCHANGING => {
             if lparam.0 != 0 {
                 if let Some(ov_hwnd) = visible_overlay_hwnd() {
@@ -408,16 +416,32 @@ pub fn apply_bar_layout(
     );
 
     unsafe {
-        let insert_after = bar_z_insert_after();
-        let _ = SetWindowPos(
-            hwnd,
-            Some(insert_after),
-            x,
-            y,
-            phys_w,
-            phys_h,
-            SWP_NOACTIVATE,
-        );
+        let overlay_vis = visible_overlay_hwnd();
+        let already_topmost = (GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as u32 & WS_EX_TOPMOST.0) != 0;
+        if overlay_vis.is_none() && already_topmost {
+            // Preserve existing topmost Z-order without fighting floating voice-input capsules
+            // (Chatterfly, LogiVoice) or IME candidate windows on every resize/layout report!
+            let _ = SetWindowPos(
+                hwnd,
+                None,
+                x,
+                y,
+                phys_w,
+                phys_h,
+                SWP_NOZORDER | SWP_NOACTIVATE,
+            );
+        } else {
+            let insert_after = overlay_vis.unwrap_or(HWND_TOPMOST);
+            let _ = SetWindowPos(
+                hwnd,
+                Some(insert_after),
+                x,
+                y,
+                phys_w,
+                phys_h,
+                SWP_NOACTIVATE,
+            );
+        }
 
         let master_rgn: HRGN = if shapes.is_empty() {
             let diam = (48.0 * scale).round() as i32;
@@ -465,35 +489,34 @@ pub fn show_bar_noactivate(bar_win: &WebviewWindow) {
     }
 }
 
-pub fn send_dummy_vk_e8() {
+/// Clean foreground activation with ZERO synthetic `SendInput` keystrokes so global hotkey
+/// hooks (Chatterfly `Ctrl+Alt`, PowerToys, AutoHotkey, IMEs) are never polluted.
+pub fn focus_hwnd_without_sendinput(hwnd: HWND) {
     unsafe {
-        let inputs = [
-            INPUT {
-                r#type: INPUT_KEYBOARD,
-                Anonymous: INPUT_0 {
-                    ki: KEYBDINPUT {
-                        wVk: VIRTUAL_KEY(0xE8),
-                        wScan: 0,
-                        dwFlags: Default::default(),
-                        time: 0,
-                        dwExtraInfo: 0xD5B0_00E8,
-                    },
-                },
-            },
-            INPUT {
-                r#type: INPUT_KEYBOARD,
-                Anonymous: INPUT_0 {
-                    ki: KEYBDINPUT {
-                        wVk: VIRTUAL_KEY(0xE8),
-                        wScan: 0,
-                        dwFlags: KEYEVENTF_KEYUP,
-                        time: 0,
-                        dwExtraInfo: 0xD5B0_00E8,
-                    },
-                },
-            },
-        ];
-        let _ = SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
+        if GetForegroundWindow() == hwnd {
+            return;
+        }
+        let _ = SetForegroundWindow(hwnd);
+        if GetForegroundWindow() != hwnd {
+            let fg = GetForegroundWindow();
+            let fg_tid = if fg.0.is_null() {
+                0
+            } else {
+                GetWindowThreadProcessId(fg, None)
+            };
+            let cur_tid = GetCurrentThreadId();
+            if fg_tid != 0 && fg_tid != cur_tid {
+                let attached = AttachThreadInput(fg_tid, cur_tid, true).as_bool();
+                let _ = BringWindowToTop(hwnd);
+                let _ = SetForegroundWindow(hwnd);
+                if attached {
+                    let _ = AttachThreadInput(fg_tid, cur_tid, false);
+                }
+            } else {
+                let _ = BringWindowToTop(hwnd);
+                let _ = SetForegroundWindow(hwnd);
+            }
+        }
     }
 }
 
@@ -504,18 +527,25 @@ pub fn activate_and_focus_bar(bar_win: &WebviewWindow) {
         return;
     };
     unsafe {
+        let already_fg = GetForegroundWindow() == hwnd;
         let changed = enforce_borderless_popup_style(hwnd, false);
         let mut flags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE;
         if changed {
             flags |= SWP_FRAMECHANGED;
         }
-        let insert_after = bar_z_insert_after();
-        let _ = SetWindowPos(hwnd, Some(insert_after), 0, 0, 0, 0, flags);
-        let _ = ShowWindow(hwnd, SW_SHOW);
-        // Satisfy Windows foreground lock from background hotkey hook
-        send_dummy_vk_e8();
-        let _ = SetForegroundWindow(hwnd);
+        let overlay_vis = visible_overlay_hwnd();
+        let already_topmost = (GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as u32 & WS_EX_TOPMOST.0) != 0;
+        if overlay_vis.is_none() && already_topmost && already_fg {
+            let _ = SetWindowPos(hwnd, None, 0, 0, 0, 0, flags | SWP_NOZORDER);
+        } else {
+            let insert_after = overlay_vis.unwrap_or(HWND_TOPMOST);
+            let _ = SetWindowPos(hwnd, Some(insert_after), 0, 0, 0, 0, flags);
+        }
+        if !IsWindowVisible(hwnd).as_bool() {
+            let _ = ShowWindow(hwnd, SW_SHOW);
+        }
     }
+    focus_hwnd_without_sendinput(hwnd);
     let _ = bar_win.set_focus();
     // If Selection Mode overlay is active, re-assert Overlay strictly above Bar after SetForegroundWindow/set_focus
     raise_overlay_topmost_if_visible();
@@ -586,6 +616,86 @@ pub fn hide_overlay(overlay_win: &WebviewWindow) {
         unsafe {
             let _ = ShowWindow(hwnd, SW_HIDE);
         }
+    }
+}
+
+pub fn is_ime_or_voice_helper_identity(exe_name: &str, class_name: &str) -> bool {
+    let exe = exe_name.trim().to_ascii_lowercase();
+    let cls = class_name.trim().to_ascii_lowercase();
+    if exe == "voiceinput.exe"
+        || exe == "fytool.exe"
+        || exe == "textinputhost.exe"
+        || exe == "ctfmon.exe"
+        || exe == "logioptionsplus_logivoice.exe"
+        || exe.starts_with("chatterfly")
+        || exe.starts_with("sogou")
+        || exe.starts_with("baiduime")
+        || exe.starts_with("ifly")
+        || exe.starts_with("qqpinyin")
+        || exe.starts_with("msime")
+        || exe.starts_with("wechatime")
+        || exe.starts_with("wetype")
+    {
+        return true;
+    }
+    cls.contains("chatterfly")
+        || cls.contains("voiceinput")
+        || cls.contains("logivoice")
+        || cls.contains("candidate")
+        || cls.contains("msctf")
+        || cls.contains("inputapp")
+        || cls.contains("sogou_ime")
+        || cls.contains("ime_comp")
+        || cls.contains("ime_status")
+}
+
+fn query_process_exe_basename(pid: u32) -> String {
+    if pid == 0 {
+        return String::new();
+    }
+    unsafe {
+        let Ok(handle) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) else {
+            return String::new();
+        };
+        let mut buf = [0u16; 512];
+        let mut len = buf.len() as u32;
+        let ok = QueryFullProcessImageNameW(
+            handle,
+            PROCESS_NAME_WIN32,
+            PWSTR(buf.as_mut_ptr()),
+            &mut len,
+        )
+        .is_ok();
+        let _ = CloseHandle(handle);
+        if !ok || len == 0 {
+            return String::new();
+        }
+        let full = String::from_utf16_lossy(&buf[..len as usize]);
+        full.rsplit(['\\', '/']).next().unwrap_or("").to_string()
+    }
+}
+
+/// Returns `true` if `pt` lands on a floating voice-input capsule (Chatterfly, LogiVoice)
+/// or an IME candidate/toolbar window so clicking it does not dismiss our floating Bar.
+pub fn is_ime_or_voice_helper_at_point(pt: POINT) -> bool {
+    unsafe {
+        let hit = WindowFromPoint(pt);
+        if hit.0.is_null() {
+            return false;
+        }
+        let root = GetAncestor(hit, GA_ROOT);
+        let target = if root.0.is_null() { hit } else { root };
+        let class_name = get_hwnd_class_name(target);
+        let hit_class = if target != hit {
+            get_hwnd_class_name(hit)
+        } else {
+            String::new()
+        };
+        let mut pid = 0u32;
+        GetWindowThreadProcessId(target, Some(&mut pid));
+        let exe_name = query_process_exe_basename(pid);
+        is_ime_or_voice_helper_identity(&exe_name, &class_name)
+            || (!hit_class.is_empty() && is_ime_or_voice_helper_identity(&exe_name, &hit_class))
     }
 }
 
@@ -718,10 +828,24 @@ mod tests {
         assert_eq!(cleaned & WS_DLGFRAME.0, 0);
         assert_ne!(cleaned & WS_POPUP.0, 0);
 
-        let ex_cleaned = clean_bar_ex_style(WS_EX_WINDOWEDGE.0 | WS_EX_DLGMODALFRAME.0, false);
+        let ex_cleaned = clean_bar_ex_style(
+            WS_EX_APPWINDOW.0 | WS_EX_WINDOWEDGE.0 | WS_EX_DLGMODALFRAME.0,
+            false,
+        );
+        assert_eq!(ex_cleaned & WS_EX_APPWINDOW.0, 0);
         assert_eq!(ex_cleaned & WS_EX_WINDOWEDGE.0, 0);
         assert_eq!(ex_cleaned & WS_EX_DLGMODALFRAME.0, 0);
         assert_eq!(ex_cleaned & WS_EX_NOACTIVATE.0, 0);
         assert_ne!(ex_cleaned & WS_EX_TOOLWINDOW.0, 0);
+    }
+
+    #[test]
+    fn recognizes_chatterfly_and_ime_floating_helpers() {
+        assert!(is_ime_or_voice_helper_identity("voiceinput.exe", "Chrome_WidgetWin_1"));
+        assert!(is_ime_or_voice_helper_identity("ChatterflyCloud.exe", "SomeWnd"));
+        assert!(is_ime_or_voice_helper_identity("TextInputHost.exe", "ApplicationFrameWindow"));
+        assert!(is_ime_or_voice_helper_identity("unknown.exe", "MSCTFIME_Candidate"));
+        assert!(!is_ime_or_voice_helper_identity("chrome.exe", "Chrome_WidgetWin_1"));
+        assert!(!is_ime_or_voice_helper_identity("Antigravity.exe", "Chrome_WidgetWin_1"));
     }
 }

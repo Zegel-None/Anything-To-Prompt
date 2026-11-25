@@ -1,7 +1,8 @@
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, AtomicU8, Ordering};
 use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
+use windows::core::PCWSTR;
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Threading::{
@@ -11,16 +12,23 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, VK_CONTROL, VK_LCONTROL, VK_LMENU, VK_LSHIFT, VK_LWIN, VK_MENU, VK_RCONTROL,
     VK_RMENU, VK_RSHIFT, VK_RWIN, VK_SHIFT,
 };
+use windows::Win32::UI::Input::{
+    GetRawInputData, RegisterRawInputDevices, HRAWINPUT, RAWINPUT, RAWINPUTDEVICE, RAWINPUTHEADER,
+    RIDEV_INPUTSINK, RID_INPUT, RIM_TYPEKEYBOARD,
+};
 use windows::Win32::UI::WindowsAndMessaging::{
-    CallNextHookEx, DispatchMessageW, GetCursorPos, GetForegroundWindow, GetMessageW,
-    GetWindowRect, PostThreadMessageW, SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx,
-    HHOOK, KBDLLHOOKSTRUCT, MSG, MSLLHOOKSTRUCT, WH_KEYBOARD_LL, WH_MOUSE_LL, WM_APP, WM_KEYDOWN,
-    WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MOUSEMOVE, WM_RBUTTONDOWN,
-    WM_RBUTTONUP, WM_SYSKEYDOWN, WM_SYSKEYUP,
+    CallNextHookEx, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetCursorPos,
+    GetForegroundWindow, GetMessageW, GetWindowRect, PostThreadMessageW, RegisterClassW,
+    SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx, HHOOK, HWND_MESSAGE, MSG,
+    MSLLHOOKSTRUCT, WH_MOUSE_LL, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_INPUT, WM_LBUTTONDOWN,
+    WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MOUSEMOVE, WM_RBUTTONDOWN, WM_RBUTTONUP, WNDCLASSW,
 };
 
 const DUMMY_EXTRA_INFO: usize = 0xD5B0_00E8;
 const WM_APP_REINSTALL_HOOKS: u32 = WM_APP + 1;
+const RI_KEY_BREAK_FLAG: u16 = 0x0001;
+const CHORD_GRACE_MS: u64 = 80;
+const PRUNE_MIN_AGE_MS: u64 = 120;
 
 const VK_CONTROL_U32: u32 = 0x11;
 const VK_LCONTROL_U32: u32 = 0xA2;
@@ -71,7 +79,10 @@ pub struct DoubleCtrlDetector {
     pub double_tap_ms: u64,
     pub hold_ms: u64,
     phase: CtrlPhase,
-    held_non_ctrl_keys: HashSet<u32>,
+    /// Map of non-Ctrl virtual-key -> timestamp when pressed (ms).
+    held_non_ctrl_keys: HashMap<u32, u64>,
+    /// Most recent timestamp (ms) of any non-Ctrl key down or up event.
+    last_non_ctrl_event_ms: Option<u64>,
 }
 
 impl DoubleCtrlDetector {
@@ -81,7 +92,8 @@ impl DoubleCtrlDetector {
             double_tap_ms: double_tap_ms.clamp(150, 1000),
             hold_ms: hold_ms.clamp(150, 600),
             phase: CtrlPhase::Idle,
-            held_non_ctrl_keys: HashSet::new(),
+            held_non_ctrl_keys: HashMap::new(),
+            last_non_ctrl_event_ms: None,
         }
     }
 
@@ -89,12 +101,21 @@ impl DoubleCtrlDetector {
         matches!(vk, VK_CONTROL_U32 | VK_LCONTROL_U32 | VK_RCONTROL_U32)
     }
 
-    /// Prunes any non-Ctrl keys whose KeyUp may have been dropped by UAC/system hooks.
-    pub fn prune_released_keys<F>(&mut self, is_down: F)
+    fn had_recent_non_ctrl_event(&self, now_ms: u64) -> bool {
+        self.last_non_ctrl_event_ms
+            .map(|t| now_ms.saturating_sub(t) <= CHORD_GRACE_MS)
+            .unwrap_or(false)
+    }
+
+    /// Prunes any stale non-Ctrl keys whose KeyUp may have been dropped by UAC/desktop switch.
+    /// Never prunes keys pressed within the last `PRUNE_MIN_AGE_MS` so simultaneous chords
+    /// (e.g. Chatterfly `Ctrl+Alt`) are never wiped before `GetAsyncKeyState` catches up.
+    pub fn prune_released_keys<F>(&mut self, now_ms: u64, is_down: F)
     where
         F: Fn(u32) -> bool,
     {
-        self.held_non_ctrl_keys.retain(|&vk| is_down(vk));
+        self.held_non_ctrl_keys
+            .retain(|&vk, &mut down_at| now_ms.saturating_sub(down_at) < PRUNE_MIN_AGE_MS || is_down(vk));
     }
 
     pub fn on_key_down(
@@ -104,7 +125,9 @@ impl DoubleCtrlDetector {
         os_other_modifier_held: bool,
     ) -> Option<CtrlEvent> {
         if Self::is_ctrl_vk(vk) {
-            let clean = self.held_non_ctrl_keys.is_empty() && !os_other_modifier_held;
+            let clean = self.held_non_ctrl_keys.is_empty()
+                && !os_other_modifier_held
+                && !self.had_recent_non_ctrl_event(now_ms);
             match self.phase {
                 CtrlPhase::Idle => {
                     self.phase = CtrlPhase::FirstDown {
@@ -134,7 +157,8 @@ impl DoubleCtrlDetector {
             }
             None
         } else {
-            self.held_non_ctrl_keys.insert(vk);
+            self.held_non_ctrl_keys.insert(vk, now_ms);
+            self.last_non_ctrl_event_ms = Some(now_ms);
             match &mut self.phase {
                 CtrlPhase::Idle => None,
                 CtrlPhase::WaitingSecond { .. } => {
@@ -163,6 +187,8 @@ impl DoubleCtrlDetector {
 
     pub fn on_key_up(&mut self, vk: u32, now_ms: u64, bar_summoned: bool) -> Option<CtrlEvent> {
         if Self::is_ctrl_vk(vk) {
+            let chord_contaminated =
+                !self.held_non_ctrl_keys.is_empty() || self.had_recent_non_ctrl_event(now_ms);
             let prev = std::mem::replace(&mut self.phase, CtrlPhase::Idle);
             match prev {
                 CtrlPhase::FirstDown {
@@ -175,7 +201,7 @@ impl DoubleCtrlDetector {
                         Some(CtrlEvent::HoldEnd {
                             cancelled_by_other_key: false,
                         })
-                    } else if !tainted {
+                    } else if !(tainted || chord_contaminated) {
                         let dur = now_ms.saturating_sub(down_at);
                         if bar_summoned && dur < self.max_first_tap_ms {
                             // Active Bar + clean single tap Ctrl -> close immediately!
@@ -201,7 +227,9 @@ impl DoubleCtrlDetector {
                         Some(CtrlEvent::HoldEnd {
                             cancelled_by_other_key: false,
                         })
-                    } else if !tainted && now_ms.saturating_sub(down_at) < 500 {
+                    } else if !(tainted || chord_contaminated)
+                        && now_ms.saturating_sub(down_at) < 500
+                    {
                         if bar_summoned {
                             Some(CtrlEvent::SingleTapClose)
                         } else {
@@ -215,6 +243,16 @@ impl DoubleCtrlDetector {
             }
         } else {
             self.held_non_ctrl_keys.remove(&vk);
+            self.last_non_ctrl_event_ms = Some(now_ms);
+            match &mut self.phase {
+                CtrlPhase::FirstDown { tainted, .. } | CtrlPhase::SecondDown { tainted, .. } => {
+                    *tainted = true;
+                }
+                CtrlPhase::WaitingSecond { .. } => {
+                    self.phase = CtrlPhase::Idle;
+                }
+                CtrlPhase::Idle => {}
+            }
             None
         }
     }
@@ -225,13 +263,16 @@ impl DoubleCtrlDetector {
         bar_summoned: bool,
         os_other_modifier_held: bool,
     ) -> Option<CtrlEvent> {
+        let chord_active = os_other_modifier_held
+            || !self.held_non_ctrl_keys.is_empty()
+            || self.had_recent_non_ctrl_event(now_ms);
         match &mut self.phase {
             CtrlPhase::FirstDown {
                 down_at,
                 tainted,
                 pen_open,
             } => {
-                if os_other_modifier_held || !self.held_non_ctrl_keys.is_empty() {
+                if chord_active {
                     *tainted = true;
                     if *pen_open {
                         *pen_open = false;
@@ -256,7 +297,7 @@ impl DoubleCtrlDetector {
                 tainted,
                 pen_open,
             } => {
-                if os_other_modifier_held || !self.held_non_ctrl_keys.is_empty() {
+                if chord_active {
                     *tainted = true;
                     if *pen_open {
                         *pen_open = false;
@@ -481,14 +522,14 @@ const SWALLOW_RIGHT: u8 = 2;
 pub enum HookEvent {
     SingleCtrlClose,
     DoubleCtrlOpen { foreground_hwnd: isize },
-    OutsideClick,
+    OutsideClick { x: i32, y: i32 },
     PenStart { cursor_x: i32, cursor_y: i32 },
     PenHover { x: i32, y: i32 },
     PenMouseDown { x: i32, y: i32, button: PenButton },
     PenDrag { points: Vec<(i32, i32)>, button: PenButton },
     PenTap { x: i32, y: i32 },
     PenStroke { points: Vec<(i32, i32)>, button: PenButton },
-    PenEnd { picked_any: bool },
+    PenEnd { picked_any: bool, cancelled_by_other_key: bool },
 }
 
 pub struct HookSharedConfig {
@@ -554,7 +595,10 @@ enum RawSignal {
         swallowed: bool,
         button: PenButton,
     },
-    OutsideClick,
+    OutsideClick {
+        x: i32,
+        y: i32,
+    },
     MouseMove {
         x: i32,
         y: i32,
@@ -598,56 +642,102 @@ fn is_pt_inside_bar_rect(pt: POINT, bar_raw: u64) -> bool {
     }
 }
 
-unsafe extern "system" fn low_level_keyboard_proc(
-    code: i32,
+/// Passive read-only Raw Input keyboard window procedure (`RIDEV_INPUTSINK`).
+/// Receives hardware HID keyboard events with ZERO `WH_KEYBOARD_LL` hook installed —
+/// mathematically impossible to block, delay, reorder, or conflict with Chatterfly (`Ctrl+Alt`),
+/// PowerToys, AutoHotkey, LogiVoice, IMEs, or games — while still observing physical `Alt`
+/// even if a third-party `WH_KEYBOARD_LL` hook swallows it!
+unsafe extern "system" fn raw_input_wnd_proc(
+    hwnd: HWND,
+    msg: u32,
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> LRESULT {
-    if code >= 0 {
+    if msg == WM_INPUT {
         if let Some(bridge) = HOOK_BRIDGE.get() {
-            bridge.kb_hook_events.fetch_add(1, Ordering::Relaxed);
-            let kb = &*(lparam.0 as *const KBDLLHOOKSTRUCT);
-            // Skip only our own synthetic VK_E8 (DUMMY_EXTRA_INFO). Allow injected non-Ctrl keys
-            // (Logitech macros, remote desktop, Computer-Use) so fast Ctrl+C/V/A chords taint immediately.
-            if kb.dwExtraInfo != DUMMY_EXTRA_INFO {
-                // Ctrl down/up transitions are driven solely by 8ms OS physical key-state
-                // polling (GetAsyncKeyState) in dsb-hook-worker so WH_KEYBOARD_LL (which fires
-                // BEFORE Windows updates GetAsyncKeyState) never races and splits a single Ctrl
-                // press into a phantom double-tap. Here we only forward real non-Ctrl keys so
-                // even ultra-fast chords (e.g. Ctrl+C/V/A) taint immediately.
-                if !DoubleCtrlDetector::is_ctrl_vk(kb.vkCode)
-                    && !is_ignored_pseudo_vk(kb.vkCode)
-                {
-                    let msg = wparam.0 as u32;
+            let mut raw = RAWINPUT::default();
+            let mut size = std::mem::size_of::<RAWINPUT>() as u32;
+            let hdr_size = std::mem::size_of::<RAWINPUTHEADER>() as u32;
+            let written = GetRawInputData(
+                HRAWINPUT(lparam.0 as *mut std::ffi::c_void),
+                RID_INPUT,
+                Some(&mut raw as *mut RAWINPUT as *mut std::ffi::c_void),
+                &mut size,
+                hdr_size,
+            );
+            if written != u32::MAX && raw.header.dwType == RIM_TYPEKEYBOARD.0 {
+                bridge.kb_hook_events.fetch_add(1, Ordering::Relaxed);
+                let kb = raw.data.keyboard;
+                let vk = kb.VKey as u32;
+                let is_up = (kb.Flags & RI_KEY_BREAK_FLAG) != 0;
+                // Ctrl down/up transitions are driven by 8ms OS physical state polling (GetAsyncKeyState).
+                // Here we only passively observe physical non-Ctrl keys so fast chords (Ctrl+Alt, Ctrl+C/V/A)
+                // taint Ctrl immediately without ever touching the OS keyboard hook chain.
+                if !DoubleCtrlDetector::is_ctrl_vk(vk) && !is_ignored_pseudo_vk(vk) {
                     let now_ms = bridge.epoch.elapsed().as_millis() as u64;
-                    match msg {
-                        WM_KEYDOWN | WM_SYSKEYDOWN => {
-                            bridge.first_ctrl_tainted.store(true, Ordering::Release);
-                            bridge.second_ctrl_fast.store(false, Ordering::Release);
-                            if bridge.ctrl_down_fast.load(Ordering::Acquire) {
-                                bridge
-                                    .shared
-                                    .pen_overlay_active
-                                    .store(false, Ordering::Release);
-                            }
-                            let _ = bridge.raw_tx.send(RawSignal::KeyDown {
-                                vk: kb.vkCode,
-                                now_ms,
-                            });
+                    if !is_up {
+                        bridge.first_ctrl_tainted.store(true, Ordering::Release);
+                        bridge.second_ctrl_fast.store(false, Ordering::Release);
+                        if bridge.ctrl_down_fast.load(Ordering::Acquire) {
+                            bridge
+                                .shared
+                                .pen_overlay_active
+                                .store(false, Ordering::Release);
                         }
-                        WM_KEYUP | WM_SYSKEYUP => {
-                            let _ = bridge.raw_tx.send(RawSignal::KeyUp {
-                                vk: kb.vkCode,
-                                now_ms,
-                            });
-                        }
-                        _ => {}
+                        let _ = bridge.raw_tx.send(RawSignal::KeyDown { vk, now_ms });
+                    } else {
+                        let _ = bridge.raw_tx.send(RawSignal::KeyUp { vk, now_ms });
                     }
                 }
             }
         }
+        return LRESULT(0);
     }
-    CallNextHookEx(None, code, wparam, lparam)
+    DefWindowProcW(hwnd, msg, wparam, lparam)
+}
+
+unsafe fn create_raw_input_keyboard_sink(hmod: Option<HINSTANCE>) -> Option<HWND> {
+    let class_name: Vec<u16> = "ATP_RawInputKeyboardSink\0".encode_utf16().collect();
+    let wc = WNDCLASSW {
+        lpfnWndProc: Some(raw_input_wnd_proc),
+        hInstance: hmod.unwrap_or_default(),
+        lpszClassName: PCWSTR::from_raw(class_name.as_ptr()),
+        ..Default::default()
+    };
+    let _ = RegisterClassW(&wc);
+    let hwnd = match CreateWindowExW(
+        WINDOW_EX_STYLE(0),
+        PCWSTR::from_raw(class_name.as_ptr()),
+        PCWSTR::null(),
+        WINDOW_STYLE(0),
+        0,
+        0,
+        0,
+        0,
+        Some(HWND_MESSAGE),
+        None,
+        hmod,
+        None,
+    ) {
+        Ok(h) => h,
+        Err(e) => {
+            log::error!("CreateWindowExW(HWND_MESSAGE) for Raw Input failed: {e}");
+            return None;
+        }
+    };
+
+    let rid = RAWINPUTDEVICE {
+        usUsagePage: 0x01, // HID_USAGE_PAGE_GENERIC
+        usUsage: 0x06,     // HID_USAGE_GENERIC_KEYBOARD
+        dwFlags: RIDEV_INPUTSINK,
+        hwndTarget: hwnd,
+    };
+    if let Err(e) = RegisterRawInputDevices(&[rid], std::mem::size_of::<RAWINPUTDEVICE>() as u32) {
+        log::error!("RegisterRawInputDevices(keyboard, RIDEV_INPUTSINK) failed: {e}");
+        let _ = DestroyWindow(hwnd);
+        return None;
+    }
+    Some(hwnd)
 }
 
 unsafe extern "system" fn low_level_mouse_proc(
@@ -712,7 +802,7 @@ unsafe extern "system" fn low_level_mouse_proc(
                                 .store(SWALLOW_NONE, Ordering::Release);
                             bridge.first_ctrl_tainted.store(true, Ordering::Release);
                             if bar_vis && !on_bar {
-                                let _ = bridge.raw_tx.send(RawSignal::OutsideClick);
+                                let _ = bridge.raw_tx.send(RawSignal::OutsideClick { x, y });
                             }
                         }
 
@@ -775,7 +865,7 @@ unsafe extern "system" fn low_level_mouse_proc(
                             .store(SWALLOW_NONE, Ordering::Release);
                         bridge.first_ctrl_tainted.store(true, Ordering::Release);
                         if bar_vis && !on_bar {
-                            let _ = bridge.raw_tx.send(RawSignal::OutsideClick);
+                            let _ = bridge.raw_tx.send(RawSignal::OutsideClick { x, y });
                         }
                     }
                     WM_MBUTTONDOWN => {
@@ -795,7 +885,7 @@ unsafe extern "system" fn low_level_mouse_proc(
                             && bridge.ctrl_down_fast.load(Ordering::Acquire);
                         bridge.first_ctrl_tainted.store(true, Ordering::Release);
                         if bar_vis && !on_bar && !pen_on && !fast_second_hold && !fast_first_hold {
-                            let _ = bridge.raw_tx.send(RawSignal::OutsideClick);
+                            let _ = bridge.raw_tx.send(RawSignal::OutsideClick { x, y });
                         }
                     }
                     WM_MOUSEMOVE => {
@@ -899,51 +989,49 @@ pub fn start_input_hooks(shared: Arc<HookSharedConfig>, event_tx: mpsc::Sender<H
             if let Some(b) = HOOK_BRIDGE.get() {
                 b.hook_thread_id.store(tid, Ordering::Release);
             }
-            // Keep the low-level Win32 hook message pump above background NTFS/index threads so
-            // startup CPU spikes can never stall WH_MOUSE_LL / WH_KEYBOARD_LL callbacks.
+            // Keep the Win32 Raw Input + WH_MOUSE_LL message pump above background NTFS/index threads so
+            // startup CPU spikes can never stall pointer callbacks.
             let _ = SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
             let hmod: Option<HINSTANCE> = GetModuleHandleW(None).ok().map(HINSTANCE::from);
 
-            let install_pair = || -> Option<(HHOOK, HHOOK)> {
-                let kb = match SetWindowsHookExW(
-                    WH_KEYBOARD_LL,
-                    Some(low_level_keyboard_proc),
-                    hmod,
-                    0,
-                ) {
-                    Ok(h) => h,
-                    Err(e) => {
-                        log::error!("SetWindowsHookExW(WH_KEYBOARD_LL) failed: {e}");
-                        return None;
-                    }
-                };
-                let ms = match SetWindowsHookExW(WH_MOUSE_LL, Some(low_level_mouse_proc), hmod, 0) {
-                    Ok(h) => h,
+            let raw_hwnd = create_raw_input_keyboard_sink(hmod);
+            if raw_hwnd.is_none() {
+                log::warn!("Raw Input keyboard sink unavailable; falling back to GetAsyncKeyState polling only.");
+            }
+
+            let install_mouse_hook = || -> Option<HHOOK> {
+                match SetWindowsHookExW(WH_MOUSE_LL, Some(low_level_mouse_proc), hmod, 0) {
+                    Ok(h) => Some(h),
                     Err(e) => {
                         log::error!("SetWindowsHookExW(WH_MOUSE_LL) failed: {e}");
-                        let _ = UnhookWindowsHookEx(kb);
-                        return None;
+                        None
                     }
-                };
-                Some((kb, ms))
+                }
             };
 
-            let Some((mut kb_hook, mut ms_hook)) = install_pair() else {
+            let Some(mut ms_hook) = install_mouse_hook() else {
+                if let Some(h) = raw_hwnd {
+                    let _ = DestroyWindow(h);
+                }
                 return;
             };
 
-            log::info!("Installed WH_KEYBOARD_LL and WH_MOUSE_LL hooks successfully (tid={tid}).");
+            log::info!(
+                "Registered passive Raw Input keyboard listener (zero WH_KEYBOARD_LL, sink={}) and WH_MOUSE_LL hook successfully (tid={tid}).",
+                raw_hwnd.is_some()
+            );
             let mut msg = MSG::default();
             while GetMessageW(&mut msg, Some(HWND::default()), 0, 0).as_bool() {
                 if msg.message == WM_APP_REINSTALL_HOOKS {
                     let _ = UnhookWindowsHookEx(ms_hook);
-                    let _ = UnhookWindowsHookEx(kb_hook);
-                    if let Some((new_kb, new_ms)) = install_pair() {
-                        kb_hook = new_kb;
+                    if let Some(new_ms) = install_mouse_hook() {
                         ms_hook = new_ms;
-                        log::info!("[HOOK-WATCHDOG] Reinstalled WH_KEYBOARD_LL and WH_MOUSE_LL successfully (tid={tid}).");
+                        log::info!("[HOOK-WATCHDOG] Reinstalled WH_MOUSE_LL successfully (tid={tid}).");
                     } else {
-                        log::error!("[HOOK-WATCHDOG] Failed to reinstall low-level hooks!");
+                        log::error!("[HOOK-WATCHDOG] Failed to reinstall WH_MOUSE_LL!");
+                        if let Some(h) = raw_hwnd {
+                            let _ = DestroyWindow(h);
+                        }
                         return;
                     }
                     continue;
@@ -952,9 +1040,11 @@ pub fn start_input_hooks(shared: Arc<HookSharedConfig>, event_tx: mpsc::Sender<H
                 DispatchMessageW(&msg);
             }
 
-            log::warn!("dsb-win32-hooks message loop exited unexpectedly; unhooking.");
+            log::warn!("dsb-win32-hooks message loop exited unexpectedly; cleaning up.");
             let _ = UnhookWindowsHookEx(ms_hook);
-            let _ = UnhookWindowsHookEx(kb_hook);
+            if let Some(h) = raw_hwnd {
+                let _ = DestroyWindow(h);
+            }
         })
         .expect("failed to spawn hook thread");
 
@@ -1050,6 +1140,7 @@ pub fn start_input_hooks(shared: Arc<HookSharedConfig>, event_tx: mpsc::Sender<H
                         *drag_dist_sq = 0;
                         let _ = event_tx.send(HookEvent::PenEnd {
                             picked_any: *picked,
+                            cancelled_by_other_key,
                         });
                         *picked = false;
                     }
@@ -1124,10 +1215,10 @@ pub fn start_input_hooks(shared: Arc<HookSharedConfig>, event_tx: mpsc::Sender<H
                             }
                         }
 
-                        RawSignal::OutsideClick => {
+                        RawSignal::OutsideClick { x, y } => {
                             ctrl.on_non_pen_mouse_button();
                             if !ctrl.is_pen_open() {
-                                let _ = event_tx.send(HookEvent::OutsideClick);
+                                let _ = event_tx.send(HookEvent::OutsideClick { x, y });
                             }
                         }
 
@@ -1226,7 +1317,7 @@ pub fn start_input_hooks(shared: Arc<HookSharedConfig>, event_tx: mpsc::Sender<H
                 if os_ctrl && !ctrl_physically_down {
                     ctrl_physically_down = true;
                     last_double_fg = unsafe { GetForegroundWindow().0 as isize };
-                    ctrl.prune_released_keys(is_vk_down_os);
+                    ctrl.prune_released_keys(now_ms, is_vk_down_os);
                     let ev = ctrl.on_key_down(VK_LCONTROL_U32, now_ms, chord_down);
                     if let Some(b) = HOOK_BRIDGE.get() {
                         b.ctrl_down_fast.store(true, Ordering::Release);
@@ -1284,7 +1375,7 @@ pub fn start_input_hooks(shared: Arc<HookSharedConfig>, event_tx: mpsc::Sender<H
                 }
 
                 if ctrl.is_ctrl_held() {
-                    ctrl.prune_released_keys(is_vk_down_os);
+                    ctrl.prune_released_keys(now_ms, is_vk_down_os);
                 }
 
                 if let Some(ctrl_ev) = ctrl.poll_hold(now_ms, bar_summoned, chord_down) {
@@ -1574,5 +1665,39 @@ mod tests {
         assert!(!should_trigger_hook_watchdog((620, 540), (800, 600), 10, 10, 2500, 1000));
         // After 3000ms cooldown -> allowed again
         assert!(should_trigger_hook_watchdog((620, 540), (800, 600), 10, 10, 4000, 1000));
+    }
+
+    #[test]
+    fn simultaneous_ctrl_alt_with_os_lag_and_fast_release_never_closes_or_opens_pen() {
+        let mut d = DoubleCtrlDetector::new(400, 220);
+
+        // Case 1: Alt lands 2ms before Ctrl, and GetAsyncKeyState(Alt) lags (returns false!)
+        assert_eq!(d.on_key_down(VK_MENU.0 as u32, 1000, false), None);
+        d.prune_released_keys(1002, |_| false); // Must NOT wipe freshly-pressed Alt (< 120ms)!
+        assert_eq!(d.on_key_down(VK_LCONTROL_U32, 1002, false), None);
+        assert_eq!(d.poll_hold(1300, true, false), None); // Never opens Pen!
+        assert!(!d.is_pen_open());
+        assert_eq!(d.on_key_up(VK_MENU.0 as u32, 1320, true), None);
+        assert_eq!(d.on_key_up(VK_LCONTROL_U32, 1325, true), None); // Never closes Bar!
+
+        // Case 2: Quick Ctrl+Alt tap (< 120ms) while Bar is Summon where Alt releases 5ms before Ctrl
+        assert_eq!(d.on_key_down(VK_LCONTROL_U32, 2000, false), None);
+        assert_eq!(d.on_key_down(VK_MENU.0 as u32, 2015, false), None);
+        assert_eq!(d.on_key_up(VK_MENU.0 as u32, 2090, true), None);
+        assert_eq!(d.on_key_up(VK_LCONTROL_U32, 2095, true), None); // Never fires SingleTapClose!
+
+        // Case 3: Slow Ctrl hold (>= hold_ms) enters Pen, then pressing Alt cancels silently
+        assert_eq!(d.on_key_down(VK_LCONTROL_U32, 3000, false), None);
+        assert_eq!(d.poll_hold(3240, true, false), Some(CtrlEvent::HoldStart));
+        assert!(d.is_pen_open());
+        assert_eq!(
+            d.on_key_down(VK_MENU.0 as u32, 3260, true),
+            Some(CtrlEvent::HoldEnd {
+                cancelled_by_other_key: true
+            })
+        );
+        assert!(!d.is_pen_open());
+        assert_eq!(d.on_key_up(VK_MENU.0 as u32, 4000, true), None);
+        assert_eq!(d.on_key_up(VK_LCONTROL_U32, 4010, true), None);
     }
 }
