@@ -346,10 +346,21 @@ fn bar_report(app: AppHandle, payload: BarReportPayload) {
                 }
             }
 
+            let mut prev_h = 0i32;
             if let Ok(mut cached) = shared.last_layout.lock() {
+                prev_h = cached.height_dip;
                 cached.width_dip = width;
                 cached.height_dip = height;
                 cached.shapes = payload.shapes.clone();
+            }
+
+            static LOGGED_FIRST_LAYOUT: AtomicBool = AtomicBool::new(false);
+            let crossed_lip = (prev_h <= DEFAULT_LIP_HEIGHT_DIP + 4) != (height <= DEFAULT_LIP_HEIGHT_DIP + 4);
+            if !LOGGED_FIRST_LAYOUT.swap(true, Ordering::AcqRel) || crossed_lip {
+                log::info!(
+                    "[LAYOUT] w={width} h={height} (prev_h={prev_h}) shapes={}",
+                    payload.shapes.len()
+                );
             }
 
             if let Some(bar_win) = app.get_webview_window("bar") {
@@ -1799,6 +1810,7 @@ pub fn run() {
                     }
 
                     // Sync current BridgeMode & active Harness once DSH Bar clone page finishes loading
+                    log::info!("Bar clone page loaded: {}", payload.url());
                     let mode = shared
                         .last_bridge_mode
                         .lock()

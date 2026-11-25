@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
+use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::WebviewWindow;
-use windows::Win32::Foundation::{HWND, POINT, RECT};
+use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Dwm::{
     DwmSetWindowAttribute, DWMNCRP_DISABLED, DWMWA_NCRENDERING_POLICY,
 };
@@ -12,14 +13,18 @@ use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, VIRTUAL_KEY,
 };
+use windows::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetAncestor, GetCursorPos, GetForegroundWindow, GetWindowLongPtrW, GetWindowRect,
-    GetWindowThreadProcessId, IsWindowVisible, SetForegroundWindow, SetWindowDisplayAffinity,
-    SetWindowLongPtrW, SetWindowPos, ShowWindow, WindowFromPoint, GA_ROOT, GWL_EXSTYLE, GWL_STYLE,
-    HWND_TOPMOST, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SW_HIDE,
-    SW_SHOW, SW_SHOWNOACTIVATE, WDA_EXCLUDEFROMCAPTURE, WDA_NONE, WINDOW_DISPLAY_AFFINITY,
-    WS_BORDER, WS_CAPTION, WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_DLGFRAME, WS_EX_NOACTIVATE,
-    WS_EX_TOOLWINDOW, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_POPUP, WS_SYSMENU, WS_THICKFRAME,
+    GetAncestor, GetClientRect, GetCursorPos, GetForegroundWindow, GetWindowLongPtrW,
+    GetWindowRect, GetWindowThreadProcessId, IsWindowVisible, SetForegroundWindow,
+    SetWindowDisplayAffinity, SetWindowLongPtrW, SetWindowPos, ShowWindow, WindowFromPoint,
+    GA_ROOT, GWL_EXSTYLE, GWL_STYLE, HWND_TOPMOST, STYLESTRUCT, SWP_FRAMECHANGED, SWP_NOACTIVATE,
+    SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SW_HIDE, SW_SHOW, SW_SHOWNOACTIVATE,
+    WDA_EXCLUDEFROMCAPTURE, WDA_NONE, WINDOW_DISPLAY_AFFINITY, WM_NCACTIVATE, WM_NCCALCSIZE,
+    WM_NCDESTROY, WM_NCPAINT, WM_STYLECHANGING, WS_BORDER, WS_CAPTION, WS_CLIPCHILDREN,
+    WS_CLIPSIBLINGS, WS_DLGFRAME, WS_EX_CLIENTEDGE, WS_EX_DLGMODALFRAME, WS_EX_NOACTIVATE,
+    WS_EX_STATICEDGE, WS_EX_TOOLWINDOW, WS_EX_WINDOWEDGE, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_POPUP,
+    WS_SYSMENU, WS_THICKFRAME,
 };
 
 pub const BOTTOM_MARGIN_DIP: i32 = 12;
@@ -168,33 +173,87 @@ pub fn get_hwnd_class_name(hwnd: HWND) -> String {
     }
 }
 
-/// Strips Win32 caption/border/sysmenu styles and disables DWM non-client rendering so
-/// `SetWindowRgn` + `SWP_FRAMECHANGED` can NEVER cause Windows GDI to paint a classic titlebar.
-unsafe fn enforce_borderless_popup_style(hwnd: HWND) -> bool {
-    let style = GetWindowLongPtrW(hwnd, GWL_STYLE);
-    let strip_mask = (WS_CAPTION.0
-        | WS_THICKFRAME.0
-        | WS_SYSMENU.0
-        | WS_MINIMIZEBOX.0
-        | WS_MAXIMIZEBOX.0
-        | WS_BORDER.0
-        | WS_DLGFRAME.0) as isize;
-    let clean_style = (style & !strip_mask)
-        | (WS_POPUP.0 as isize)
-        | (WS_CLIPCHILDREN.0 as isize)
-        | (WS_CLIPSIBLINGS.0 as isize);
-    let changed = clean_style != style;
-    if changed {
-        let _ = SetWindowLongPtrW(hwnd, GWL_STYLE, clean_style);
+const BAR_SUBCLASS_ID: usize = 0xD5B0_0001;
+
+const BAR_STYLE_STRIP_MASK: u32 = WS_CAPTION.0
+    | WS_THICKFRAME.0
+    | WS_SYSMENU.0
+    | WS_MINIMIZEBOX.0
+    | WS_MAXIMIZEBOX.0
+    | WS_BORDER.0
+    | WS_DLGFRAME.0;
+
+const BAR_EXSTYLE_STRIP_MASK: u32 =
+    WS_EX_WINDOWEDGE.0 | WS_EX_DLGMODALFRAME.0 | WS_EX_CLIENTEDGE.0 | WS_EX_STATICEDGE.0;
+
+fn clean_bar_style(style: u32) -> u32 {
+    (style & !BAR_STYLE_STRIP_MASK) | WS_POPUP.0 | WS_CLIPCHILDREN.0 | WS_CLIPSIBLINGS.0
+}
+
+fn clean_bar_ex_style(ex_style: u32, no_activate: bool) -> u32 {
+    let base = (ex_style & !BAR_EXSTYLE_STRIP_MASK) | WS_EX_TOOLWINDOW.0;
+    if no_activate {
+        base | WS_EX_NOACTIVATE.0
+    } else {
+        base & !WS_EX_NOACTIVATE.0
     }
-    let ncrp = DWMNCRP_DISABLED.0 as u32;
-    let _ = DwmSetWindowAttribute(
-        hwnd,
-        DWMWA_NCRENDERING_POLICY,
-        &ncrp as *const _ as *const _,
-        std::mem::size_of::<u32>() as u32,
-    );
-    changed
+}
+
+/// Subclass installed on the Bar HWND to guarantee zero Win32 non-client chrome forever:
+/// - `WM_NCCALCSIZE` -> 0 (client rect ALWAYS equals full window rect, so WebView2 never shrinks)
+/// - `WM_NCPAINT` -> 0 (GDI/uxtheme can NEVER draw a classic/Aero Basic titlebar or border)
+/// - `WM_NCACTIVATE` -> 1 (allows activation/deactivation without ever calling DefWindowProc NC paint)
+/// - `WM_STYLECHANGING` -> strips WS_CAPTION/WS_SYSMENU/WS_THICKFRAME if tao ever attempts to re-add them
+unsafe extern "system" fn bar_borderless_subclass_proc(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+    uid_subclass: usize,
+    _dw_ref_data: usize,
+) -> LRESULT {
+    match msg {
+        WM_NCCALCSIZE => LRESULT(0),
+        WM_NCPAINT => LRESULT(0),
+        WM_NCACTIVATE => LRESULT(1),
+        WM_STYLECHANGING => {
+            if lparam.0 != 0 {
+                let kind = wparam.0 as i32;
+                let st = &mut *(lparam.0 as *mut STYLESTRUCT);
+                if kind == GWL_STYLE.0 {
+                    st.styleNew = clean_bar_style(st.styleNew);
+                } else if kind == GWL_EXSTYLE.0 {
+                    let keep_noact = (st.styleNew & WS_EX_NOACTIVATE.0) != 0;
+                    st.styleNew = clean_bar_ex_style(st.styleNew, keep_noact);
+                }
+            }
+            DefSubclassProc(hwnd, msg, wparam, lparam)
+        }
+        WM_NCDESTROY => {
+            let _ = RemoveWindowSubclass(hwnd, Some(bar_borderless_subclass_proc), uid_subclass);
+            DefSubclassProc(hwnd, msg, wparam, lparam)
+        }
+        _ => DefSubclassProc(hwnd, msg, wparam, lparam),
+    }
+}
+
+/// Strips Win32 caption/border/sysmenu styles (without disabling DWM so `transparent(true)`
+/// and DirectComposition WebView2 rendering remain 100% intact).
+unsafe fn enforce_borderless_popup_style(hwnd: HWND, no_activate: bool) -> bool {
+    let style = GetWindowLongPtrW(hwnd, GWL_STYLE) as u32;
+    let next_style = clean_bar_style(style);
+    let style_changed = next_style != style;
+    if style_changed {
+        let _ = SetWindowLongPtrW(hwnd, GWL_STYLE, next_style as usize as isize);
+    }
+
+    let ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as u32;
+    let next_ex = clean_bar_ex_style(ex, no_activate);
+    let ex_changed = next_ex != ex;
+    if ex_changed {
+        let _ = SetWindowLongPtrW(hwnd, GWL_EXSTYLE, next_ex as usize as isize);
+    }
+    style_changed || ex_changed
 }
 
 pub fn init_bar_window(bar_win: &WebviewWindow, exclude_from_capture: bool, width_dip: i32) {
@@ -202,10 +261,8 @@ pub fn init_bar_window(bar_win: &WebviewWindow, exclude_from_capture: bool, widt
         return;
     };
     unsafe {
-        let _ = enforce_borderless_popup_style(hwnd);
-        let ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
-        let next_ex = ex | (WS_EX_TOOLWINDOW.0 as isize) | (WS_EX_NOACTIVATE.0 as isize);
-        let _ = SetWindowLongPtrW(hwnd, GWL_EXSTYLE, next_ex);
+        let _ = SetWindowSubclass(hwnd, Some(bar_borderless_subclass_proc), BAR_SUBCLASS_ID, 0);
+        let _ = enforce_borderless_popup_style(hwnd, true);
         let _ = SetWindowPos(
             hwnd,
             Some(HWND_TOPMOST),
@@ -226,6 +283,7 @@ pub fn init_bar_window(bar_win: &WebviewWindow, exclude_from_capture: bool, widt
         r: 24,
     };
     apply_bar_layout(bar_win, width_dip, DEFAULT_LIP_HEIGHT_DIP, &[default_shape]);
+    log_window_diagnostics(bar_win, "init");
 }
 
 pub fn init_overlay_window(overlay_win: &WebviewWindow, exclude_from_capture: bool) {
@@ -346,15 +404,9 @@ pub fn show_bar_noactivate(bar_win: &WebviewWindow) {
         return;
     };
     unsafe {
-        let style_changed = enforce_borderless_popup_style(hwnd);
-        let ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
-        let next_ex = ex | (WS_EX_TOOLWINDOW.0 as isize) | (WS_EX_NOACTIVATE.0 as isize);
-        let ex_changed = next_ex != ex;
-        if ex_changed {
-            let _ = SetWindowLongPtrW(hwnd, GWL_EXSTYLE, next_ex);
-        }
+        let changed = enforce_borderless_popup_style(hwnd, true);
         let mut flags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE;
-        if style_changed || ex_changed {
+        if changed {
             flags |= SWP_FRAMECHANGED;
         }
         let _ = SetWindowPos(hwnd, Some(HWND_TOPMOST), 0, 0, 0, 0, flags);
@@ -394,20 +446,16 @@ pub fn send_dummy_vk_e8() {
     }
 }
 
+static LOGGED_FIRST_ACTIVATE: AtomicBool = AtomicBool::new(false);
+
 pub fn activate_and_focus_bar(bar_win: &WebviewWindow) {
     let Some(hwnd) = hwnd_of(bar_win) else {
         return;
     };
     unsafe {
-        let style_changed = enforce_borderless_popup_style(hwnd);
-        let ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
-        let cleared = (ex | (WS_EX_TOOLWINDOW.0 as isize)) & !(WS_EX_NOACTIVATE.0 as isize);
-        let ex_changed = cleared != ex;
-        if ex_changed {
-            let _ = SetWindowLongPtrW(hwnd, GWL_EXSTYLE, cleared);
-        }
+        let changed = enforce_borderless_popup_style(hwnd, false);
         let mut flags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE;
-        if style_changed || ex_changed {
+        if changed {
             flags |= SWP_FRAMECHANGED;
         }
         let _ = SetWindowPos(hwnd, Some(HWND_TOPMOST), 0, 0, 0, 0, flags);
@@ -420,6 +468,9 @@ pub fn activate_and_focus_bar(bar_win: &WebviewWindow) {
     let _ = bar_win.eval(
         "if (window.__DSB_BRIDGE__) { window.__DSB_BRIDGE__.focusComposer(); setTimeout(() => window.__DSB_BRIDGE__ && window.__DSB_BRIDGE__.focusComposer(), 60); }",
     );
+    if !LOGGED_FIRST_ACTIVATE.swap(true, Ordering::AcqRel) {
+        log_window_diagnostics(bar_win, "first-activate");
+    }
 }
 
 pub fn hide_bar(bar_win: &WebviewWindow) {
@@ -428,7 +479,9 @@ pub fn hide_bar(bar_win: &WebviewWindow) {
             let _ = ShowWindow(hwnd, SW_HIDE);
         }
     }
-    let _ = bar_win.hide();
+    // Intentionally do NOT call `bar_win.hide()`: tao's WindowFlags::apply_diff resets
+    // GWL_STYLE/GWL_EXSTYLE back to WS_CAPTION | WS_SYSMENU + SWP_FRAMECHANGED and can
+    // desync WebView2's ICoreWebView2Controller visibility on subsequent ShowWindow calls.
 }
 
 pub fn position_and_show_overlay(overlay_win: &WebviewWindow) -> (MonitorGeometry, f64) {
@@ -504,6 +557,10 @@ pub fn log_window_diagnostics(bar_win: &WebviewWindow, tag: &str) {
         let vis = IsWindowVisible(hwnd).as_bool();
         let mut rc = RECT::default();
         let _ = GetWindowRect(hwnd, &mut rc);
+        let mut crc = RECT::default();
+        let _ = GetClientRect(hwnd, &mut crc);
+        let style = GetWindowLongPtrW(hwnd, GWL_STYLE) as u32;
+        let ex_style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as u32;
         let scale = dpi_scale_for_hwnd(hwnd);
 
         let above_pt = POINT {
@@ -535,13 +592,15 @@ pub fn log_window_diagnostics(bar_win: &WebviewWindow, tag: &str) {
         );
 
         log::info!(
-            "[DEV-DUMP:{tag}] visible={vis} scale={scale:.2} rect=({},{})..({},{}) size={}x{} own_pid={own_pid} hit_above_own={above_own} hit_corner2_own={corner_own} hit_center_own={center_own}",
+            "[DEV-DUMP:{tag}] visible={vis} scale={scale:.2} style=0x{style:08x} ex=0x{ex_style:08x} rect=({},{})..({},{}) size={}x{} client={}x{} own_pid={own_pid} hit_above_own={above_own} hit_corner2_own={corner_own} hit_center_own={center_own}",
             rc.left,
             rc.top,
             rc.right,
             rc.bottom,
             rc.right - rc.left,
             rc.bottom - rc.top,
+            crc.right - crc.left,
+            crc.bottom - crc.top,
         );
     }
 }
@@ -581,5 +640,23 @@ mod tests {
         assert_eq!(r, 950);
         assert_eq!(b, 195);
         assert_eq!(diam, 60);
+    }
+
+    #[test]
+    fn clean_bar_styles_strip_all_caption_and_border_bits() {
+        let tao_default = WS_CAPTION.0 | WS_SYSMENU.0 | WS_THICKFRAME.0 | WS_CLIPSIBLINGS.0;
+        let cleaned = clean_bar_style(tao_default);
+        assert_eq!(cleaned & WS_CAPTION.0, 0);
+        assert_eq!(cleaned & WS_SYSMENU.0, 0);
+        assert_eq!(cleaned & WS_THICKFRAME.0, 0);
+        assert_eq!(cleaned & WS_BORDER.0, 0);
+        assert_eq!(cleaned & WS_DLGFRAME.0, 0);
+        assert_ne!(cleaned & WS_POPUP.0, 0);
+
+        let ex_cleaned = clean_bar_ex_style(WS_EX_WINDOWEDGE.0 | WS_EX_DLGMODALFRAME.0, false);
+        assert_eq!(ex_cleaned & WS_EX_WINDOWEDGE.0, 0);
+        assert_eq!(ex_cleaned & WS_EX_DLGMODALFRAME.0, 0);
+        assert_eq!(ex_cleaned & WS_EX_NOACTIVATE.0, 0);
+        assert_ne!(ex_cleaned & WS_EX_TOOLWINDOW.0, 0);
     }
 }
