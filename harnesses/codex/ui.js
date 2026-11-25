@@ -1,4 +1,4 @@
-// harnesses/codex/ui.js — 1:1 Pixel-Exact Codex Desktop Composer (exact OpenAI.Codex app.asar tokens)
+// harnesses/codex/ui.js — 1:1 Pixel-Exact Codex Desktop 26.1120 Composer mapped directly to Codex app-server API
 (function (sdk) {
   const { h, icons } = sdk;
 
@@ -17,46 +17,81 @@
     '}',
   ].join('\n');
 
+  const cxSvg = (sz, stroke, children, fill = 'none', sw = 1.75) =>
+    h(
+      'svg',
+      {
+        width: sz,
+        height: sz,
+        viewBox: '0 0 24 24',
+        fill,
+        stroke,
+        strokeWidth: sw,
+        strokeLinecap: 'round',
+        strokeLinejoin: 'round',
+        style: { display: 'block', flexShrink: 0 },
+      },
+      children,
+    );
+
+  const CX_ICONS = {
+    mic: (c = '#d4d4d4') =>
+      cxSvg(16, c, [
+        h('rect', { key: 'r', x: 9, y: 3, width: 6, height: 11, rx: 3 }),
+        h('path', { key: 'u', d: 'M5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21M9 21h6' }),
+      ]),
+    waveform: (c = '#ffffff') =>
+      cxSvg(16, c, [
+        h('path', { key: 'w', d: 'M5 10.5v3M8.5 7.5v9M12 5.5v13M15.5 8v8M19 10.5v3' }),
+      ], 'none', 2.0),
+  };
+
   function renderComposer(ctx) {
     const opts = ctx.options || {};
     const prefs = ctx.prefs || {};
-    const models = Array.isArray(opts.models) && opts.models.length > 0 ? opts.models : [
-      { id: 'gpt-6-luna', label: 'GPT-6.1 Terra', desc: 'Codex 默认旗舰编程模型' },
-      { id: 'gpt-5.4', label: 'GPT-5.4', desc: '稳健高速代码模型' },
-      { id: 'o3', label: 'o3', desc: '高强度数学与系统推理' },
-    ];
-    const efforts = Array.isArray(opts.efforts) && opts.efforts.length > 0 ? opts.efforts : [
-      { id: 'low', label: '低', desc: '快速轻量推理' },
-      { id: 'medium', label: '中', desc: '平衡速度与质量' },
-      { id: 'high', label: '高', desc: '深度工程推理' },
-      { id: 'xhigh', label: '极高', desc: '拉满思考预算' },
-    ];
-    const modes = Array.isArray(opts.modes) && opts.modes.length > 0 ? opts.modes : [
-      { id: 'danger-full-access', label: '完全访问', desc: '无沙箱限制，直接读写与执行' },
-      { id: 'workspace-write', label: '工作区写入', desc: '仅允许在当前工作区目录写入' },
-      { id: 'read-only', label: '只读模式', desc: '只读分析，不修改任何文件' },
-    ];
+    const models =
+      Array.isArray(opts.models) && opts.models.length > 0
+        ? opts.models
+        : [
+            { id: 'default', label: '默认' },
+            { id: 'gpt-6.2-sol', label: 'GPT-6.2 Sol' },
+            { id: 'gpt-6.2-astra', label: 'GPT-6.2 Astra' },
+            { id: 'gpt-6.1-terra', label: 'GPT-6.1 Terra' },
+            { id: 'gpt-6.1-sol', label: 'GPT-6.1 Sol' },
+            { id: 'gpt-6-astra', label: 'GPT-6 Astra' },
+            { id: 'gpt-6-sol', label: 'GPT-6 Sol' },
+            { id: 'gpt-6-luna', label: 'GPT-6 Luna' },
+            { id: 'gpt-5.6-sol', label: 'GPT-5.6 Sol' },
+            { id: 'gpt-5.6-terra', label: 'GPT-5.6 Terra' },
+          ];
+    const efforts =
+      Array.isArray(opts.efforts) && opts.efforts.length > 0
+        ? opts.efforts
+        : [
+            { id: 'minimal', label: '极低' },
+            { id: 'low', label: '低' },
+            { id: 'high', label: '高' },
+            { id: 'xhigh', label: '极高' },
+            { id: 'max', label: '最高' },
+          ];
+    const modes =
+      Array.isArray(opts.modes) && opts.modes.length > 0
+        ? opts.modes
+        : [
+            { id: 'request-approval', label: '请求批准' },
+            { id: 'help-approve', label: '帮我批准' },
+            { id: 'danger-full-access', label: '完全访问权限' },
+          ];
 
     const curModelId = prefs.model || opts.defaultModel || 'gpt-6-luna';
     const curEffortId = prefs.effort || opts.defaultEffort || 'high';
     const curModeId = prefs.mode || opts.defaultMode || 'danger-full-access';
-    const curModel = models.find((m) => m.id === curModelId) || models[0];
+    const curModel = models.find((m) => m.id === curModelId) || models.find((m) => m.id === 'gpt-6-luna') || models[0];
     const curEffort = efforts.find((e) => e.id === curEffortId) || efforts[2] || efforts[0];
-    const curMode = modes.find((m) => m.id === curModeId) || modes[0];
+    const curMode = modes.find((m) => m.id === curModeId) || modes[modes.length - 1] || modes[0];
 
-    const codexWsLabel =
-      (ctx.selection && ctx.selection.workspacePath
-        ? ctx.workspaceBasename(ctx.selection.workspacePath)
-        : '') ||
-      (ctx.selection && ctx.selection.title) ||
-      'Codex';
-
-    const modeColor =
-      curMode.id === 'danger-full-access'
-        ? '#ef6c35'
-        : curMode.id === 'read-only'
-          ? '#93c5fd'
-          : '#afafaf';
+    const modeShortLabel = curMode.id === 'danger-full-access' ? '完全访问' : curMode.label;
+    const modeColor = curMode.id === 'danger-full-access' ? '#d96b27' : '#d4d4d4';
 
     return h(
       'div',
@@ -64,301 +99,224 @@
         'data-dsb-external-composer': 'codex',
         onDragOver: ctx.onDragOver,
         onDrop: ctx.onDrop,
+        onContextMenu: (ev) => {
+          if (ctx.onOpenSwitcher) {
+            ev.preventDefault();
+            ctx.onOpenSwitcher(ev);
+          }
+        },
         style: {
           width: '100vw',
+          position: 'relative',
+          background: '#343434',
+          borderRadius: '22px',
+          border: '1px solid rgba(255, 255, 255, 0.08)',
+          padding: '15px 16px 11px 16px',
           display: 'flex',
           flexDirection: 'column',
-          background: 'transparent',
           boxSizing: 'border-box',
           pointerEvents: 'auto',
           fontFamily: '"Segoe UI", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif',
         },
       },
-      // Inset top shelf matching Codex Desktop (`#181818` --gray-100, `💻 此计算机  📁 <workspace>`)
+      ctx.renderDragHandle && ctx.renderDragHandle(),
+      ctx.renderAttachmentsRow && ctx.renderAttachmentsRow(),
+      ctx.renderCapsulesRow(),
+      h('textarea', {
+        'data-dsb-ext-input': '1',
+        rows: 1,
+        value: ctx.draft,
+        onChange: ctx.onInputChange,
+        onKeyDown: ctx.onInputKeyDown,
+        onPaste: ctx.onPaste,
+        placeholder: ctx.manifest.placeholder || '和 Codex 一起工作',
+        style: {
+          width: '100%',
+          minHeight: '26px',
+          maxHeight: '140px',
+          border: 'none',
+          outline: 'none',
+          resize: 'none',
+          background: 'transparent',
+          color: '#ededed',
+          fontSize: '14px',
+          lineHeight: '22px',
+          fontFamily: 'inherit',
+          padding: 0,
+          margin: 0,
+          boxSizing: 'border-box',
+        },
+      }),
       h(
         'div',
         {
           style: {
-            margin: '0 14px',
-            height: '32px',
-            padding: '0 14px',
-            background: '#181818',
-            borderRadius: '14px 14px 0 0',
-            borderLeft: '1px solid rgba(255, 255, 255, 0.08)',
-            borderRight: '1px solid rgba(255, 255, 255, 0.08)',
-            borderTop: '1px solid rgba(255, 255, 255, 0.08)',
             display: 'flex',
             alignItems: 'center',
-            gap: '14px',
-            boxSizing: 'border-box',
+            justifyContent: 'space-between',
+            marginTop: '12px',
+            height: '30px',
+            gap: '8px',
           },
         },
-        h(
-          'span',
-          {
-            style: {
-              display: 'inline-flex',
-              alignItems: 'center',
-              gap: '6px',
-              fontSize: '12px',
-              color: '#cfcfcf',
-              fontWeight: 500,
-              flexShrink: 0,
-              userSelect: 'none',
-            },
-          },
-          icons.laptop('#afafaf'),
-          '此计算机',
-        ),
-        h(
-          'button',
-          {
-            type: 'button',
-            'data-dsb-session-chip': '1',
-            title: '点击切换 Harness / 工作区 / 对话',
-            onClick: ctx.onOpenSwitcher,
-            style: {
-              border: 'none',
-              background: 'transparent',
-              padding: '2px 5px',
-              borderRadius: '6px',
-              cursor: 'pointer',
-              display: 'inline-flex',
-              alignItems: 'center',
-              gap: '6px',
-              fontSize: '12px',
-              color: '#ededed',
-              fontWeight: 500,
-              maxWidth: '340px',
-            },
-          },
-          icons.folderOutline('#cfcfcf'),
-          h(
-            'span',
-            {
-              style: {
-                overflow: 'hidden',
-                textOverflow: 'ellipsis',
-                whiteSpace: 'nowrap',
-              },
-            },
-            codexWsLabel,
-          ),
-        ),
-      ),
-      // Main 22px-radius Codex graphite composer card (`#303030` --gray-300, `--composer-radius: 22px`)
-      h(
-        'div',
-        {
-          style: {
-            position: 'relative',
-            width: '100%',
-            background: '#343434',
-            borderRadius: '22px',
-            border: '1px solid rgba(255, 255, 255, 0.08)',
-            padding: '15px 16px 11px 16px',
-            display: 'flex',
-            flexDirection: 'column',
-            boxSizing: 'border-box',
-          },
-        },
-        ctx.renderDragHandle && ctx.renderDragHandle(),
-        ctx.renderAttachmentsRow && ctx.renderAttachmentsRow(),
-        ctx.renderCapsulesRow(),
-        h('textarea', {
-          'data-dsb-ext-input': '1',
-          rows: 1,
-          value: ctx.draft,
-          onChange: ctx.onInputChange,
-          onKeyDown: ctx.onInputKeyDown,
-          onPaste: ctx.onPaste,
-          placeholder: ctx.manifest.placeholder || '和 Codex 一起工作',
-          style: {
-            width: '100%',
-            minHeight: '26px',
-            maxHeight: '140px',
-            border: 'none',
-            outline: 'none',
-            resize: 'none',
-            background: 'transparent',
-            color: '#ededed',
-            fontSize: '14px',
-            lineHeight: '22px',
-            fontFamily: 'inherit',
-            padding: 0,
-            margin: 0,
-            boxSizing: 'border-box',
-          },
-        }),
+        // Left: Clean `+` button + `完全访问` permissions selector (1:1 Codex Desktop)
         h(
           'div',
-          {
-            style: {
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'space-between',
-              marginTop: '12px',
-              height: '30px',
-              gap: '8px',
+          { style: { display: 'flex', alignItems: 'center', gap: '6px' } },
+          h(
+            'button',
+            {
+              type: 'button',
+              'data-dsb-plus-btn': '1',
+              title: '添加文件和文件夹 / 目标 / 计划模式 / 插件',
+              onClick: (ev) => {
+                ev.stopPropagation();
+                ctx.openComposerPopover && ctx.openComposerPopover('plus', ev.currentTarget);
+              },
+              style: {
+                width: '28px',
+                height: '28px',
+                borderRadius: '999px',
+                border: 'none',
+                background: ctx.activePopover === 'plus' ? '#454545' : 'transparent',
+                padding: 0,
+                cursor: 'pointer',
+                display: 'inline-flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+              },
             },
-          },
-          // Left: Real `+` Add/Plugins menu button + Real Sandbox/Access selector
-          h(
-            'div',
-            { style: { display: 'flex', alignItems: 'center', gap: '8px' } },
-            h(
-              'button',
-              {
-                type: 'button',
-                'data-dsb-plus-btn': '1',
-                title: '添加文件和文件夹 / 目标 / 计划模式 / 绘图 / 插件',
-                onClick: (ev) => {
-                  ev.stopPropagation();
-                  ctx.openComposerPopover && ctx.openComposerPopover('plus', ev.currentTarget);
-                },
-                style: {
-                  width: '28px',
-                  height: '28px',
-                  borderRadius: '999px',
-                  border: 'none',
-                  background: ctx.activePopover === 'plus' ? '#484848' : '#3d3d3d',
-                  padding: 0,
-                  cursor: 'pointer',
-                  display: 'inline-flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                },
-              },
-              icons.plus(16, '#ededed'),
-            ),
-            h(
-              'button',
-              {
-                type: 'button',
-                'data-dsb-mode-btn': '1',
-                title: '切换 Codex 沙箱权限（完全访问 / 工作区写入 / 只读模式）',
-                onClick: (ev) => {
-                  ev.stopPropagation();
-                  ctx.openComposerPopover && ctx.openComposerPopover('mode', ev.currentTarget);
-                },
-                style: {
-                  height: '28px',
-                  border: 'none',
-                  background: ctx.activePopover === 'mode' ? 'rgba(255, 255, 255, 0.08)' : 'transparent',
-                  padding: '0 8px',
-                  borderRadius: '8px',
-                  fontSize: '13px',
-                  fontWeight: 500,
-                  color: modeColor,
-                  cursor: 'pointer',
-                  display: 'inline-flex',
-                  alignItems: 'center',
-                  gap: '4px',
-                  userSelect: 'none',
-                },
-              },
-              h('span', null, curMode.label),
-              icons.chevronDown(modeColor),
-            ),
+            icons.plus(17, '#e5e5e5'),
           ),
-          // Right: Real Model+Effort selector + Real `#0169cc` Send/Stop button
           h(
-            'div',
-            { style: { display: 'flex', alignItems: 'center', gap: '10px' } },
-            h(
-              'button',
-              {
-                type: 'button',
-                'data-dsb-model-btn': '1',
-                title: '切换 Codex 模型与推理强度',
-                onClick: (ev) => {
-                  ev.stopPropagation();
-                  ctx.openComposerPopover && ctx.openComposerPopover('model', ev.currentTarget);
-                },
-                style: {
-                  height: '28px',
-                  border: 'none',
-                  background: ctx.activePopover === 'model' ? 'rgba(255, 255, 255, 0.08)' : 'transparent',
-                  padding: '0 8px',
-                  borderRadius: '8px',
-                  cursor: 'pointer',
-                  display: 'inline-flex',
-                  alignItems: 'center',
-                  gap: '6px',
-                  fontSize: '13px',
-                  userSelect: 'none',
-                },
+            'button',
+            {
+              type: 'button',
+              'data-dsb-mode-btn': '1',
+              title: '更改权限（映射到 Codex app-server approvalPolicy / sandboxPolicy）',
+              onClick: (ev) => {
+                ev.stopPropagation();
+                ctx.openComposerPopover && ctx.openComposerPopover('mode', ev.currentTarget);
               },
-              h('span', { style: { color: '#ededed', fontWeight: 500 } }, curModel.label),
-              h('span', { style: { color: '#8f8f8f' } }, curEffort.label),
-              icons.chevronDown('#8f8f8f'),
-            ),
-            h(
-              'button',
-              {
-                type: 'button',
-                title: ctx.isStreaming ? '停止生成' : '发送到 Codex',
-                onClick: ctx.onSubmit,
-                style: {
-                  width: '30px',
-                  height: '30px',
-                  borderRadius: '999px',
-                  border: 'none',
-                  background: ctx.isStreaming
-                    ? '#414141'
-                    : ctx.hasPayload
-                      ? '#0169cc'
-                      : '#2c67c5',
-                  color: '#ffffff',
-                  cursor: 'pointer',
-                  display: 'inline-flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  padding: 0,
-                  opacity: ctx.isStreaming || ctx.hasPayload ? 1 : 0.72,
-                },
+              style: {
+                height: '28px',
+                border: 'none',
+                background: ctx.activePopover === 'mode' ? '#444444' : 'transparent',
+                padding: '0 10px',
+                borderRadius: '999px',
+                fontSize: '13.5px',
+                fontWeight: 500,
+                color: modeColor,
+                cursor: 'pointer',
+                display: 'inline-flex',
+                alignItems: 'center',
+                userSelect: 'none',
               },
-              ctx.isStreaming
-                ? h('span', {
-                    style: {
-                      width: '10px',
-                      height: '10px',
-                      borderRadius: '2px',
-                      background: '#ffffff',
-                    },
-                  })
-                : icons.arrowUp('#ffffff'),
-            ),
+            },
+            modeShortLabel,
+          ),
+        ),
+        // Right: `GPT-6 Luna 高` / `选择推理强度` + Mic + Blue `#2c67c5` Voice/Send button
+        h(
+          'div',
+          { style: { display: 'flex', alignItems: 'center', gap: '10px' } },
+          h(
+            'button',
+            {
+              type: 'button',
+              'data-dsb-model-btn': '1',
+              title: '选择推理强度与模型（映射到 Codex app-server effort / model）',
+              onClick: (ev) => {
+                ev.stopPropagation();
+                ctx.openComposerPopover && ctx.openComposerPopover('model', ev.currentTarget);
+              },
+              style: {
+                height: '28px',
+                border: 'none',
+                background: ctx.activePopover === 'model' ? '#454545' : 'transparent',
+                padding: '0 10px',
+                borderRadius: '999px',
+                cursor: 'pointer',
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: '6px',
+                fontSize: '13.5px',
+                userSelect: 'none',
+              },
+            },
+            ctx.activePopover === 'model'
+              ? h('span', { style: { color: '#cfcfcf', fontWeight: 450 } }, '选择推理强度')
+              : [
+                  h('span', { key: 'ml', style: { color: '#ededed', fontWeight: 500 } }, curModel.label),
+                  h('span', { key: 'ef', style: { color: '#8f8f8f' } }, curEffort.label),
+                ],
+          ),
+          h(
+            'button',
+            {
+              type: 'button',
+              title: '切换工作区 / 对话',
+              onClick: (ev) => {
+                ev.stopPropagation();
+                if (ctx.onOpenSwitcher) ctx.onOpenSwitcher(ev);
+              },
+              style: {
+                width: '28px',
+                height: '28px',
+                borderRadius: '999px',
+                border: 'none',
+                background: 'transparent',
+                cursor: 'pointer',
+                display: 'inline-flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                padding: 0,
+              },
+            },
+            CX_ICONS.mic('#d4d4d4'),
+          ),
+          h(
+            'button',
+            {
+              type: 'button',
+              title: ctx.isStreaming ? '停止生成' : '发送到 Codex',
+              onClick: ctx.onSubmit,
+              style: {
+                width: '30px',
+                height: '30px',
+                borderRadius: '999px',
+                border: 'none',
+                background: ctx.isStreaming ? '#414141' : '#2c67c5',
+                cursor: 'pointer',
+                display: 'inline-flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                padding: 0,
+                flexShrink: 0,
+              },
+            },
+            ctx.isStreaming
+              ? h('span', {
+                  style: {
+                    width: '10px',
+                    height: '10px',
+                    borderRadius: '2px',
+                    background: '#ffffff',
+                  },
+                })
+              : ctx.hasPayload
+                ? icons.arrowUp('#ffffff')
+                : CX_ICONS.waveform('#ffffff'),
           ),
         ),
       ),
-    );
-  }
-
-  function renderChipPrefix(ctx) {
-    return h(
-      'span',
-      {
-        title: 'Codex 沙箱权限',
-        style: {
-          fontSize: '12px',
-          fontWeight: 500,
-          color: '#ef6c35',
-          padding: '0 6px 0 2px',
-          display: 'inline-flex',
-          alignItems: 'center',
-          gap: '4px',
-          flexShrink: 0,
-          userSelect: 'none',
-        },
-      },
-      (ctx.avail && ctx.avail.accessLabel) || '完全访问',
     );
   }
 
   function renderRightControls(ctx) {
-    const modelText = (ctx.avail && ctx.avail.modelLabel) || 'GPT-6.1 Terra';
+    const modelText = (ctx.avail && ctx.avail.modelLabel) || 'GPT-6 Luna';
     const effortText = (ctx.avail && ctx.avail.effortLabel) || '高';
+    const accessText = (ctx.avail && ctx.avail.accessLabel) || '完全访问';
     return h(
       'div',
       {
@@ -366,22 +324,27 @@
         style: {
           display: 'inline-flex',
           alignItems: 'center',
-          gap: '6px',
+          gap: '10px',
           fontSize: '12px',
+          color: '#afafaf',
           paddingRight: '4px',
           userSelect: 'none',
           flexShrink: 0,
         },
       },
-      h('span', { style: { color: '#ededed', fontWeight: 500 } }, modelText),
-      effortText ? h('span', { style: { color: '#8f8f8f' } }, effortText) : null,
+      h('span', { style: { color: '#d96b27', fontWeight: 500 } }, accessText),
+      h(
+        'span',
+        { style: { display: 'inline-flex', alignItems: 'center', gap: '4px' } },
+        h('span', { style: { color: '#ededed', fontWeight: 500 } }, modelText),
+        h('span', { style: { color: '#8f8f8f' } }, effortText),
+      ),
     );
   }
 
   return {
     css,
     renderComposer,
-    renderChipPrefix,
     renderRightControls,
   };
 })

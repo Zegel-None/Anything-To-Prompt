@@ -1246,21 +1246,27 @@ pub fn load_harness_composer_options(kind: HarnessKind) -> HarnessComposerOption
         HarnessKind::Antigravity => HarnessComposerOptions {
             harness: "antigravity".to_string(),
             models: vec![
-                HarnessOptionItem { id: "gemini-4-neon".into(), label: "Gemini 4 Neon".into(), desc: "最新旗舰多模态模型".into() },
-                HarnessOptionItem { id: "gemini-3.5-pro".into(), label: "Gemini 3.5 Pro".into(), desc: "深度推理与工程代码".into() },
-                HarnessOptionItem { id: "claude-opus-4-6".into(), label: "Claude Opus".into(), desc: "长上下文深度思考".into() },
-                HarnessOptionItem { id: "claude-sonnet-4-6".into(), label: "Claude Sonnet".into(), desc: "高速均衡编程模型".into() },
+                HarnessOptionItem { id: "gemini-4-neon-high".into(), label: "Gemini 4 Neon".into(), desc: "High|New|info".into() },
+                HarnessOptionItem { id: "gemini-4-carbon-medium".into(), label: "Gemini 4 Carbon".into(), desc: "Medium|New|info".into() },
+                HarnessOptionItem { id: "gemini-4-argon-medium".into(), label: "Gemini 4 Argon".into(), desc: "Medium|Leaving Soon|info".into() },
+                HarnessOptionItem { id: "gemini-4-hydrogen-medium".into(), label: "Gemini 4 Hydrogen".into(), desc: "Medium|New|info".into() },
+                HarnessOptionItem { id: "gemini-pro-orchestrator-neon".into(), label: "Orchestrator".into(), desc: "Claude Opus 5.5 High|New|info".into() },
+                HarnessOptionItem { id: "gemini-3.8-flash-medium".into(), label: "Gemini 3.8 Flash".into(), desc: "Medium|Leaving Soon|info".into() },
+                HarnessOptionItem { id: "claude-opus-5-5-medium".into(), label: "Claude Opus 5.5".into(), desc: "Medium|New".into() },
+                HarnessOptionItem { id: "claude-sonnet-5-5-medium".into(), label: "Claude Sonnet 5.5".into(), desc: "Medium|New".into() },
+                HarnessOptionItem { id: "gpt-oss-120b-medium".into(), label: "GPT-OSS 120B (Medium)".into(), desc: "|Notice|info".into() },
             ],
             efforts: vec![
-                HarnessOptionItem { id: "low".into(), label: "Low".into(), desc: "极速低延迟".into() },
-                HarnessOptionItem { id: "medium".into(), label: "Medium".into(), desc: "日常均衡推理".into() },
-                HarnessOptionItem { id: "high".into(), label: "High".into(), desc: "深度复杂推理".into() },
-                HarnessOptionItem { id: "max".into(), label: "Max".into(), desc: "最高算力思考".into() },
+                HarnessOptionItem { id: "low".into(), label: "Low".into(), desc: "Fast low-latency".into() },
+                HarnessOptionItem { id: "medium".into(), label: "Medium".into(), desc: "Balanced reasoning".into() },
+                HarnessOptionItem { id: "high".into(), label: "High".into(), desc: "Deep complex reasoning".into() },
+                HarnessOptionItem { id: "max".into(), label: "Max".into(), desc: "Maximum thinking budget".into() },
             ],
             modes: vec![
-                HarnessOptionItem { id: "auto".into(), label: "极速".into(), desc: "Fast · 自动执行常规操作".into() },
-                HarnessOptionItem { id: "plan".into(), label: "规划".into(), desc: "Planning · 先拆解方案再执行".into() },
-                HarnessOptionItem { id: "accept-edits".into(), label: "自动编辑".into(), desc: "Accept Edits · 自动写入代码修改".into() },
+                HarnessOptionItem { id: "request-review".into(), label: "Request Review".into(), desc: "Every command requires approval.".into() },
+                HarnessOptionItem { id: "default".into(), label: "Default".into(), desc: "Ask before sensitive operations.".into() },
+                HarnessOptionItem { id: "auto".into(), label: "Auto".into(), desc: "Automatically decide if commands run.".into() },
+                HarnessOptionItem { id: "turbo".into(), label: "Turbo".into(), desc: "Run all commands without restrictions.".into() },
             ],
             plugins: Vec::new(),
             actions: vec![
@@ -1271,25 +1277,26 @@ pub fn load_harness_composer_options(kind: HarnessKind) -> HarnessComposerOption
                 HarnessOptionItem { id: "/boost".into(), label: "/boost".into(), desc: "深度多视角思考与验证".into() },
                 HarnessOptionItem { id: "/grill-me".into(), label: "/grill-me".into(), desc: "通过追问澄清设计决策".into() },
             ],
-            default_model: "gemini-4-neon".to_string(),
+            default_model: "gemini-4-neon-high".to_string(),
             default_effort: "high".to_string(),
-            default_mode: "auto".to_string(),
+            default_mode: "turbo".to_string(),
         },
         HarnessKind::Codex => {
-            let (cfg_model_label, cfg_effort_label, _cfg_access) = read_codex_config_display();
-            let mut models = vec![
-                HarnessOptionItem { id: "gpt-6-luna".into(), label: "GPT-6.1 Terra".into(), desc: "Codex 默认旗舰编程模型".into() },
-                HarnessOptionItem { id: "gpt-5.4".into(), label: "GPT-5.4".into(), desc: "稳健高速代码模型".into() },
-                HarnessOptionItem { id: "o3".into(), label: "o3".into(), desc: "高强度数学与系统推理".into() },
+            let (_cfg_model_label, cfg_effort_label, _cfg_access) = read_codex_config_display();
+            let models = vec![
+                HarnessOptionItem { id: "default".into(), label: "默认".into(), desc: "default".into() },
+                HarnessOptionItem { id: "gpt-6.2-sol".into(), label: "GPT-6.2 Sol".into(), desc: "".into() },
+                HarnessOptionItem { id: "gpt-6.2-astra".into(), label: "GPT-6.2 Astra".into(), desc: "".into() },
+                HarnessOptionItem { id: "gpt-6.1-terra".into(), label: "GPT-6.1 Terra".into(), desc: "".into() },
+                HarnessOptionItem { id: "gpt-6.1-sol".into(), label: "GPT-6.1 Sol".into(), desc: "".into() },
+                HarnessOptionItem { id: "gpt-6-astra".into(), label: "GPT-6 Astra".into(), desc: "".into() },
+                HarnessOptionItem { id: "gpt-6-sol".into(), label: "GPT-6 Sol".into(), desc: "".into() },
+                HarnessOptionItem { id: "gpt-6-luna".into(), label: "GPT-6 Luna".into(), desc: "".into() },
+                HarnessOptionItem { id: "gpt-5.6-sol".into(), label: "GPT-5.6 Sol".into(), desc: "".into() },
+                HarnessOptionItem { id: "gpt-5.6-terra".into(), label: "GPT-5.6 Terra".into(), desc: "".into() },
             ];
-            if !cfg_model_label.is_empty() && !models.iter().any(|m| m.label.eq_ignore_ascii_case(&cfg_model_label)) {
-                models.insert(0, HarnessOptionItem {
-                    id: cfg_model_label.to_ascii_lowercase().replace(' ', "-"),
-                    label: cfg_model_label,
-                    desc: "来自 ~/.codex/config.toml".into(),
-                });
-            }
             let default_effort = match cfg_effort_label.as_str() {
+                "极低" => "minimal",
                 "低" => "low",
                 "中" => "medium",
                 "极高" => "xhigh",
@@ -1300,20 +1307,21 @@ pub fn load_harness_composer_options(kind: HarnessKind) -> HarnessComposerOption
                 harness: "codex".to_string(),
                 models,
                 efforts: vec![
+                    HarnessOptionItem { id: "minimal".into(), label: "极低".into(), desc: "极速轻量推理".into() },
                     HarnessOptionItem { id: "low".into(), label: "低".into(), desc: "快速轻量推理".into() },
-                    HarnessOptionItem { id: "medium".into(), label: "中".into(), desc: "平衡速度与质量".into() },
                     HarnessOptionItem { id: "high".into(), label: "高".into(), desc: "深度工程推理".into() },
                     HarnessOptionItem { id: "xhigh".into(), label: "极高".into(), desc: "拉满思考预算".into() },
+                    HarnessOptionItem { id: "max".into(), label: "最高".into(), desc: "最大推理深度".into() },
                 ],
                 modes: vec![
-                    HarnessOptionItem { id: "danger-full-access".into(), label: "完全访问".into(), desc: "无沙箱限制，直接读写与执行".into() },
-                    HarnessOptionItem { id: "workspace-write".into(), label: "工作区写入".into(), desc: "仅允许在当前工作区目录写入".into() },
-                    HarnessOptionItem { id: "read-only".into(), label: "只读模式".into(), desc: "只读分析，不修改任何文件".into() },
+                    HarnessOptionItem { id: "request-approval".into(), label: "请求批准".into(), desc: "编辑外部文件和使用互联网时始终询问".into() },
+                    HarnessOptionItem { id: "help-approve".into(), label: "帮我批准".into(), desc: "仅对检测到的风险操作请求批准".into() },
+                    HarnessOptionItem { id: "danger-full-access".into(), label: "完全访问权限".into(), desc: "可不受限制地访问互联网和你电脑上的任何文件".into() },
                 ],
                 plugins: read_codex_enabled_plugins(),
                 actions: vec![
-                    HarnessOptionItem { id: "/plan".into(), label: "计划模式".into(), desc: "开启计划模式，先出方案再动手".into() },
-                    HarnessOptionItem { id: "/goal".into(), label: "目标".into(), desc: "设置要持续追求的长期目标".into() },
+                    HarnessOptionItem { id: "/plan".into(), label: "计划模式".into(), desc: "开启计划模式".into() },
+                    HarnessOptionItem { id: "/goal".into(), label: "目标".into(), desc: "设置要持续追求的目标".into() },
                 ],
                 default_model: "gpt-6-luna".to_string(),
                 default_effort,
@@ -1411,7 +1419,7 @@ pub fn list_harness_availability(dsh_connected: bool) -> Vec<HarnessAvailability
             sync_note: "自动同步至桌面端 CLI Project".to_string(),
             model_label: "Gemini 4 Neon".to_string(),
             effort_label: "High".to_string(),
-            access_label: "极速".to_string(),
+            access_label: "Turbo".to_string(),
         },
         HarnessAvailability {
             id: "codex".to_string(),
@@ -3133,11 +3141,27 @@ fn run_antigravity_turn_in_medium(
     if let Some(e) = effort.map(|s| s.trim()).filter(|s| !s.is_empty()) {
         cmd.args(["--effort", e]);
     }
-    if let Some(mode) = execution_mode
-        .map(|s| s.trim())
-        .filter(|s| matches!(*s, "auto" | "plan" | "accept-edits"))
-    {
-        cmd.args(["--mode", mode]);
+    if let Some(mode) = execution_mode.map(|s| s.trim()).filter(|s| !s.is_empty()) {
+        match mode {
+            "turbo" => {
+                cmd.arg("--dangerously-skip-permissions");
+                cmd.args(["--mode", "auto"]);
+            }
+            "auto" => {
+                cmd.args(["--mode", "auto"]);
+            }
+            "default" | "accept-edits" => {
+                cmd.args(["--mode", "accept-edits"]);
+            }
+            "request-review" => {
+                cmd.arg("--sandbox");
+                cmd.args(["--mode", "plan"]);
+            }
+            "plan" => {
+                cmd.args(["--mode", "plan"]);
+            }
+            _ => {}
+        }
     }
     for att in attachments {
         if att.kind == "folder" && !att.path.trim().is_empty() && Path::new(att.path.trim()).is_dir() {
@@ -3612,11 +3636,12 @@ fn run_codex_app_server_turn_in_medium(
                 let mut turn_params = serde_json::Map::new();
                 turn_params.insert("threadId".to_string(), serde_json::json!(tid));
                 turn_params.insert("input".to_string(), serde_json::Value::Array(input_items));
-                if let Some(m) = model.map(|s| s.trim()).filter(|s| !s.is_empty()) {
+                if let Some(m) = model.map(|s| s.trim()).filter(|s| !s.is_empty() && *s != "default") {
                     turn_params.insert("model".to_string(), serde_json::json!(m));
                 }
                 if let Some(e) = effort.map(|s| s.trim()).filter(|s| !s.is_empty()) {
-                    turn_params.insert("effort".to_string(), serde_json::json!(e));
+                    let mapped_effort = if e == "max" { "xhigh" } else { e };
+                    turn_params.insert("effort".to_string(), serde_json::json!(mapped_effort));
                 }
                 if let Some(sb) = sandbox_mode.map(|s| s.trim()).filter(|s| !s.is_empty()) {
                     match sb {
@@ -3624,10 +3649,16 @@ fn run_codex_app_server_turn_in_medium(
                             turn_params.insert("approvalPolicy".to_string(), serde_json::json!("never"));
                             turn_params.insert("sandboxPolicy".to_string(), serde_json::json!({ "type": "dangerFullAccess" }));
                         }
-                        "workspace-write" => {
+                        "help-approve" => {
+                            turn_params.insert("approvalPolicy".to_string(), serde_json::json!("on-failure"));
+                            turn_params.insert("sandboxPolicy".to_string(), serde_json::json!({ "type": "workspaceWrite" }));
+                        }
+                        "request-approval" | "workspace-write" => {
+                            turn_params.insert("approvalPolicy".to_string(), serde_json::json!("on-request"));
                             turn_params.insert("sandboxPolicy".to_string(), serde_json::json!({ "type": "workspaceWrite" }));
                         }
                         "read-only" => {
+                            turn_params.insert("approvalPolicy".to_string(), serde_json::json!("on-request"));
                             turn_params.insert("sandboxPolicy".to_string(), serde_json::json!({ "type": "readOnly" }));
                         }
                         _ => {}

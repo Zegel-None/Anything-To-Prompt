@@ -5394,6 +5394,58 @@ window.__ModuleLoader__.load({
             },
             slash: (c = '#c7c3b8', sz = 15) =>
               svgIcon(sz, c, [h('path', { key: 's', d: 'M15 5L9 19', strokeWidth: 2 })]),
+            eye: (c = '#a1a1aa', sz = 15) =>
+              svgIcon(sz, c, [
+                h('path', { key: 'e', d: 'M2 12s3.8-6.5 10-6.5S22 12 22 12s-3.8 6.5-10 6.5S2 12 2 12z' }),
+                h('circle', { key: 'c', cx: 12, cy: 12, r: 2.8 }),
+              ]),
+            lock: (c = '#a1a1aa', sz = 15) =>
+              svgIcon(sz, c, [
+                h('rect', { key: 'r', x: 5, y: 11, width: 14, height: 10, rx: 2 }),
+                h('path', { key: 'a', d: 'M8 11V7a4 4 0 0 1 8 0v4' }),
+              ]),
+            shieldOutline: (c = '#a1a1aa', sz = 15) =>
+              svgIcon(sz, c, [
+                h('path', { key: 's', d: 'M12 3l7 3v5c0 4.5-2.9 8.4-7 10-4.1-1.6-7-5.5-7-10V6l7-3z' }),
+              ]),
+            shieldAlert: (c = '#a1a1aa', sz = 15) =>
+              svgIcon(sz, c, [
+                h('path', { key: 's', d: 'M12 3l7 3v5c0 4.5-2.9 8.4-7 10-4.1-1.6-7-5.5-7-10V6l7-3z' }),
+                h('path', { key: 'l', d: 'M12 8.5v4' }),
+                h('circle', { key: 'd', cx: 12, cy: 15.5, r: 0.8, fill: c }),
+              ]),
+            shieldTerm: (c = '#d4d4d4', sz = 16) =>
+              svgIcon(sz, c, [
+                h('path', { key: 's', d: 'M12 3l7 3v5c0 4.5-2.9 8.4-7 10-4.1-1.6-7-5.5-7-10V6l7-3z' }),
+                h('path', { key: 't', d: 'M9 10l2.2 2-2.2 2M13 14h2.5' }),
+              ]),
+            handStop: (c = '#d4d4d4', sz = 16) =>
+              svgIcon(sz, c, [
+                h('path', { key: 'h', d: 'M18 11V6a1.5 1.5 0 0 0-3 0v4M15 10V4.5a1.5 1.5 0 0 0-3 0V10M12 10V5.5a1.5 1.5 0 0 0-3 0V12M9 12V8.5a1.5 1.5 0 0 0-3 0V14a6 6 0 0 0 12 0v-3a1.5 1.5 0 0 0-3 0' }),
+              ]),
+            infoCircle: (c = '#71717a', sz = 11) =>
+              svgIcon(sz, c, [
+                h('circle', { key: 'o', cx: 12, cy: 12, r: 9 }),
+                h('path', { key: 'i', d: 'M12 11v5' }),
+                h('circle', { key: 'd', cx: 12, cy: 8, r: 0.7, fill: c }),
+              ]),
+            gauge: (c = '#a1a1aa', sz = 14) =>
+              svgIcon(sz, c, [
+                h('path', { key: 'a', d: 'M4.5 16.5a8.5 8.5 0 1 1 15 0' }),
+                h('path', { key: 'n', d: 'M12 14l4-4' }),
+                h('circle', { key: 'c', cx: 12, cy: 14, r: 1.2, fill: c }),
+              ]),
+            chevronRight: (c = '#63636c', sz = 12) =>
+              svgIcon(sz, c, [h('path', { key: 'p', d: 'M9 6l6 6-6 6' })]),
+            check: (c = '#e4e4e7', sz = 13) =>
+              svgIcon(sz, c, [h('path', { key: 'p', d: 'M5 12.5l4.5 4.5L19 7.5', strokeWidth: 2 })]),
+            bolt: (c = '#a3a3a3', sz = 16) =>
+              svgIcon(sz, c, [h('path', { key: 'p', d: 'M13 2L4.5 13H12l-1 9 8.5-11H12l1-9z' })]),
+            refresh: (c = '#a3a3a3', sz = 16) =>
+              svgIcon(sz, c, [
+                h('path', { key: 'a', d: 'M20 11a8 8 0 1 0 2 5.3' }),
+                h('path', { key: 'b', d: 'M20 4v7h-7' }),
+              ]),
           };
 
           // Standard compact row (Antigravity / Claude / Model / Mode)
@@ -5732,9 +5784,31 @@ window.__ModuleLoader__.load({
           let content = null;
           let panelWidth = 256;
 
+          const pillBadge = (text, hasInfo) =>
+            h(
+              'span',
+              {
+                style: {
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: '3px',
+                  fontSize: '10px',
+                  lineHeight: '14px',
+                  color: '#8b8b96',
+                  background: '#222228',
+                  border: '1px solid rgba(255,255,255,0.06)',
+                  borderRadius: '999px',
+                  padding: '1px 6px',
+                  flexShrink: 0,
+                },
+              },
+              text,
+              hasInfo ? POP_ICONS.infoCircle('#7c7c88', 10) : null,
+            );
+
           if (composerPopover.kind === 'plus') {
             if (activeHarness === 'antigravity') {
-              panelWidth = 216;
+              panelWidth = 162;
               const actions =
                 Array.isArray(opts.actions) && opts.actions.length > 0
                   ? opts.actions
@@ -5746,8 +5820,46 @@ window.__ModuleLoader__.load({
                       { id: '/compact', label: '/compact', desc: '压缩上下文释放窗口' },
                       { id: '/learn', label: '/learn', desc: '沉淀规则到长期记忆' },
                     ];
+              const agCompactRow = (key, iconNode, label, onClick, rightNode) =>
+                h(
+                  'button',
+                  {
+                    key,
+                    type: 'button',
+                    'data-dsb-pop-row': '1',
+                    onClick: (ev) => {
+                      ev.stopPropagation();
+                      onClick();
+                    },
+                    style: {
+                      width: '100%',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'space-between',
+                      gap: '8px',
+                      padding: '4px 8px',
+                      minHeight: '28px',
+                      borderRadius: '6px',
+                      border: 'none',
+                      background: 'transparent',
+                      color: '#d4d4d8',
+                      cursor: 'pointer',
+                      textAlign: 'left',
+                      fontSize: '12.5px',
+                      lineHeight: '18px',
+                      boxSizing: 'border-box',
+                    },
+                  },
+                  h(
+                    'span',
+                    { style: { display: 'inline-flex', alignItems: 'center', gap: '8px', minWidth: 0 } },
+                    iconNode,
+                    h('span', { style: { color: '#d4d4d8', fontWeight: 400 } }, label),
+                  ),
+                  rightNode || null,
+                );
               if (composerSubView === 'ag-actions') {
-                panelWidth = 252;
+                panelWidth = 248;
                 content = [
                   h(
                     'div',
@@ -5782,7 +5894,7 @@ window.__ModuleLoader__.load({
                     h('span', { style: { fontSize: '11.5px', color: '#8b8d94', fontWeight: 500 } }, 'Actions'),
                   ),
                   ...actions.map((a) =>
-                    rowBtn('act-' + a.id, POP_ICONS.actionsBox('#a1a1aa', 15), a.label, a.desc, false, () => {
+                    rowBtn('act-' + a.id, POP_ICONS.actionsBox('#a1a1aa', 14), a.label, a.desc, false, () => {
                       setComposerSubView(null);
                       setComposerPopover(null);
                       insertTextIntoExtComposer(a.id + ' ');
@@ -5796,40 +5908,38 @@ window.__ModuleLoader__.load({
                     {
                       key: 'hdr',
                       style: {
-                        fontSize: '12px',
-                        color: '#8b8d94',
-                        padding: '3px 10px 6px',
-                        fontWeight: 500,
+                        fontSize: '11.5px',
+                        color: '#8a8a93',
+                        padding: '2px 8px 4px',
+                        fontWeight: 400,
                       },
                     },
                     'Add Context',
                   ),
-                  rowBtn('files', POP_ICONS.paperclip('#d4d4d8', 15), 'Files', '', false, () => {
+                  agCompactRow('files', POP_ICONS.paperclip('#a1a1aa', 14), 'Files', () => {
                     setComposerPopover(null);
                     pickFilesForExtComposer(false);
                   }),
-                  rowBtn('folder', POP_ICONS.folder('#d4d4d8', 15), 'Folder', '', false, () => {
+                  agCompactRow('folder', POP_ICONS.folder('#a1a1aa', 14), 'Folder', () => {
                     setComposerPopover(null);
                     pickFolderForExtComposer();
                   }),
-                  rowBtn('mentions', POP_ICONS.atSign('#d4d4d8', 15), 'Mentions', '', false, () => {
+                  agCompactRow('mentions', POP_ICONS.atSign('#a1a1aa', 14), 'Mentions', () => {
                     setComposerPopover(null);
                     insertTextIntoExtComposer('@');
                   }),
-                  rowBtn('actions', POP_ICONS.actionsBox('#d4d4d8', 15), 'Actions', '', false, () => {
+                  agCompactRow('actions', POP_ICONS.actionsBox('#a1a1aa', 14), 'Actions', () => {
                     setComposerSubView('ag-actions');
                     scheduleLayoutReport(220);
                   }),
-                  rowBtn('browser', POP_ICONS.chrome('#d4d4d8', 15), 'Browser', '', false, () => {
+                  agCompactRow('browser', POP_ICONS.chrome('#a1a1aa', 14), 'Browser', () => {
                     setComposerPopover(null);
                     insertTextIntoExtComposer('/browser ');
                   }),
-                  rowBtn(
+                  agCompactRow(
                     'drive',
-                    POP_ICONS.drive('#d4d4d8', 15),
+                    POP_ICONS.drive('#a1a1aa', 14),
                     'Drive',
-                    '',
-                    false,
                     () => {
                       setComposerPopover(null);
                       const agSel = dsbRuntime.externalSelection.antigravity || {};
@@ -5840,149 +5950,94 @@ window.__ModuleLoader__.load({
                         workspacePath: agSel.workspacePath || '',
                       }).catch(() => {});
                     },
-                    h('span', { style: { color: '#3b82f6', fontSize: '12.5px', fontWeight: 500, flexShrink: 0 } }, 'Set up'),
+                    h('span', { style: { color: '#4b8cf5', fontSize: '12px', fontWeight: 450, flexShrink: 0 } }, 'Set up'),
                   ),
                 ];
               }
             } else if (activeHarness === 'codex') {
-              if (composerSubView === 'codex-sketch') {
-                content = renderCodexSketchPad();
-              } else {
-                const builtinCodexPlugins = [
-                  { id: 'documents', label: 'Documents', desc: 'Create and edit documents' },
-                  { id: 'pdf', label: 'PDF', desc: 'Read, create, and verify PDFs' },
-                  { id: 'spreadsheets', label: 'Spreadsheets', desc: 'Create and edit spreadsheets' },
-                  { id: 'presentations', label: 'Presentations', desc: 'Create and edit presentations' },
-                ];
-                const seenPlg = new Set(builtinCodexPlugins.map((p) => p.label.toLowerCase()));
-                const discovered = Array.isArray(opts.plugins) ? opts.plugins : [];
-                const mergedPlugins = builtinCodexPlugins.concat(
-                  discovered.filter((p) => p && p.label && !seenPlg.has(String(p.label).toLowerCase())),
-                );
+              const builtinCodexPlugins = [
+                { id: 'documents', label: 'Documents', desc: 'Create and edit documents' },
+                { id: 'pdf', label: 'PDF', desc: 'Read, create, and verify PDFs' },
+                { id: 'spreadsheets', label: 'Spreadsheets', desc: 'Create and edit spreadsheets' },
+                { id: 'presentations', label: 'Presentations', desc: 'Create and edit presentations' },
+              ];
+              const seenPlg = new Set(builtinCodexPlugins.map((p) => p.label.toLowerCase()));
+              const discovered = Array.isArray(opts.plugins) ? opts.plugins : [];
+              const mergedPlugins = builtinCodexPlugins.concat(
+                discovered.filter((p) => p && p.label && !seenPlg.has(String(p.label).toLowerCase())),
+              );
 
-                content = [
-                  h(
-                    'div',
-                    { key: 'hdr-add', style: { fontSize: '12px', color: '#8f8f8f', padding: '4px 14px 6px', fontWeight: 500 } },
-                    '添加',
-                  ),
-                  codexRowBtn(
-                    'cx-files',
-                    POP_ICONS.paperclip('#a3a3a3', 16),
-                    '文件和文件夹',
-                    '',
-                    true,
-                    () => {
-                      setComposerPopover(null);
-                      pickFilesForExtComposer(false);
+              content = [
+                h(
+                  'div',
+                  { key: 'hdr-add', style: { fontSize: '12px', color: '#8f8f8f', padding: '4px 14px 6px', fontWeight: 500 } },
+                  '添加',
+                ),
+                codexRowBtn('cx-files', POP_ICONS.paperclip('#a3a3a3', 16), '文件和文件夹', '', true, () => {
+                  setComposerPopover(null);
+                  pickFilesForExtComposer(false);
+                }),
+                codexRowBtn('cx-ag', POP_ICONS.antigravityMark(18), '附加 Antigravity', '', false, () => {
+                  setComposerPopover(null);
+                  const agWs =
+                    dsbRuntime.externalSelection.antigravity &&
+                    dsbRuntime.externalSelection.antigravity.workspacePath;
+                  if (agWs) {
+                    tauriInvoke('app_describe_paths', { paths: [agWs] })
+                      .then((list) => {
+                        if (Array.isArray(list) && list.length > 0) addExtAttachments(list);
+                        focusComposerElement();
+                      })
+                      .catch(() => {});
+                  } else {
+                    pickFolderForExtComposer();
+                  }
+                }),
+                codexRowBtn('cx-goal', POP_ICONS.target('#a3a3a3', 17), '目标', '设置要持续追求的目标', false, () => {
+                  setComposerPopover(null);
+                  insertTextIntoExtComposer('/goal ');
+                }),
+                codexRowBtn('cx-plan', POP_ICONS.bulb('#a3a3a3', 17), '计划模式', '开启计划模式', false, () => {
+                  setComposerPopover(null);
+                  insertTextIntoExtComposer('/plan ');
+                }),
+                codexRowBtn('cx-draw', POP_ICONS.squiggle(18), '绘图', '绘制草图', false, () => {
+                  setComposerPopover(null);
+                  const cxSel = dsbRuntime.externalSelection.codex || {};
+                  tauriInvoke('harness_focus_desktop', {
+                    harness: 'codex',
+                    sessionId: cxSel.sessionId || '',
+                    title: cxSel.title || '',
+                    workspacePath: cxSel.workspacePath || '',
+                  }).catch(() => {});
+                }),
+                h(
+                  'div',
+                  {
+                    key: 'hdr-plg',
+                    style: {
+                      fontSize: '12px',
+                      color: '#8f8f8f',
+                      padding: '12px 14px 6px',
+                      fontWeight: 500,
                     },
-                    h(
-                      'span',
-                      {
-                        role: 'button',
-                        title: '选择整个文件夹作为上下文',
-                        onClick: (ev) => {
-                          ev.stopPropagation();
-                          setComposerPopover(null);
-                          pickFolderForExtComposer();
-                        },
-                        style: {
-                          fontSize: '11.5px',
-                          color: '#a3a3a3',
-                          padding: '2px 8px',
-                          borderRadius: '999px',
-                          background: 'rgba(255,255,255,0.06)',
-                          border: '1px solid rgba(255,255,255,0.08)',
-                          flexShrink: 0,
-                        },
-                      },
-                      '选文件夹',
-                    ),
-                  ),
+                  },
+                  '插件',
+                ),
+                ...mergedPlugins.slice(0, 8).map((p) =>
                   codexRowBtn(
-                    'cx-ag',
-                    POP_ICONS.antigravityMark(18),
-                    '附加 Antigravity',
-                    '',
+                    'plg-' + p.id,
+                    POP_ICONS.pluginBadge(p.id || p.label, 18),
+                    p.label,
+                    p.desc || '',
                     false,
                     () => {
                       setComposerPopover(null);
-                      const agWs =
-                        dsbRuntime.externalSelection.antigravity &&
-                        dsbRuntime.externalSelection.antigravity.workspacePath;
-                      if (agWs) {
-                        tauriInvoke('app_describe_paths', { paths: [agWs] })
-                          .then((list) => {
-                            if (Array.isArray(list) && list.length > 0) addExtAttachments(list);
-                            focusComposerElement();
-                          })
-                          .catch(() => {});
-                      } else {
-                        pickFolderForExtComposer();
-                      }
+                      insertTextIntoExtComposer('使用 ' + p.label + ' 插件：');
                     },
                   ),
-                  codexRowBtn(
-                    'cx-goal',
-                    POP_ICONS.target('#a3a3a3', 17),
-                    '目标',
-                    '设置要持续追求的目标',
-                    false,
-                    () => {
-                      setComposerPopover(null);
-                      insertTextIntoExtComposer('/goal ');
-                    },
-                  ),
-                  codexRowBtn(
-                    'cx-plan',
-                    POP_ICONS.bulb('#a3a3a3', 17),
-                    '计划模式',
-                    '开启计划模式',
-                    false,
-                    () => {
-                      setComposerPopover(null);
-                      insertTextIntoExtComposer('/plan ');
-                    },
-                  ),
-                  codexRowBtn(
-                    'cx-draw',
-                    POP_ICONS.squiggle(18),
-                    '绘图',
-                    '绘制草图',
-                    false,
-                    () => {
-                      setComposerSubView('codex-sketch');
-                      scheduleLayoutReport(220);
-                    },
-                  ),
-                  h(
-                    'div',
-                    {
-                      key: 'hdr-plg',
-                      style: {
-                        fontSize: '12px',
-                        color: '#8f8f8f',
-                        padding: '12px 14px 6px',
-                        fontWeight: 500,
-                      },
-                    },
-                    '插件',
-                  ),
-                  ...mergedPlugins.slice(0, 8).map((p) =>
-                    codexRowBtn(
-                      'plg-' + p.id,
-                      POP_ICONS.pluginBadge(p.id || p.label, 18),
-                      p.label,
-                      p.desc || '',
-                      false,
-                      () => {
-                        setComposerPopover(null);
-                        insertTextIntoExtComposer('使用 ' + p.label + ' 插件：');
-                      },
-                    ),
-                  ),
-                ];
-              }
+                ),
+              ];
             } else {
               panelWidth = 248;
               const actions =
@@ -6037,151 +6092,633 @@ window.__ModuleLoader__.load({
               ];
             }
           } else if (composerPopover.kind === 'model') {
-            panelWidth = 276;
-            const defaultModelsByHarness = {
-              antigravity: [
-                { id: 'gemini-4-neon', label: 'Gemini 4 Neon', desc: '最新旗舰多模态模型' },
-                { id: 'gemini-3.5-pro', label: 'Gemini 3.5 Pro', desc: '深度推理与工程代码' },
-                { id: 'claude-opus-4-6', label: 'Claude Opus', desc: '长上下文深度思考' },
-                { id: 'claude-sonnet-4-6', label: 'Claude Sonnet', desc: '高速均衡编程模型' },
-              ],
-              codex: [
-                { id: 'gpt-6-luna', label: 'GPT-6.1 Terra', desc: 'Codex 默认旗舰编程模型' },
-                { id: 'gpt-5.4', label: 'GPT-5.4', desc: '稳健高速代码模型' },
-                { id: 'o3', label: 'o3', desc: '高强度数学与系统推理' },
-              ],
-              claude_code: [
-                { id: 'claude-opus-4-6', label: 'Claude Opus', desc: '最强深度架构与复杂重构' },
-                { id: 'claude-sonnet-4-6', label: 'Claude Sonnet', desc: '日常高速编码主力' },
-                { id: 'claude-haiku-4-5', label: 'Claude Haiku', desc: '极速轻量问答与脚本' },
-              ],
-            };
-            const defaultEffortsByHarness = {
-              antigravity: [
-                { id: 'low', label: 'Low', desc: '极速低延迟' },
-                { id: 'medium', label: 'Medium', desc: '日常均衡推理' },
-                { id: 'high', label: 'High', desc: '深度复杂推理' },
-                { id: 'max', label: 'Max', desc: '最高算力思考' },
-              ],
-              codex: [
-                { id: 'low', label: '低', desc: '快速轻量推理' },
-                { id: 'medium', label: '中', desc: '平衡速度与质量' },
-                { id: 'high', label: '高', desc: '深度工程推理' },
-                { id: 'xhigh', label: '极高', desc: '拉满思考预算' },
-              ],
-              claude_code: [
+            if (activeHarness === 'antigravity') {
+              // 1:1 Antigravity 2.35.1 Select Model popover mapped directly to `agy --model` / `--effort`
+              panelWidth = 310;
+              const agModels = [
+                { id: 'gemini-4-neon-high', label: 'Gemini 4 Neon', effort: 'High', badge: 'New', info: true, hasSub: true },
+                { id: 'gemini-4-carbon-medium', label: 'Gemini 4 Carbon', effort: 'Medium', badge: 'New', info: true, hasSub: true },
+                { id: 'gemini-4-argon-medium', label: 'Gemini 4 Argon', effort: 'Medium', badge: 'Leaving Soon', info: true, hasSub: true },
+                { id: 'gemini-4-hydrogen-medium', label: 'Gemini 4 Hydrogen', effort: 'Medium', badge: 'New', info: true, hasSub: true },
+                { id: 'gemini-pro-orchestrator-neon', label: 'Orchestrator', effort: 'Claude Opus 5.5 High', badge: 'New', info: true, hasSub: true },
+                { id: 'gemini-3.8-flash-medium', label: 'Gemini 3.8 Flash', effort: 'Medium', badge: 'Leaving Soon', info: true, hasSub: true },
+                { id: 'claude-opus-5-5-medium', label: 'Claude Opus 5.5', effort: 'Medium', badge: 'New', info: false, hasSub: true },
+                { id: 'claude-sonnet-5-5-medium', label: 'Claude Sonnet 5.5', effort: 'Medium', badge: 'New', info: false, hasSub: true },
+                { id: 'gpt-oss-120b-medium', label: 'GPT-OSS 120B (Medium)', effort: '', badge: 'Notice', info: true, hasSub: false },
+              ];
+              const curModel = prefs.model || opts.defaultModel || 'gemini-4-neon-high';
+              content = [
+                h(
+                  'div',
+                  { key: 'hdr-agm', style: { fontSize: '11.5px', color: '#8a8a93', padding: '2px 8px 3px', fontWeight: 400 } },
+                  'Model',
+                ),
+                ...agModels.map((m) => {
+                  const isSel = m.id === curModel || (curModel === 'gemini-4-neon' && m.id === 'gemini-4-neon-high');
+                  return h(
+                    'button',
+                    {
+                      key: 'agm-' + m.id,
+                      type: 'button',
+                      'data-dsb-pop-row': '1',
+                      onClick: (ev) => {
+                        ev.stopPropagation();
+                        const eff = m.effort.toLowerCase().includes('high') ? 'high' : m.effort.toLowerCase().includes('low') ? 'low' : 'medium';
+                        updateHarnessPrefs('antigravity', { model: m.id, effort: eff });
+                        setComposerPopover(null);
+                      },
+                      style: {
+                        width: '100%',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'space-between',
+                        gap: '6px',
+                        padding: '3px 8px',
+                        minHeight: '25px',
+                        borderRadius: '6px',
+                        border: 'none',
+                        background: 'transparent',
+                        color: isSel ? '#f4f4f5' : '#c8c8d0',
+                        cursor: 'pointer',
+                        textAlign: 'left',
+                        fontSize: '12px',
+                        lineHeight: '17px',
+                        boxSizing: 'border-box',
+                      },
+                    },
+                    h(
+                      'span',
+                      { style: { display: 'inline-flex', alignItems: 'center', gap: '5px', minWidth: 0, overflow: 'hidden' } },
+                      h('span', { style: { color: isSel ? '#f4f4f5' : '#d4d4d8', fontWeight: isSel ? 500 : 400, whiteSpace: 'nowrap' } }, m.label),
+                      m.effort
+                        ? h('span', { style: { color: '#7c7c86', fontSize: '11.5px', whiteSpace: 'nowrap' } }, m.effort)
+                        : null,
+                      m.badge ? pillBadge(m.badge, m.info) : null,
+                    ),
+                    isSel ? POP_ICONS.check('#e4e4e7', 12) : m.hasSub ? POP_ICONS.chevronRight('#63636c', 11) : null,
+                  );
+                }),
+                h('div', { key: 'agm-div', style: { height: '1px', background: '#26262c', margin: '3px 4px' } }),
+                h(
+                  'button',
+                  {
+                    key: 'agm-usage',
+                    type: 'button',
+                    'data-dsb-pop-row': '1',
+                    onClick: (ev) => {
+                      ev.stopPropagation();
+                      setComposerPopover(null);
+                      const agSel = dsbRuntime.externalSelection.antigravity || {};
+                      tauriInvoke('harness_focus_desktop', {
+                        harness: 'antigravity',
+                        sessionId: agSel.sessionId || '',
+                        title: agSel.title || '',
+                        workspacePath: agSel.workspacePath || '',
+                      }).catch(() => {});
+                    },
+                    style: {
+                      width: '100%',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'space-between',
+                      padding: '4px 8px',
+                      minHeight: '26px',
+                      borderRadius: '6px',
+                      border: 'none',
+                      background: 'transparent',
+                      color: '#c8c8d0',
+                      cursor: 'pointer',
+                      fontSize: '12px',
+                      boxSizing: 'border-box',
+                    },
+                  },
+                  h(
+                    'span',
+                    { style: { display: 'inline-flex', alignItems: 'center', gap: '7px' } },
+                    POP_ICONS.gauge('#a1a1aa', 13),
+                    h('span', null, 'View Usage'),
+                  ),
+                  POP_ICONS.chevronRight('#63636c', 11),
+                ),
+              ];
+            } else if (activeHarness === 'codex') {
+              // 1:1 Codex Desktop effort slider card + inline model selector mapped to Codex app-server `effort` & `model`
+              const cxModels =
+                Array.isArray(opts.models) && opts.models.length > 0
+                  ? opts.models
+                  : [
+                      { id: 'default', label: '默认' },
+                      { id: 'gpt-6.2-sol', label: 'GPT-6.2 Sol' },
+                      { id: 'gpt-6.2-astra', label: 'GPT-6.2 Astra' },
+                      { id: 'gpt-6.1-terra', label: 'GPT-6.1 Terra' },
+                      { id: 'gpt-6.1-sol', label: 'GPT-6.1 Sol' },
+                      { id: 'gpt-6-astra', label: 'GPT-6 Astra' },
+                      { id: 'gpt-6-sol', label: 'GPT-6 Sol' },
+                      { id: 'gpt-6-luna', label: 'GPT-6 Luna' },
+                      { id: 'gpt-5.6-sol', label: 'GPT-5.6 Sol' },
+                      { id: 'gpt-5.6-terra', label: 'GPT-5.6 Terra' },
+                    ];
+              const cxEfforts = [
+                { id: 'minimal', label: '极低' },
+                { id: 'low', label: '低' },
+                { id: 'high', label: '高' },
+                { id: 'xhigh', label: '极高' },
+                { id: 'max', label: '最高' },
+              ];
+              const curModelId = prefs.model || opts.defaultModel || 'gpt-6-luna';
+              const curEffortId = prefs.effort || opts.defaultEffort || 'high';
+              const curModelObj = cxModels.find((m) => m.id === curModelId) || cxModels.find((m) => m.id === 'gpt-6-luna') || cxModels[0];
+              const effIdx = Math.max(0, cxEfforts.findIndex((e) => e.id === curEffortId));
+              const curEffortObj = cxEfforts[effIdx] || cxEfforts[2];
+              const fastOn = Boolean(prefs.fastSpeed);
+
+              if (composerSubView === 'codex-models') {
+                panelWidth = 256;
+                const defItem = cxModels.find((m) => m.id === 'default') || { id: 'default', label: '默认' };
+                const recModels = cxModels.filter((m) => m.id !== 'default');
+                content = [
+                  h('div', { key: 'cxm-hdr', style: { fontSize: '12px', color: '#8f8f8f', padding: '3px 12px 3px', fontWeight: 400 } }, '选择模型'),
+                  h(
+                    'button',
+                    {
+                      key: 'cxm-def',
+                      type: 'button',
+                      'data-dsb-pop-row': '1',
+                      onClick: (ev) => {
+                        ev.stopPropagation();
+                        updateHarnessPrefs('codex', { model: 'default' });
+                        setComposerSubView(null);
+                      },
+                      style: {
+                        width: '100%',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'space-between',
+                        padding: '4px 12px',
+                        borderRadius: '999px',
+                        border: 'none',
+                        background: 'transparent',
+                        color: '#ededed',
+                        fontSize: '13px',
+                        cursor: 'pointer',
+                        textAlign: 'left',
+                      },
+                    },
+                    h('span', null, defItem.label),
+                    curModelId === 'default' ? POP_ICONS.check('#d4d4d4', 14) : null,
+                  ),
+                  h('div', { key: 'cxm-sub', style: { fontSize: '11.5px', color: '#8f8f8f', padding: '3px 12px 3px', fontWeight: 400 } }, '推荐模型集'),
+                  ...recModels.map((m) => {
+                    const isSel = m.id === curModelId;
+                    return h(
+                      'button',
+                      {
+                        key: 'cxm-' + m.id,
+                        type: 'button',
+                        'data-dsb-pop-row': '1',
+                        onClick: (ev) => {
+                          ev.stopPropagation();
+                          updateHarnessPrefs('codex', { model: m.id });
+                          setComposerSubView(null);
+                        },
+                        style: {
+                          width: '100%',
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'space-between',
+                          padding: '6px 12px',
+                          borderRadius: '999px',
+                          border: 'none',
+                          background: 'transparent',
+                          color: '#ededed',
+                          fontSize: '13px',
+                          cursor: 'pointer',
+                          textAlign: 'left',
+                        },
+                      },
+                      h('span', null, m.label),
+                      isSel ? POP_ICONS.check('#d4d4d4', 14) : null,
+                    );
+                  }),
+                ];
+              } else {
+                panelWidth = 268;
+                const fillPct = Math.round(((effIdx + 0.5) / cxEfforts.length) * 100);
+                content = [
+                  h(
+                    'div',
+                    {
+                      key: 'cxe-top',
+                      style: {
+                        display: 'flex',
+                        alignItems: 'flex-start',
+                        justifyContent: 'space-between',
+                        padding: '4px 6px 14px',
+                      },
+                    },
+                    h(
+                      'button',
+                      {
+                        type: 'button',
+                        title: '1.5 倍速度 · 用量更多',
+                        onClick: (ev) => {
+                          ev.stopPropagation();
+                          updateHarnessPrefs('codex', { fastSpeed: !fastOn });
+                        },
+                        style: {
+                          width: '30px',
+                          height: '30px',
+                          borderRadius: '9px',
+                          border: 'none',
+                          background: fastOn ? '#3f3f46' : 'transparent',
+                          cursor: 'pointer',
+                          display: 'inline-flex',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          padding: 0,
+                        },
+                      },
+                      POP_ICONS.bolt(fastOn ? '#60a5fa' : '#9ca3af', 16),
+                    ),
+                    h(
+                      'div',
+                      { style: { display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '2px' } },
+                      h('span', { style: { fontSize: '16px', fontWeight: 600, color: '#3b82f6', lineHeight: '22px' } }, curEffortObj.label),
+                      h(
+                        'button',
+                        {
+                          type: 'button',
+                          onClick: (ev) => {
+                            ev.stopPropagation();
+                            setComposerSubView('codex-models');
+                            scheduleLayoutReport(220);
+                          },
+                          style: {
+                            border: 'none',
+                            background: 'transparent',
+                            color: '#cfcfcf',
+                            fontSize: '13px',
+                            cursor: 'pointer',
+                            display: 'inline-flex',
+                            alignItems: 'center',
+                            gap: '2px',
+                            padding: '1px 6px',
+                            borderRadius: '6px',
+                          },
+                        },
+                        curModelObj.label,
+                        POP_ICONS.chevronRight('#9ca3af', 12),
+                      ),
+                    ),
+                    h(
+                      'button',
+                      {
+                        type: 'button',
+                        title: '重置为默认推理强度',
+                        onClick: (ev) => {
+                          ev.stopPropagation();
+                          updateHarnessPrefs('codex', { effort: opts.defaultEffort || 'high', fastSpeed: false });
+                        },
+                        style: {
+                          width: '30px',
+                          height: '30px',
+                          borderRadius: '9px',
+                          border: 'none',
+                          background: 'transparent',
+                          cursor: 'pointer',
+                          display: 'inline-flex',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          padding: 0,
+                        },
+                      },
+                      POP_ICONS.refresh('#9ca3af', 15),
+                    ),
+                  ),
+                  // 5-stop pill slider matching Codex Desktop (`paste-2.png`)
+                  h(
+                    'div',
+                    {
+                      key: 'cxe-slider',
+                      style: {
+                        position: 'relative',
+                        height: '32px',
+                        margin: '2px 8px 6px',
+                        borderRadius: '999px',
+                        background: '#3d3d3d',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'space-between',
+                        padding: '0 6px',
+                        boxSizing: 'border-box',
+                        overflow: 'visible',
+                      },
+                    },
+                    h('div', {
+                      style: {
+                        position: 'absolute',
+                        left: 0,
+                        top: 0,
+                        bottom: 0,
+                        width: Math.max(14, fillPct) + '%',
+                        borderRadius: '999px',
+                        background: '#2f7df6',
+                        pointerEvents: 'none',
+                      },
+                    }),
+                    ...cxEfforts.map((ef, idx) => {
+                      const isCur = idx === effIdx;
+                      return h(
+                        'button',
+                        {
+                          key: 'stop-' + ef.id,
+                          type: 'button',
+                          title: ef.label,
+                          onClick: (ev) => {
+                            ev.stopPropagation();
+                            updateHarnessPrefs('codex', { effort: ef.id });
+                          },
+                          style: {
+                            position: 'relative',
+                            zIndex: 2,
+                            width: isCur ? '28px' : '22px',
+                            height: isCur ? '28px' : '22px',
+                            borderRadius: '999px',
+                            border: 'none',
+                            background: isCur ? '#ffffff' : 'transparent',
+                            boxShadow: isCur ? '0 2px 6px rgba(0,0,0,0.45)' : 'none',
+                            cursor: 'pointer',
+                            display: 'inline-flex',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            padding: 0,
+                          },
+                        },
+                        isCur
+                          ? null
+                          : h('span', {
+                              style: {
+                                width: '4px',
+                                height: '4px',
+                                borderRadius: '999px',
+                                background: idx < effIdx ? 'rgba(255,255,255,0.45)' : 'rgba(255,255,255,0.28)',
+                              },
+                            }),
+                      );
+                    }),
+                  ),
+                ];
+              }
+            } else {
+              panelWidth = 276;
+              const defaultModels = [
+                { id: 'claude-opus-5-5', label: 'Opus 5.5', desc: 'Best for everyday, complex tasks' },
+                { id: 'claude-fable-5-2', label: 'Fable 5.2', desc: 'Most capable for hardest tasks' },
+                { id: 'claude-sonnet-5-5', label: 'Sonnet 5.5', desc: 'Efficient for routine tasks' },
+                { id: 'claude-haiku-5-5', label: 'Haiku 5.5', desc: 'Fastest for quick answers' },
+              ];
+              const defaultEfforts = [
                 { id: 'low', label: '低', desc: '快速响应' },
                 { id: 'medium', label: '中', desc: '常规推理' },
                 { id: 'high', label: '高', desc: '深度推理' },
                 { id: 'max', label: '极高', desc: '最大思考深度' },
-              ],
-            };
-            const models =
-              Array.isArray(opts.models) && opts.models.length > 0
-                ? opts.models
-                : defaultModelsByHarness[activeHarness] || [];
-            const efforts =
-              Array.isArray(opts.efforts) && opts.efforts.length > 0
-                ? opts.efforts
-                : defaultEffortsByHarness[activeHarness] || [];
-            const curModel = prefs.model || opts.defaultModel || (models[0] && models[0].id) || '';
-            const curEffort = prefs.effort || opts.defaultEffort || (efforts[2] && efforts[2].id) || (efforts[0] && efforts[0].id) || '';
-            content = [
-              h('div', { key: 'hdr-m', style: { fontSize: '11.5px', color: 'rgba(209,213,219,0.52)', padding: '3px 10px 5px', fontWeight: 500 } }, '选择模型'),
-              ...models.map((m) =>
-                rowBtn('m-' + m.id, null, m.label, m.desc, m.id === curModel, () => {
-                  updateHarnessPrefs(activeHarness, { model: m.id });
-                }),
-              ),
-              efforts.length > 0
-                ? h(
+              ];
+              const models = Array.isArray(opts.models) && opts.models.length > 0 ? opts.models : defaultModels;
+              const efforts = Array.isArray(opts.efforts) && opts.efforts.length > 0 ? opts.efforts : defaultEfforts;
+              const curModel = prefs.model || opts.defaultModel || (models[0] && models[0].id) || '';
+              const curEffort = prefs.effort || opts.defaultEffort || 'medium';
+              content = [
+                h('div', { key: 'hdr-m', style: { fontSize: '11.5px', color: 'rgba(209,213,219,0.52)', padding: '3px 10px 5px', fontWeight: 500 } }, '选择模型'),
+                ...models.map((m) =>
+                  rowBtn('m-' + m.id, null, m.label, m.desc, m.id === curModel, () => {
+                    updateHarnessPrefs(activeHarness, { model: m.id });
+                  }),
+                ),
+                h(
+                  'div',
+                  {
+                    key: 'eff-box',
+                    style: {
+                      marginTop: '6px',
+                      padding: '8px 8px 4px',
+                      borderTop: '1px solid rgba(255,255,255,0.08)',
+                    },
+                  },
+                  h('div', { style: { fontSize: '11px', color: 'rgba(209,213,219,0.52)', marginBottom: '6px', paddingLeft: '2px' } }, '推理深度'),
+                  h(
                     'div',
+                    { style: { display: 'flex', gap: '4px' } },
+                    efforts.map((ef) =>
+                      h(
+                        'button',
+                        {
+                          key: ef.id,
+                          type: 'button',
+                          title: ef.desc,
+                          onClick: (ev) => {
+                            ev.stopPropagation();
+                            updateHarnessPrefs(activeHarness, { effort: ef.id });
+                          },
+                          style: {
+                            flex: 1,
+                            padding: '5px 4px',
+                            borderRadius: '7px',
+                            border: ef.id === curEffort ? '1px solid ' + meta.accentBorder : '1px solid rgba(255,255,255,0.08)',
+                            background: ef.id === curEffort ? meta.accentBg : 'rgba(255,255,255,0.04)',
+                            color: ef.id === curEffort ? meta.accent : '#d4d4d8',
+                            fontSize: '11.5px',
+                            fontWeight: ef.id === curEffort ? 600 : 400,
+                            cursor: 'pointer',
+                          },
+                        },
+                        ef.label,
+                      ),
+                    ),
+                  ),
+                ),
+              ];
+            }
+          } else if (composerPopover.kind === 'mode') {
+            if (activeHarness === 'antigravity') {
+              // 1:1 Antigravity 2.35.1 `This Conversation` permissions selector mapped to `agy` flags
+              panelWidth = 286;
+              const agModes = [
+                { id: 'request-review', label: 'Request Review', desc: 'Every command requires approval.', icon: POP_ICONS.eye('#a1a1aa', 15) },
+                { id: 'default', label: 'Default', badge: 'Default', info: true, desc: 'Ask before sensitive operations.', icon: POP_ICONS.lock('#a1a1aa', 15) },
+                { id: 'auto', label: 'Auto', desc: 'Automatically decide if commands run.', icon: POP_ICONS.shieldOutline('#a1a1aa', 15) },
+                { id: 'turbo', label: 'Turbo', desc: 'Run all commands without restrictions.', icon: POP_ICONS.shieldAlert('#d4d4d8', 15) },
+              ];
+              const curMode = prefs.mode || opts.defaultMode || 'turbo';
+              content = [
+                h(
+                  'div',
+                  {
+                    key: 'hdr-agp',
+                    style: {
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      gap: '5px',
+                      fontSize: '11.5px',
+                      color: '#8a8a93',
+                      padding: '2px 8px 4px',
+                      fontWeight: 400,
+                    },
+                  },
+                  'This Conversation',
+                  POP_ICONS.infoCircle('#71717a', 11),
+                ),
+                ...agModes.map((md) => {
+                  const isSel = md.id === curMode;
+                  return h(
+                    'button',
                     {
-                      key: 'eff-box',
+                      key: 'agp-' + md.id,
+                      type: 'button',
+                      'data-dsb-pop-row': '1',
+                      onClick: (ev) => {
+                        ev.stopPropagation();
+                        updateHarnessPrefs('antigravity', { mode: md.id });
+                        setComposerPopover(null);
+                      },
                       style: {
-                        marginTop: '6px',
-                        padding: '8px 8px 4px',
-                        borderTop: '1px solid rgba(255,255,255,0.08)',
+                        width: '100%',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'space-between',
+                        gap: '10px',
+                        padding: '5px 8px',
+                        borderRadius: '7px',
+                        border: 'none',
+                        background: 'transparent',
+                        cursor: 'pointer',
+                        textAlign: 'left',
+                        boxSizing: 'border-box',
                       },
                     },
-                    h('div', { style: { fontSize: '11px', color: 'rgba(209,213,219,0.52)', marginBottom: '6px', paddingLeft: '2px' } }, '推理深度'),
                     h(
                       'div',
-                      { style: { display: 'flex', gap: '4px' } },
-                      efforts.map((ef) =>
+                      { style: { display: 'flex', alignItems: 'center', gap: '10px', minWidth: 0, flex: 1 } },
+                      md.icon,
+                      h(
+                        'div',
+                        { style: { minWidth: 0, flex: 1 } },
                         h(
-                          'button',
-                          {
-                            key: ef.id,
-                            type: 'button',
-                            title: ef.desc,
-                            onClick: (ev) => {
-                              ev.stopPropagation();
-                              updateHarnessPrefs(activeHarness, { effort: ef.id });
-                            },
-                            style: {
-                              flex: 1,
-                              padding: '5px 4px',
-                              borderRadius: '7px',
-                              border: ef.id === curEffort ? '1px solid ' + meta.accentBorder : '1px solid rgba(255,255,255,0.08)',
-                              background: ef.id === curEffort ? meta.accentBg : 'rgba(255,255,255,0.04)',
-                              color: ef.id === curEffort ? meta.accent : '#d4d4d8',
-                              fontSize: '11.5px',
-                              fontWeight: ef.id === curEffort ? 600 : 400,
-                              cursor: 'pointer',
-                            },
-                          },
-                          ef.label,
+                          'div',
+                          { style: { display: 'flex', alignItems: 'center', gap: '6px', fontSize: '12.5px', fontWeight: isSel ? 500 : 400, color: '#e4e4e7', lineHeight: '17px' } },
+                          md.label,
+                          md.badge ? pillBadge(md.badge, md.info) : null,
+                        ),
+                        h(
+                          'div',
+                          { style: { fontSize: '11.5px', color: '#7c7c86', lineHeight: '16px', marginTop: '1px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' } },
+                          md.desc,
                         ),
                       ),
                     ),
-                  )
-                : null,
-            ];
-          } else if (composerPopover.kind === 'mode') {
-            panelWidth = 256;
-            const defaultModesByHarness = {
-              antigravity: [
-                { id: 'auto', label: '极速', desc: 'Fast · 自动执行常规操作' },
-                { id: 'plan', label: '规划', desc: 'Planning · 先拆解方案再执行' },
-                { id: 'accept-edits', label: '自动编辑', desc: 'Accept Edits · 自动写入代码修改' },
-              ],
-              codex: [
-                { id: 'danger-full-access', label: '完全访问', desc: '无沙箱限制，直接读写与执行' },
-                { id: 'workspace-write', label: '工作区写入', desc: '仅允许在当前工作区目录写入' },
-                { id: 'read-only', label: '只读模式', desc: '只读分析，不修改任何文件' },
-              ],
-              claude_code: [
-                { id: 'auto', label: '自动', desc: '智能自动执行并拦截高危操作' },
-                { id: 'acceptEdits', label: '自动编辑', desc: '自动允许文件编辑' },
-                { id: 'plan', label: '仅规划', desc: '只读分析与规划，不修改文件' },
-                { id: 'dontAsk', label: '免询问', desc: '免交互确认提示' },
-              ],
-            };
-            const modes =
-              Array.isArray(opts.modes) && opts.modes.length > 0
-                ? opts.modes
-                : defaultModesByHarness[activeHarness] || [];
-            const curMode = prefs.mode || opts.defaultMode || (modes[0] && modes[0].id) || '';
-            content = [
-              h(
-                'div',
-                { key: 'hdr-mode', style: { fontSize: '11.5px', color: 'rgba(209,213,219,0.52)', padding: '3px 10px 5px', fontWeight: 500 } },
-                activeHarness === 'codex' ? '沙箱权限' : '执行模式',
-              ),
-              ...modes.map((md) =>
-                rowBtn('md-' + md.id, HARNESS_SDK_ICONS.shield(md.id === curMode ? meta.accent : '#9ca3af'), md.label, md.desc, md.id === curMode, () => {
-                  updateHarnessPrefs(activeHarness, { mode: md.id });
-                  setComposerPopover(null);
+                    isSel ? POP_ICONS.check('#e4e4e7', 13) : null,
+                  );
                 }),
-              ),
-            ];
+              ];
+            } else if (activeHarness === 'codex') {
+              // 1:1 Codex Desktop `应如何批准 ChatGPT 操作?` permissions menu mapped to Codex app-server
+              panelWidth = 348;
+              const cxModes = [
+                { id: 'request-approval', label: '请求批准', desc: '编辑外部文件和使用互联网时始终询问', icon: POP_ICONS.handStop('#d4d4d4', 17), danger: false },
+                { id: 'help-approve', label: '帮我批准', desc: '仅对检测到的风险操作请求批准', icon: POP_ICONS.shieldTerm('#d4d4d4', 17), danger: false },
+                { id: 'danger-full-access', label: '完全访问权限', desc: '可不受限制地访问互联网和你电脑上的任何文件', icon: POP_ICONS.shieldAlert('#d96b27', 17), danger: true },
+              ];
+              const curMode = prefs.mode || opts.defaultMode || 'danger-full-access';
+              content = [
+                h(
+                  'div',
+                  {
+                    key: 'hdr-cxp',
+                    style: {
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'space-between',
+                      padding: '4px 10px 6px',
+                      fontSize: '12px',
+                      color: '#9a9a9a',
+                    },
+                  },
+                  h('span', null, '应如何批准 ChatGPT 操作?'),
+                  h('span', { style: { textDecoration: 'underline', color: '#9a9a9a', cursor: 'default' } }, '了解更多'),
+                ),
+                ...cxModes.map((md) => {
+                  const isSel = md.id === curMode;
+                  const titleColor = md.danger ? '#d96b27' : '#ededed';
+                  const subColor = md.danger ? '#b85b22' : '#8f8f8f';
+                  return h(
+                    'button',
+                    {
+                      key: 'cxp-' + md.id,
+                      type: 'button',
+                      'data-dsb-pop-row': '1',
+                      onClick: (ev) => {
+                        ev.stopPropagation();
+                        updateHarnessPrefs('codex', { mode: md.id });
+                        setComposerPopover(null);
+                      },
+                      style: {
+                        width: '100%',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'space-between',
+                        gap: '10px',
+                        padding: '6px 10px',
+                        borderRadius: '10px',
+                        border: 'none',
+                        background: 'transparent',
+                        cursor: 'pointer',
+                        textAlign: 'left',
+                        boxSizing: 'border-box',
+                      },
+                    },
+                    h(
+                      'div',
+                      { style: { display: 'flex', alignItems: 'center', gap: '11px', minWidth: 0, flex: 1 } },
+                      md.icon,
+                      h(
+                        'div',
+                        { style: { minWidth: 0, flex: 1 } },
+                        h('div', { style: { fontSize: '13px', fontWeight: 500, color: titleColor, lineHeight: '18px', whiteSpace: 'nowrap' } }, md.label),
+                        h('div', { style: { fontSize: '11.5px', color: subColor, lineHeight: '16px', marginTop: '1px', whiteSpace: 'nowrap' } }, md.desc),
+                      ),
+                    ),
+                    isSel ? POP_ICONS.check(md.danger ? '#d96b27' : '#ededed', 14) : null,
+                  );
+                }),
+              ];
+            } else {
+              panelWidth = 256;
+              const modes =
+                Array.isArray(opts.modes) && opts.modes.length > 0
+                  ? opts.modes
+                  : [
+                      { id: 'auto', label: '自动', desc: '智能自动执行并拦截高危操作' },
+                      { id: 'acceptEdits', label: '自动编辑', desc: '自动允许文件编辑' },
+                      { id: 'plan', label: '仅规划', desc: '只读分析与规划，不修改文件' },
+                      { id: 'dontAsk', label: '免询问', desc: '免交互确认提示' },
+                    ];
+              const curMode = prefs.mode || opts.defaultMode || (modes[0] && modes[0].id) || '';
+              content = [
+                h('div', { key: 'hdr-mode', style: { fontSize: '11.5px', color: 'rgba(209,213,219,0.52)', padding: '3px 10px 5px', fontWeight: 500 } }, '执行模式'),
+                ...modes.map((md) =>
+                  rowBtn('md-' + md.id, HARNESS_SDK_ICONS.shield(md.id === curMode ? meta.accent : '#9ca3af'), md.label, md.desc, md.id === curMode, () => {
+                    updateHarnessPrefs(activeHarness, { mode: md.id });
+                    setComposerPopover(null);
+                  }),
+                ),
+              ];
+            }
           }
 
           const isFullWidth = Boolean(composerPopover.fullWidth || isCodexPlus);
           const clampedLeft = isFullWidth
             ? 0
             : Math.max(8, Math.min(window.innerWidth - panelWidth - 8, composerPopover.left));
+          const isAgAny = activeHarness === 'antigravity';
           const pop = h(
             'div',
             {
@@ -6194,16 +6731,16 @@ window.__ModuleLoader__.load({
                 right: isFullWidth ? '0px' : 'auto',
                 bottom: composerPopover.bottom + 'px',
                 width: isFullWidth ? '100vw' : panelWidth + 'px',
-                maxHeight: isCodexPlus ? '410px' : '340px',
+                maxHeight: isCodexPlus ? '410px' : isAgAny ? '360px' : '340px',
                 overflowY: 'auto',
                 background: panelBg,
                 border: '1px solid ' + panelBorder,
-                borderRadius: isCodexPlus ? '18px' : '14px',
-                padding: isCodexPlus ? '10px 8px' : isAgPlus ? '8px 6px' : '7px 6px',
+                borderRadius: isCodexPlus ? '18px' : isAgAny ? '10px' : activeHarness === 'codex' ? '16px' : '14px',
+                padding: isCodexPlus ? '10px 8px' : isAgAny ? '4px' : activeHarness === 'codex' ? '8px' : '7px 6px',
                 boxShadow: '0 16px 42px rgba(0, 0, 0, 0.58)',
                 zIndex: 9999,
                 boxSizing: 'border-box',
-                fontFamily: '"Segoe UI", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif',
+                fontFamily: '"Segoe UI", "Inter", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif',
               },
             },
             content,
