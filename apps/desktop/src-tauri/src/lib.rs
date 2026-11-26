@@ -13,6 +13,7 @@ pub mod mcp_sidecar;
 pub mod ntfs_usn;
 pub mod pick;
 pub mod plugin_sync;
+pub mod process_guard;
 pub mod search;
 pub mod state;
 pub mod tray;
@@ -217,6 +218,23 @@ impl CliOptions {
             i += 1;
         }
         out
+    }
+
+    pub fn is_direct_exe_launch(&self) -> bool {
+        self.broker_pipe.is_none()
+            && self.hook_event.is_none()
+            && !self.mcp_sidecar
+            && !self.antigravity_sidecar
+            && !self.ensure_running
+            && !self.install_plugins
+            && !self.uninstall_plugins
+            && self.dev_state.is_none()
+            && !self.dev_dump
+            && !self.dev_single_ctrl_close
+            && self.dev_draft.is_none()
+            && self.dev_pick_tap.is_none()
+            && self.dev_pick_stroke.is_none()
+            && self.dev_pick_lasso.is_none()
     }
 }
 
@@ -2129,6 +2147,24 @@ pub fn run() {
         std::process::id(),
         elevation::is_elevated()
     );
+
+    // When the user directly double-clicks the EXE, automatically detect and terminate any
+    // residual/stuck Bar, broker, or orphaned sidecar processes before acquiring single-instance.
+    if cli.is_direct_exe_launch() {
+        let report = process_guard::cleanup_stale_processes_on_direct_launch();
+        if report.total_killed() > 0 {
+            cursor::restore_system_cursors();
+            log::info!(
+                "Direct EXE launch cleaned {} residual process(es) (bar={}, broker={}, orphan_sidecar={}, webview={}; kept_live_sidecars={})",
+                report.total_killed(),
+                report.killed_bar,
+                report.killed_broker,
+                report.killed_orphan_sidecar,
+                report.killed_webview,
+                report.kept_live_sidecar,
+            );
+        }
+    }
 
     // Ensure our single built-in DSH companion plugin (@local/anything-to-prompt) is synced into ~/.dsh/profiles/web
     let _ = plugin_sync::ensure_dsh_plugin_synced();

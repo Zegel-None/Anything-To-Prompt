@@ -1,6 +1,6 @@
 [package]
 name = "anything-to-prompt"
-version = "0.7.2"
+version = "0.7.3"
 description = "Anything-to-Prompt — Pick anything on your Windows desktop, straight into your AI prompt"
 authors = ["Anything-to-Prompt Contributors"]
 edition = "2021"
@@ -29,6 +29,7 @@ nucleo-matcher = "0.3"
 pinyin = "0.10"
 rusqlite = { version = "0.32", features = ["bundled"] }
 uiautomation = "0.25.3"
+sysinfo = { version = "0.40.4", default-features = false, features = ["system"] }
 wmi = "0.18.4"
 
 [target.'cfg(windows)'.dependencies]
