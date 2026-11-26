@@ -1599,8 +1599,24 @@ window.__ModuleLoader__.load({
         '  overflow: hidden !important;',
         '  background: transparent !important;',
         '}',
-        'html[data-dsh-bar-clone="1"] body *:not(:has([data-composer-seat])):not([data-composer-seat]):not([data-composer-seat] *):not([data-dsb-popup]):not([data-dsb-popup] *):not([role="menu"]):not([role="menu"] *):not([role="listbox"]):not([role="listbox"] *):not([role="dialog"]):not([role="dialog"] *):not([data-radix-popper-content-wrapper]):not([data-radix-popper-content-wrapper] *):not([data-floating-ui-portal]):not([data-floating-ui-portal] *):not([data-popover]):not([data-popover] *):not([data-dsw-popover]):not([data-dsw-popover] *) {',
+        'html[data-dsh-bar-clone="1"] body *:not(:has([data-composer-seat])):not([data-composer-seat]):not([data-composer-seat] *):not([data-dsb-popup]):not([data-dsb-popup] *):not([role="menu"]):not([role="menu"] *):not(:has([role="menu"])):not([role="listbox"]):not([role="listbox"] *):not(:has([role="listbox"])):not([role="dialog"]):not([role="dialog"] *):not(:has([role="dialog"])):not([role="alertdialog"]):not([role="alertdialog"] *):not(:has([role="alertdialog"])):not([aria-modal="true"]):not([aria-modal="true"] *):not(:has([aria-modal="true"])):not([role="tooltip"]):not([role="tooltip"] *):not(:has([role="tooltip"])):not([id$="-menu"]):not([id$="-menu"] *):not(:has([id$="-menu"])):not(body > [role="group"]):not(body > [role="group"] *):not(body > [role="status"]):not(body > [role="status"] *):not(body > [style*="position-anchor"]):not(body > [style*="position-anchor"] *):not([data-radix-popper-content-wrapper]):not([data-radix-popper-content-wrapper] *):not([data-floating-ui-portal]):not([data-floating-ui-portal] *):not([data-popover]):not([data-popover] *):not([data-dsw-popover]):not([data-dsw-popover] *) {',
         '  display: none !important;',
+        '}',
+        'html[data-dsh-bar-clone="1"] body > [role="menu"],',
+        'html[data-dsh-bar-clone="1"] body > [role="listbox"],',
+        'html[data-dsh-bar-clone="1"] body > [role="dialog"],',
+        'html[data-dsh-bar-clone="1"] body > [role="alertdialog"],',
+        'html[data-dsh-bar-clone="1"] body > [role="group"],',
+        'html[data-dsh-bar-clone="1"] body > [role="tooltip"],',
+        'html[data-dsh-bar-clone="1"] body > [id$="-menu"],',
+        'html[data-dsh-bar-clone="1"] body > [style*="position-anchor"],',
+        'html[data-dsh-bar-clone="1"] body > :not(:has([data-composer-seat])):has([role="dialog"]),',
+        'html[data-dsh-bar-clone="1"] body > :not(:has([data-composer-seat])):has([role="alertdialog"]),',
+        'html[data-dsh-bar-clone="1"] body > :not(:has([data-composer-seat])):has([aria-modal="true"]),',
+        'html[data-dsh-bar-clone="1"] [role="dialog"],',
+        'html[data-dsh-bar-clone="1"] [role="alertdialog"],',
+        'html[data-dsh-bar-clone="1"] [aria-modal="true"] {',
+        '  z-index: 9990 !important;',
         '}',
         'html[data-dsh-bar-clone="1"] body *:has([data-composer-seat]) {',
         '  margin: 0 !important;',
@@ -3473,7 +3489,9 @@ window.__ModuleLoader__.load({
               return;
             }
             const hasNativeMenu = Boolean(
-              document.querySelector('[data-composer-overlay], [role="menu"], [role="listbox"], [role="dialog"], [data-radix-popper-content-wrapper], [data-floating-ui-portal]'),
+              document.querySelector(
+                '[data-composer-overlay], [data-conversation-composer-overlay], [role="menu"], [role="listbox"], [role="dialog"], [role="alertdialog"], [aria-modal="true"], [id$="-menu"], body > [role="group"], body > [style*="position-anchor"], [data-radix-popper-content-wrapper], [data-floating-ui-portal]',
+              ),
             );
             if (dsbRuntime.popupOpen || dsbRuntime.quickSearchOpen || dsbRuntime.modalOpen || hasNativeMenu) return;
             e.preventDefault();
@@ -3633,9 +3651,9 @@ window.__ModuleLoader__.load({
             targetHeight = Math.max(COLLAPSED_LIP_PX, baseSpan + detachedTop);
           }
 
-          // 5. All open popups (Harness 3-level switcher, composer +/model/mode menus, AND DSH native +///@ popups!)
+          // 5. All open popups, submenus, modals, tooltips, and goal/command overlays across ATP & DSH
           const popupEls = document.querySelectorAll(
-            '[data-dsb-popup], [data-trigger-menu], [data-composer-overlay]:not(:has([data-trigger-menu])), [role="menu"], [role="listbox"], [role="dialog"], [data-radix-popper-content-wrapper], [data-floating-ui-portal], [data-popover], [data-dsw-popover]',
+            '[data-dsb-popup], [data-trigger-menu], [data-goal-bar], [data-composer-overlay]:not(:has([data-trigger-menu])), [data-conversation-composer-overlay]:not(:has([data-trigger-menu])), [role="menu"], [role="listbox"], [role="dialog"], [role="alertdialog"], [aria-modal="true"], [role="tooltip"], [id$="-menu"], body > [role="group"], body > [style*="position-anchor"], [data-radix-popper-content-wrapper], [data-floating-ui-portal], [data-popover], [data-dsw-popover]',
           );
           for (const el of popupEls) {
             if (!(el instanceof HTMLElement)) continue;
