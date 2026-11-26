@@ -22,7 +22,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
     GetWindowLongPtrW, GetWindowRect, GetWindowThreadProcessId, IsWindowVisible,
     SetForegroundWindow, SetWindowDisplayAffinity, SetWindowLongPtrW, SetWindowPos, ShowWindow,
     WindowFromPoint, GA_ROOT, GWL_EXSTYLE, GWL_STYLE, HWND_TOPMOST, SC_KEYMENU, STYLESTRUCT,
-    SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SW_HIDE, SW_SHOW,
+    SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOCOPYBITS, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SW_HIDE,
+    SW_SHOW,
     SW_SHOWNOACTIVATE, WDA_EXCLUDEFROMCAPTURE, WDA_NONE, WINDOWPOS, WINDOW_DISPLAY_AFFINITY,
     WM_NCACTIVATE, WM_NCCALCSIZE, WM_NCDESTROY, WM_NCPAINT, WM_STYLECHANGING, WM_SYSCOMMAND,
     WM_WINDOWPOSCHANGING, WS_BORDER, WS_CAPTION, WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_DLGFRAME,
@@ -520,6 +521,9 @@ pub fn apply_capture_affinity(hwnd: HWND, exclude: bool) {
     }
 }
 
+type ScaledRgnKey = (i32, i32, Vec<(i32, i32, i32, i32, i32)>);
+static LAST_BAR_RGN_KEY: Mutex<Option<ScaledRgnKey>> = Mutex::new(None);
+
 /// Positions Bar anchored to the bottom of the cursor's monitor work area and clips
 /// its Win32 hit-test/paint region to the exact union of `shapes` (24px rounded slab + popups).
 pub fn apply_bar_layout(
@@ -561,6 +565,13 @@ pub fn apply_bar_layout(
         )
     };
 
+    let scaled_shapes: Vec<(i32, i32, i32, i32, i32)> = shapes
+        .iter()
+        .filter(|s| s.w > 2 && s.h > 2)
+        .map(|s| scale_shape_to_phys(s, scale))
+        .collect();
+    let rgn_key: ScaledRgnKey = (phys_w, phys_h, scaled_shapes.clone());
+
     unsafe {
         let overlay_vis = visible_overlay_hwnd();
         let already_topmost = (GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as u32 & WS_EX_TOPMOST.0) != 0;
@@ -570,10 +581,13 @@ pub fn apply_bar_layout(
             && cur_rc.top == y
             && (cur_rc.right - cur_rc.left) == phys_w
             && (cur_rc.bottom - cur_rc.top) == phys_h;
+        let pos_changed = !same_rect;
+
         if overlay_vis.is_none() && already_topmost {
-            if !same_rect {
+            if pos_changed {
                 // Preserve existing topmost Z-order without fighting floating voice-input capsules
-                // (Chatterfly, LogiVoice) or IME candidate windows on every resize/layout report!
+                // (Chatterfly, LogiVoice) or IME candidate windows; SWP_NOCOPYBITS prevents Windows
+                // from copying old top-left pixels upward when growing bottom-anchored Bar height.
                 let _ = SetWindowPos(
                     hwnd,
                     None,
@@ -581,11 +595,15 @@ pub fn apply_bar_layout(
                     y,
                     phys_w,
                     phys_h,
-                    SWP_NOZORDER | SWP_NOACTIVATE,
+                    SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOCOPYBITS,
                 );
             }
         } else {
             let insert_after = overlay_vis.unwrap_or(HWND_TOPMOST);
+            let mut flags = SWP_NOACTIVATE;
+            if pos_changed {
+                flags |= SWP_NOCOPYBITS;
+            }
             let _ = SetWindowPos(
                 hwnd,
                 Some(insert_after),
@@ -593,37 +611,48 @@ pub fn apply_bar_layout(
                 y,
                 phys_w,
                 phys_h,
-                SWP_NOACTIVATE,
+                flags,
             );
         }
 
-        let master_rgn: HRGN = if shapes.is_empty() {
-            let diam = (48.0 * scale).round() as i32;
-            CreateRoundRectRgn(0, 0, phys_w + 1, phys_h + 1, diam, diam)
-        } else {
-            let mut acc: Option<HRGN> = None;
-            for s in shapes {
-                if s.w <= 2 || s.h <= 2 {
-                    continue;
-                }
-                let (l, t, r, b, diam) = scale_shape_to_phys(s, scale);
-                // CreateRoundRectRgn excludes right/bottom edge by 1px in GDI, so +1 keeps exact border
-                let part = CreateRoundRectRgn(l, t, r + 1, b + 1, diam, diam);
-                if let Some(existing) = acc {
-                    let _ = CombineRgn(Some(existing), Some(existing), Some(part), RGN_OR);
-                    let _ = DeleteObject(part.into());
+        let rgn_changed = LAST_BAR_RGN_KEY
+            .lock()
+            .map(|mut slot| {
+                if slot.as_ref() == Some(&rgn_key) {
+                    false
                 } else {
-                    acc = Some(part);
+                    *slot = Some(rgn_key);
+                    true
                 }
-            }
-            acc.unwrap_or_else(|| {
+            })
+            .unwrap_or(true);
+
+        if rgn_changed {
+            let master_rgn: HRGN = if scaled_shapes.is_empty() {
                 let diam = (48.0 * scale).round() as i32;
                 CreateRoundRectRgn(0, 0, phys_w + 1, phys_h + 1, diam, diam)
-            })
-        };
+            } else {
+                let mut acc: Option<HRGN> = None;
+                for &(l, t, r, b, diam) in &scaled_shapes {
+                    // CreateRoundRectRgn excludes right/bottom edge by 1px in GDI, so +1 keeps exact border
+                    let part = CreateRoundRectRgn(l, t, r + 1, b + 1, diam, diam);
+                    if let Some(existing) = acc {
+                        let _ = CombineRgn(Some(existing), Some(existing), Some(part), RGN_OR);
+                        let _ = DeleteObject(part.into());
+                    } else {
+                        acc = Some(part);
+                    }
+                }
+                acc.unwrap_or_else(|| {
+                    let diam = (48.0 * scale).round() as i32;
+                    CreateRoundRectRgn(0, 0, phys_w + 1, phys_h + 1, diam, diam)
+                })
+            };
 
-        // Note: Windows takes ownership of `master_rgn` on success; do NOT DeleteObject it!
-        let _ = SetWindowRgn(hwnd, Some(master_rgn), true);
+            // Note: Windows takes ownership of `master_rgn` on success; do NOT DeleteObject it!
+            // Pass bRedraw=false during resize so DWM/DirectComposition composites cleanly without GDI flash.
+            let _ = SetWindowRgn(hwnd, Some(master_rgn), !pos_changed);
+        }
     }
 }
 

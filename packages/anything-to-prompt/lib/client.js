@@ -1567,6 +1567,10 @@ window.__ModuleLoader__.load({
         '  0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--atp-accent, #4D6BFE) 52%, transparent); opacity: 1; }',
         '  50% { box-shadow: 0 0 0 5px transparent; opacity: 0.85; }',
         '}',
+        '@keyframes dsbFloatReveal {',
+        '  0%   { opacity: 0; transform: translateY(6px) scale(0.988); }',
+        '  100% { opacity: 1; transform: translateY(0) scale(1); }',
+        '}',
         '[data-dsb-drag-handle="1"]:hover > span:first-child {',
         '  background: rgba(226, 232, 240, 0.78) !important;',
         '  width: 46px !important;',
@@ -2908,6 +2912,8 @@ window.__ModuleLoader__.load({
         const sketchColorRef = useRef('#38bdf8');
         const [sketchColor, setSketchColor] = useState('#38bdf8');
         const hoverPeekTimerRef = useRef(null);
+        const hoverPeekCloseTimerRef = useRef(null);
+        const hoverPeekGuardUntilRef = useRef(0);
         const lastKnownAsstRef = useRef({ sessionKey: '', asstId: '' });
         const [expandedHeight, setExpandedHeight] = useState(() =>
           readStoredNumber(STORAGE_KEY_HEIGHT, DEFAULT_EXPANDED_PX, MIN_EXPANDED_PX, MAX_EXPANDED_PX),
@@ -4344,24 +4350,47 @@ window.__ModuleLoader__.load({
         }, []);
 
         const handleHandleMouseEnter = useCallback(() => {
+          if (hoverPeekCloseTimerRef.current) {
+            clearTimeout(hoverPeekCloseTimerRef.current);
+            hoverPeekCloseTimerRef.current = null;
+          }
           if (!IS_BAR || barMode === 'lip' || isExpanded || (dsbRuntime.unreadCount || 0) > 0) return;
           if (!latestSingleLine) return;
+          if (hoverPeek) return;
           if (hoverPeekTimerRef.current) clearTimeout(hoverPeekTimerRef.current);
           hoverPeekTimerRef.current = setTimeout(() => {
+            hoverPeekTimerRef.current = null;
+            // Guard against transient mouseleave emitted by Chromium during the 1-2 frames
+            // when SetWindowPos grows the Win32 Bar upward for the floating peek card.
+            hoverPeekGuardUntilRef.current = performance.now() + 450;
             setHoverPeek(true);
-            scheduleLayoutReport(220);
-          }, 240);
-        }, [barMode, isExpanded, latestSingleLine, scheduleLayoutReport]);
+            scheduleLayoutReport(100);
+          }, 220);
+        }, [barMode, isExpanded, hoverPeek, latestSingleLine, scheduleLayoutReport]);
 
         const handleHandleMouseLeave = useCallback(() => {
           if (hoverPeekTimerRef.current) {
             clearTimeout(hoverPeekTimerRef.current);
             hoverPeekTimerRef.current = null;
           }
-          setHoverPeek((prev) => {
-            if (prev) scheduleLayoutReport(180);
-            return false;
-          });
+          if (hoverPeekCloseTimerRef.current) {
+            clearTimeout(hoverPeekCloseTimerRef.current);
+            hoverPeekCloseTimerRef.current = null;
+          }
+          const delayMs = performance.now() < hoverPeekGuardUntilRef.current ? 320 : 180;
+          hoverPeekCloseTimerRef.current = setTimeout(() => {
+            hoverPeekCloseTimerRef.current = null;
+            if (
+              typeof document !== 'undefined' &&
+              document.querySelector('[data-dsb-drag-handle="1"]:hover, [data-dsb-floating-peek="1"]:hover')
+            ) {
+              return;
+            }
+            setHoverPeek((prev) => {
+              if (prev) scheduleLayoutReport(100);
+              return false;
+            });
+          }, delayMs);
         }, [scheduleLayoutReport]);
 
         const renderDragHandle = (extraStyle) => {
@@ -6400,7 +6429,11 @@ window.__ModuleLoader__.load({
                     overflow: 'hidden',
                     boxSizing: 'border-box',
                     pointerEvents: 'auto',
-                    transition: isResizingHeightRef.current
+                    animation: IS_BAR && isExpanded && !isResizingHeightRef.current
+                      ? 'dsbFloatReveal 170ms cubic-bezier(0.22, 1, 0.36, 1) both'
+                      : 'none',
+                    willChange: IS_BAR && isExpanded ? 'transform, opacity' : 'auto',
+                    transition: IS_BAR || isResizingHeightRef.current
                       ? 'none'
                       : 'height 0.22s cubic-bezier(0.22, 1, 0.36, 1), box-shadow 0.2s ease',
                   },
@@ -6868,6 +6901,8 @@ window.__ModuleLoader__.load({
                           color: t.fg,
                           fontSize: '12px',
                           cursor: 'pointer',
+                          animation: 'dsbFloatReveal 170ms cubic-bezier(0.22, 1, 0.36, 1) both',
+                          willChange: 'transform, opacity',
                           transition: 'background 180ms ease, border-color 180ms ease, color 180ms ease',
                           fontFamily: '"Segoe UI", "Inter", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif',
                         },
@@ -6951,7 +6986,15 @@ window.__ModuleLoader__.load({
                         'div',
                         {
                           'data-dsb-floating-peek': '1',
+                          onMouseEnter: handleHandleMouseEnter,
+                          onMouseLeave: handleHandleMouseLeave,
+                          onClick: () => {
+                            setHoverPeek(false);
+                            toggleHistorySheet();
+                          },
                           style: {
+                            pointerEvents: 'auto',
+                            cursor: 'pointer',
                             position: 'relative',
                             overflow: 'hidden',
                             padding: '9px 14px',
@@ -6962,6 +7005,8 @@ window.__ModuleLoader__.load({
                             color: t.fg,
                             fontSize: '12.5px',
                             lineHeight: '18px',
+                            animation: 'dsbFloatReveal 170ms cubic-bezier(0.22, 1, 0.36, 1) both',
+                            willChange: 'transform, opacity',
                             transition: 'background 180ms ease, border-color 180ms ease, color 180ms ease',
                             fontFamily: '"Segoe UI", "Inter", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif',
                           },
