@@ -1270,6 +1270,12 @@ pub fn handle_pipe_control_command(app: &AppHandle, action: &str, _arg: Option<&
                 );
             }
         }
+        "reload_bar" => {
+            let _ = plugin_sync::ensure_dsh_plugin_synced();
+            if let Some(bar_win) = app.get_webview_window("bar") {
+                let _ = bar_win.eval("window.location.reload();");
+            }
+        }
         "open_settings" => {
             dispatch_state_event(app, StateEvent::DoubleCtrlOpen);
             if let Some(bar_win) = app.get_webview_window("bar") {

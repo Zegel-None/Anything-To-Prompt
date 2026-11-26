@@ -3029,7 +3029,22 @@ window.__ModuleLoader__.load({
         }, [liveDraft, sessionId, dsbRuntime.activeHarness, (dsbRuntime.extCapsules || []).length]);
 
         useEffect(() => {
+          const dismissNativeTriggerMenu = () => {
+            if (typeof document === 'undefined' || !document.body) return false;
+            if (!document.querySelector('[data-trigger-menu]')) return false;
+            try {
+              const Ev = typeof PointerEvent === 'function' ? PointerEvent : MouseEvent;
+              document.body.dispatchEvent(new Ev('pointerdown', { bubbles: true, cancelable: true }));
+              if (typeof dsbRuntime.scheduleLayoutReport === 'function') {
+                dsbRuntime.scheduleLayoutReport(220);
+              }
+              return true;
+            } catch {
+              return false;
+            }
+          };
           const resetTransientUi = () => {
+            dismissNativeTriggerMenu();
             setComposerPopover(null);
             setHoverPeek(false);
             setHovered(false);
@@ -3390,32 +3405,85 @@ window.__ModuleLoader__.load({
           };
         }, [hovered, pinned]);
 
-        // Esc keydown capture & composer pointerdown in Bar mode
+        // Esc keydown capture, native + trigger-menu toggle/dismiss, & composer pointerdown in Bar mode
         useEffect(() => {
           if (!IS_BAR || typeof document === 'undefined') return undefined;
+          const dismissNativeTriggerMenu = () => {
+            if (!document.body || !document.querySelector('[data-trigger-menu]')) return false;
+            try {
+              const Ev = typeof PointerEvent === 'function' ? PointerEvent : MouseEvent;
+              document.body.dispatchEvent(new Ev('pointerdown', { bubbles: true, cancelable: true }));
+              if (typeof dsbRuntime.scheduleLayoutReport === 'function') {
+                dsbRuntime.scheduleLayoutReport(220);
+              }
+              return true;
+            } catch {
+              return false;
+            }
+          };
           const onKeyDownCapture = (e) => {
             if (e.key !== 'Escape' || e.isComposing) return;
+            // Always allow Esc to close DSH's native '+' / trigger menu even when focus sits on the '+' button
+            if (document.querySelector('[data-trigger-menu]')) {
+              e.preventDefault();
+              e.stopPropagation();
+              dismissNativeTriggerMenu();
+              return;
+            }
             const hasNativeMenu = Boolean(
-              document.querySelector('[data-trigger-menu], [data-composer-overlay], [role="menu"], [role="listbox"], [role="dialog"], [data-radix-popper-content-wrapper], [data-floating-ui-portal]'),
+              document.querySelector('[data-composer-overlay], [role="menu"], [role="listbox"], [role="dialog"], [data-radix-popper-content-wrapper], [data-floating-ui-portal]'),
             );
             if (dsbRuntime.popupOpen || dsbRuntime.quickSearchOpen || dsbRuntime.modalOpen || hasNativeMenu) return;
             e.preventDefault();
             e.stopPropagation();
             sendBarReport({ kind: 'step_down' });
           };
+          const onClickCapture = (e) => {
+            if (dsbRuntime.activeHarness !== 'dsh') return;
+            if (!document.querySelector('[data-trigger-menu]')) return;
+            const target = e.target;
+            if (!(target instanceof Element)) return;
+            if (target.closest('[data-trigger-menu]')) return;
+            // Re-clicking the native '+' button always toggles the open trigger menu closed
+            // (works around DSH's InputTriggerController.track() clearing `launcher` to null after open)
+            const plusBtn = target.closest('[data-composer-card] button[aria-haspopup="listbox"]');
+            if (plusBtn && !plusBtn.hasAttribute('data-dsb-session-chip')) {
+              e.preventDefault();
+              e.stopPropagation();
+              if (typeof e.stopImmediatePropagation === 'function') {
+                e.stopImmediatePropagation();
+              }
+              dismissNativeTriggerMenu();
+            }
+          };
           const onPointerDownCapture = (e) => {
+            const target = e.target;
             const composerEl =
               dsbRuntime.activeHarness !== 'dsh'
                 ? document.querySelector('[data-dsb-external-composer]')
                 : document.querySelector('[data-composer-card]');
-            if (composerEl && e.target instanceof Node && composerEl.contains(e.target)) {
+            if (composerEl && target instanceof Node && composerEl.contains(target)) {
               sendBarReport({ kind: 'composer_pointerdown' });
+              // Clicking the composer editor or other toolbar buttons while '+' menu is open
+              // (when not actively typing a / or @ trigger token) cleanly dismisses the '+' menu.
+              if (
+                dsbRuntime.activeHarness === 'dsh' &&
+                document.querySelector('[data-trigger-menu]') &&
+                target instanceof Element &&
+                !target.closest('[data-trigger-menu]') &&
+                !target.closest('button[aria-haspopup="listbox"]') &&
+                !/(?:^|\s)[/@][^\s]*$/.test(String(dsbRuntime.liveDraft || ''))
+              ) {
+                dismissNativeTriggerMenu();
+              }
             }
           };
           document.addEventListener('keydown', onKeyDownCapture, true);
+          document.addEventListener('click', onClickCapture, true);
           document.addEventListener('pointerdown', onPointerDownCapture, true);
           return () => {
             document.removeEventListener('keydown', onKeyDownCapture, true);
+            document.removeEventListener('click', onClickCapture, true);
             document.removeEventListener('pointerdown', onPointerDownCapture, true);
           };
         }, []);
