@@ -171,6 +171,19 @@ pub struct HarnessSessionStats {
     pub summary_markdown: String,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HarnessSessionState {
+    pub harness: String,
+    pub session_id: String,
+    pub model: Option<String>,
+    pub effort: Option<String>,
+    pub mode: Option<String>,
+    pub plan_mode: Option<bool>,
+    pub read_only_in_desktop: bool,
+    pub source_note: String,
+}
+
 static ACTIVE_TURN_PIDS: OnceLock<Mutex<HashMap<String, u32>>> = OnceLock::new();
 static ACTIVE_SIDECAR_CANCELS: OnceLock<Mutex<HashMap<String, Arc<AtomicBool>>>> = OnceLock::new();
 
@@ -3020,6 +3033,452 @@ pub fn load_session_stats(kind: HarnessKind, session_id: &str) -> HarnessSession
     }
 }
 
+fn read_file_tail_utf8(path: &Path, max_bytes: usize) -> Option<String> {
+    use std::io::{Read as _, Seek as _, SeekFrom};
+    let mut file = fs::File::open(path).ok()?;
+    let len = file.metadata().ok()?.len();
+    let take = (len as usize).min(max_bytes);
+    if len > take as u64 {
+        file.seek(SeekFrom::End(-(take as i64))).ok()?;
+    }
+    let mut buf = Vec::with_capacity(take);
+    file.read_to_end(&mut buf).ok()?;
+    let text = String::from_utf8_lossy(&buf).into_owned();
+    if len > take as u64 {
+        if let Some(pos) = text.find('\n') {
+            return Some(text[pos + 1..].to_string());
+        }
+    }
+    Some(text)
+}
+
+pub fn parse_antigravity_model_and_effort(raw_model: &str) -> (Option<String>, Option<String>) {
+    let trimmed = raw_model.trim();
+    if trimmed.is_empty() {
+        return (None, None);
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    if lower.starts_with("gemini-pro-orchestrator") {
+        return (Some(trimmed.to_string()), None);
+    }
+    if lower.starts_with("gpt-oss-") {
+        let effort = if lower.ends_with("-low") {
+            Some("low".to_string())
+        } else if lower.ends_with("-high") {
+            Some("high".to_string())
+        } else {
+            Some("medium".to_string())
+        };
+        return (Some(trimmed.to_string()), effort);
+    }
+
+    let (base, effort) = if let Some(b) = lower.strip_suffix("-xhigh") {
+        (b, Some("xhigh".to_string()))
+    } else if let Some(b) = lower.strip_suffix("-high") {
+        (b, Some("high".to_string()))
+    } else if let Some(b) = lower.strip_suffix("-medium") {
+        (b, Some("medium".to_string()))
+    } else if let Some(b) = lower.strip_suffix("-low") {
+        (b, Some("low".to_string()))
+    } else {
+        (lower.as_str(), None)
+    };
+
+    // Map family base to canonical option ID used in harnesses/antigravity/ui.js
+    let canonical = match base {
+        "gemini-4-neon" => "gemini-4-neon-high".to_string(),
+        "gemini-4-carbon" => "gemini-4-carbon-medium".to_string(),
+        "gemini-4-argon" => "gemini-4-argon-medium".to_string(),
+        "gemini-4-hydrogen" => "gemini-4-hydrogen-medium".to_string(),
+        "gemini-3.8-flash" => "gemini-3.8-flash-medium".to_string(),
+        "claude-opus-5-5" => "claude-opus-5-5-medium".to_string(),
+        "claude-sonnet-5-5" => "claude-sonnet-5-5-medium".to_string(),
+        _ => trimmed.to_string(),
+    };
+    (Some(canonical), effort)
+}
+
+pub fn parse_antigravity_permission_preset(pbtxt: &str) -> Option<String> {
+    let pos = pbtxt.find("permission_preset:")?;
+    let rest = pbtxt[pos + "permission_preset:".len()..].trim_start();
+    let token: String = rest
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+        .collect();
+    let upper = token.to_ascii_uppercase();
+    if upper.is_empty() {
+        return None;
+    }
+    if upper.contains("TURBO") {
+        Some("turbo".to_string())
+    } else if upper.contains("AUTO") {
+        Some("auto".to_string())
+    } else if upper.contains("REVIEW") || upper.contains("PLAN") {
+        Some("request-review".to_string())
+    } else if upper.contains("DEFAULT") || upper.contains("ASK") {
+        Some("default".to_string())
+    } else {
+        None
+    }
+}
+
+pub fn parse_antigravity_latest_model_from_transcript(raw_tail: &str) -> Option<String> {
+    for line in raw_tail.lines().rev() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || !trimmed.contains("\"model\"") {
+            continue;
+        }
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed) else {
+            continue;
+        };
+        if let Some(m) = v.get("model").and_then(|s| s.as_str()) {
+            let clean = m.trim();
+            if !clean.is_empty() && clean != "<synthetic>" {
+                return Some(clean.to_string());
+            }
+        }
+    }
+    None
+}
+
+fn map_codex_permission_mode(
+    approval: Option<&str>,
+    sandbox: Option<&str>,
+    reviewer: Option<&str>,
+) -> Option<String> {
+    let sb = sandbox.unwrap_or("").to_ascii_lowercase();
+    let ap = approval.unwrap_or("").trim().to_ascii_lowercase();
+    let rv = reviewer.unwrap_or("").trim().to_ascii_lowercase();
+    if sb.contains("read-only") || sb.contains("readonly") {
+        return Some("read-only".to_string());
+    }
+    if ap == "never"
+        || sb.contains("danger-full-access")
+        || sb.contains("dangerfullaccess")
+        || sb.contains("\"disabled\"")
+        || sb == "disabled"
+    {
+        return Some("danger-full-access".to_string());
+    }
+    if rv == "auto_review" || rv == "auto-review" {
+        return Some("help-approve".to_string());
+    }
+    if ap == "on-request" || sb.contains("workspace-write") || sb.contains("workspacewrite") {
+        return Some("request-approval".to_string());
+    }
+    None
+}
+
+pub fn parse_codex_session_state_from_turn_context(
+    raw_tail: &str,
+    db_model: Option<&str>,
+    db_effort: Option<&str>,
+    db_approval: Option<&str>,
+    db_sandbox: Option<&str>,
+) -> (Option<String>, Option<String>, Option<String>, Option<bool>) {
+    let mut model = db_model
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let mut effort = db_effort
+        .map(|s| s.trim().to_ascii_lowercase())
+        .filter(|s| !s.is_empty());
+    let mut approval = db_approval
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let mut sandbox = db_sandbox
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let mut reviewer: Option<String> = None;
+    let mut plan_mode: Option<bool> = None;
+
+    for line in raw_tail.lines().rev() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || !trimmed.contains("\"turn_context\"") {
+            continue;
+        }
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed) else {
+            continue;
+        };
+        if v.get("type").and_then(|t| t.as_str()) != Some("turn_context") {
+            continue;
+        }
+        let Some(p) = v.get("payload") else {
+            continue;
+        };
+        if let Some(m) = p.get("model").and_then(|s| s.as_str()).filter(|s| !s.trim().is_empty()) {
+            model = Some(m.trim().to_string());
+        }
+        if let Some(e) = p
+            .get("effort")
+            .or_else(|| p.pointer("/collaboration_mode/settings/reasoning_effort"))
+            .and_then(|s| s.as_str())
+            .filter(|s| !s.trim().is_empty())
+        {
+            effort = Some(e.trim().to_ascii_lowercase());
+        }
+        if let Some(ap) = p.get("approval_policy").and_then(|s| s.as_str()).filter(|s| !s.trim().is_empty()) {
+            approval = Some(ap.trim().to_string());
+        }
+        if let Some(rv) = p.get("approvals_reviewer").and_then(|s| s.as_str()).filter(|s| !s.trim().is_empty()) {
+            reviewer = Some(rv.trim().to_string());
+        }
+        if let Some(sb_val) = p.get("sandbox_policy") {
+            if let Some(s) = sb_val.as_str() {
+                sandbox = Some(s.to_string());
+            } else if let Some(t) = sb_val.get("type").and_then(|x| x.as_str()) {
+                sandbox = Some(t.to_string());
+            } else {
+                sandbox = Some(sb_val.to_string());
+            }
+        }
+        if let Some(cm) = p.pointer("/collaboration_mode/mode").and_then(|s| s.as_str()) {
+            plan_mode = Some(cm.eq_ignore_ascii_case("plan"));
+        }
+        break;
+    }
+
+    let mode = map_codex_permission_mode(approval.as_deref(), sandbox.as_deref(), reviewer.as_deref());
+    (model, effort, mode, plan_mode)
+}
+
+fn normalize_claude_model_id(raw: &str) -> Option<String> {
+    let clean = raw.split('[').next().unwrap_or(raw).trim();
+    if clean.is_empty() || clean == "<synthetic>" {
+        return None;
+    }
+    let parts: Vec<&str> = clean.split('-').filter(|p| !p.is_empty()).collect();
+    if parts.len() >= 2 {
+        if let Some(last) = parts.last() {
+            if last.len() == 8 && last.chars().all(|c| c.is_ascii_digit()) {
+                return Some(parts[..parts.len() - 1].join("-"));
+            }
+        }
+    }
+    Some(clean.to_string())
+}
+
+pub fn parse_claude_session_state_from_jsonl(raw_tail: &str) -> (Option<String>, Option<String>) {
+    let mut model: Option<String> = None;
+    let mut mode: Option<String> = None;
+    for line in raw_tail.lines().rev() {
+        if model.is_some() && mode.is_some() {
+            break;
+        }
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed) else {
+            continue;
+        };
+        if v.get("isSidechain").and_then(|b| b.as_bool()) == Some(true) {
+            continue;
+        }
+        let kind = v.get("type").and_then(|t| t.as_str()).unwrap_or("");
+        if mode.is_none() && kind == "user" {
+            if let Some(pm) = v.get("permissionMode").and_then(|s| s.as_str()) {
+                let mapped = match pm.trim() {
+                    "default" | "manual" => Some("manual"),
+                    "auto" => Some("auto"),
+                    "acceptEdits" => Some("acceptEdits"),
+                    "plan" => Some("plan"),
+                    "dontAsk" => Some("dontAsk"),
+                    "bypassPermissions" => Some("bypassPermissions"),
+                    _ => None,
+                };
+                if let Some(m) = mapped {
+                    mode = Some(m.to_string());
+                }
+            }
+        }
+        if model.is_none() && kind == "assistant" {
+            if let Some(raw_m) = v.pointer("/message/model").and_then(|s| s.as_str()) {
+                model = normalize_claude_model_id(raw_m);
+            }
+        }
+    }
+    (model, mode)
+}
+
+/// Strictly read-only per-conversation state lookup for the bound external Harness session.
+/// Never writes to any Harness config, SQLite DB, or client state.
+pub fn load_session_state(kind: HarnessKind, session_id: &str) -> HarnessSessionState {
+    let sid = session_id.trim();
+    let mut out = HarnessSessionState {
+        harness: kind.as_str().to_string(),
+        session_id: sid.to_string(),
+        ..Default::default()
+    };
+    if sid.is_empty() || kind == HarnessKind::Dsh {
+        return out;
+    }
+    let Some(home) = dirs::home_dir() else {
+        return out;
+    };
+
+    match kind {
+        HarnessKind::Codex => {
+            let db_path = home.join(".codex").join("state_5.sqlite");
+            let mut db_model = None;
+            let mut db_effort = None;
+            let mut db_approval = None;
+            let mut db_sandbox = None;
+            let mut rollout_path = None;
+            if let Some(conn) = open_sqlite_readonly(&db_path) {
+                if let Ok((m, e, ap, sb, rp)) = conn.query_row(
+                    "SELECT COALESCE(model, ''), COALESCE(reasoning_effort, ''), \
+                     COALESCE(approval_mode, ''), COALESCE(sandbox_policy, ''), COALESCE(rollout_path, '') \
+                     FROM threads WHERE id = ?1 LIMIT 1",
+                    [sid],
+                    |r| {
+                        Ok((
+                            r.get::<_, String>(0)?,
+                            r.get::<_, String>(1)?,
+                            r.get::<_, String>(2)?,
+                            r.get::<_, String>(3)?,
+                            r.get::<_, String>(4)?,
+                        ))
+                    },
+                ) {
+                    if !m.trim().is_empty() {
+                        db_model = Some(m);
+                    }
+                    if !e.trim().is_empty() {
+                        db_effort = Some(e);
+                    }
+                    if !ap.trim().is_empty() {
+                        db_approval = Some(ap);
+                    }
+                    if !sb.trim().is_empty() {
+                        db_sandbox = Some(sb);
+                    }
+                    if !rp.trim().is_empty() {
+                        rollout_path = Some(clean_windows_path(&rp));
+                    }
+                }
+            }
+            let raw_tail = rollout_path
+                .as_deref()
+                .and_then(|p| read_file_tail_utf8(Path::new(p), 131_072))
+                .unwrap_or_default();
+            let (model, effort, mode, plan_mode) = parse_codex_session_state_from_turn_context(
+                &raw_tail,
+                db_model.as_deref(),
+                db_effort.as_deref(),
+                db_approval.as_deref(),
+                db_sandbox.as_deref(),
+            );
+            out.model = model;
+            out.effort = effort;
+            out.mode = mode;
+            out.plan_mode = plan_mode;
+            if out.model.is_some() || out.effort.is_some() || out.mode.is_some() {
+                out.source_note = "已同步 Codex 当前对话（发消息时生效并同步回对话）".to_string();
+            }
+        }
+        HarnessKind::ClaudeCode => {
+            let projects_root = home.join(".claude").join("projects");
+            let target_name = format!("{sid}.jsonl");
+            if let Ok(proj_dirs) = fs::read_dir(&projects_root) {
+                for proj in proj_dirs.flatten() {
+                    let candidate = proj.path().join(&target_name);
+                    if candidate.is_file() {
+                        if let Some(raw_tail) = read_file_tail_utf8(&candidate, 131_072) {
+                            let (model, mode) = parse_claude_session_state_from_jsonl(&raw_tail);
+                            out.model = model;
+                            out.mode = mode;
+                        }
+                        break;
+                    }
+                }
+            }
+            let claude_dir = home.join(".claude");
+            for file_name in ["settings.local.json", "settings.json"] {
+                let Ok(text) = fs::read_to_string(claude_dir.join(file_name)) else {
+                    continue;
+                };
+                let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else {
+                    continue;
+                };
+                if out.effort.is_none() {
+                    if let Some(e) = v
+                        .get("effortLevel")
+                        .or_else(|| v.get("effort"))
+                        .and_then(|s| s.as_str())
+                        .filter(|s| !s.trim().is_empty())
+                    {
+                        out.effort = Some(e.trim().to_ascii_lowercase());
+                    }
+                }
+                if out.model.is_none() {
+                    if let Some(m) = v.get("model").and_then(|s| s.as_str()) {
+                        out.model = normalize_claude_model_id(m);
+                    }
+                }
+                if out.mode.is_none() {
+                    if let Some(p) = v.pointer("/permissions/defaultMode").and_then(|s| s.as_str()) {
+                        out.mode = match p.trim() {
+                            "default" | "manual" => Some("manual".to_string()),
+                            "auto" | "acceptEdits" | "plan" | "dontAsk" | "bypassPermissions" => {
+                                Some(p.trim().to_string())
+                            }
+                            _ => None,
+                        };
+                    }
+                }
+            }
+            if out.model.is_some() || out.effort.is_some() || out.mode.is_some() {
+                out.source_note = "已同步 Claude Code 当前对话（发消息时生效并同步回对话）".to_string();
+            }
+        }
+        HarnessKind::Antigravity => {
+            let is_cli = is_antigravity_cli_conversation(sid);
+            out.read_only_in_desktop = !is_cli;
+            let anno_path = home
+                .join(".gemini")
+                .join("antigravity")
+                .join("annotations")
+                .join(format!("{sid}.pbtxt"));
+            if let Ok(pbtxt) = fs::read_to_string(&anno_path) {
+                out.mode = parse_antigravity_permission_preset(&pbtxt);
+            }
+            let transcript_candidates = [
+                home.join(".gemini")
+                    .join("antigravity")
+                    .join("brain")
+                    .join(sid)
+                    .join(".system_generated")
+                    .join("logs")
+                    .join("transcript.jsonl"),
+                home.join(".gemini")
+                    .join("antigravity-cli")
+                    .join("brain")
+                    .join(sid)
+                    .join(".system_generated")
+                    .join("logs")
+                    .join("transcript.jsonl"),
+            ];
+            for tp in transcript_candidates {
+                if let Some(raw_tail) = read_file_tail_utf8(&tp, 131_072) {
+                    if let Some(raw_model) = parse_antigravity_latest_model_from_transcript(&raw_tail) {
+                        let (canon_model, eff) = parse_antigravity_model_and_effort(&raw_model);
+                        out.model = canon_model;
+                        out.effort = eff;
+                        break;
+                    }
+                }
+            }
+            out.source_note = if out.read_only_in_desktop {
+                "当前绑定 Antigravity 桌面端对话：模型与权限以桌面端为准（新建或 CLI 对话可在此修改）".to_string()
+            } else {
+                "已同步 Antigravity 当前对话设置".to_string()
+            };
+        }
+        HarnessKind::Dsh => {}
+    }
+    out
+}
+
 #[derive(Debug, Clone)]
 pub struct MediumTurnParams {
     pub turn_id: String,
@@ -5003,5 +5462,67 @@ mod tests {
         let tmp_str = tmp.to_string_lossy().to_string();
         let explicit = resolve_effective_workspace_dir(Some(&tmp_str)).expect("existing dir should be kept");
         assert_eq!(explicit, tmp_str);
+    }
+
+    #[test]
+    fn parses_per_session_model_effort_and_permission_across_harnesses() {
+        // 1. Antigravity model/effort + permission_preset parser
+        assert_eq!(
+            parse_antigravity_model_and_effort("claude-opus-5-5-high"),
+            (Some("claude-opus-5-5-medium".to_string()), Some("high".to_string()))
+        );
+        assert_eq!(
+            parse_antigravity_model_and_effort("gemini-4-neon-xhigh"),
+            (Some("gemini-4-neon-high".to_string()), Some("xhigh".to_string()))
+        );
+        assert_eq!(
+            parse_antigravity_permission_preset(
+                r#"title:"Debug" permission_preset:AGENT_PERMISSION_PRESET_TURBO"#
+            ),
+            Some("turbo".to_string())
+        );
+        assert_eq!(
+            parse_antigravity_permission_preset("permission_preset:AGENT_PERMISSION_PRESET_AUTO"),
+            Some("auto".to_string())
+        );
+        let ag_tail = concat!(
+            r#"{"type":"USER_INPUT","content":"hi"}"#,
+            "\n",
+            r#"{"type":"PLANNER_RESPONSE","model":"gemini-4-carbon-high","content":"ok"}"#,
+            "\n"
+        );
+        assert_eq!(
+            parse_antigravity_latest_model_from_transcript(ag_tail),
+            Some("gemini-4-carbon-high".to_string())
+        );
+
+        // 2. Codex turn_context + SQLite fallback parser
+        let cx_tail = concat!(
+            r#"{"type":"session_meta","payload":{"id":"t1"}}"#,
+            "\n",
+            r#"{"type":"turn_context","payload":{"model":"gpt-6.1-terra","effort":"xhigh","approval_policy":"on-request","approvals_reviewer":"auto_review","sandbox_policy":{"type":"workspace-write"},"collaboration_mode":{"mode":"plan"}}}"#,
+            "\n"
+        );
+        let (cx_m, cx_e, cx_mode, cx_plan) =
+            parse_codex_session_state_from_turn_context(cx_tail, Some("gpt-6-luna"), Some("high"), Some("never"), None);
+        assert_eq!(cx_m.as_deref(), Some("gpt-6.1-terra"));
+        assert_eq!(cx_e.as_deref(), Some("xhigh"));
+        assert_eq!(cx_mode.as_deref(), Some("help-approve"));
+        assert_eq!(cx_plan, Some(true));
+
+        // 3. Claude Code JSONL parser (ignores <synthetic> and sidechain)
+        let cc_tail = concat!(
+            r#"{"type":"user","permissionMode":"acceptEdits","message":{"content":"fix"}}"#,
+            "\n",
+            r#"{"type":"assistant","message":{"model":"claude-sonnet-5-5-20260514","content":[]}}"#,
+            "\n",
+            r#"{"type":"assistant","isSidechain":true,"message":{"model":"claude-haiku-5-5","content":[]}}"#,
+            "\n",
+            r#"{"type":"assistant","message":{"model":"<synthetic>","content":[]}}"#,
+            "\n"
+        );
+        let (cc_m, cc_mode) = parse_claude_session_state_from_jsonl(cc_tail);
+        assert_eq!(cc_m.as_deref(), Some("claude-sonnet-5-5"));
+        assert_eq!(cc_mode.as_deref(), Some("acceptEdits"));
     }
 }

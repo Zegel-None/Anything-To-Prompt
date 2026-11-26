@@ -484,6 +484,8 @@ window.__ModuleLoader__.load({
           readStoredHarnessPrefs(id),
         ]),
       ),
+      sessionSyncState: {},
+      sessionDirtyKeys: {},
       unreadCount: 0,
       unreadPreview: '',
       toggleHarnessMenu: null,
@@ -509,12 +511,58 @@ window.__ModuleLoader__.load({
       const next = Object.assign({}, dsbRuntime.harnessPrefs[hId] || {}, patch || {});
       dsbRuntime.harnessPrefs[hId] = next;
       writeStoredHarnessPrefs(hId, next);
+      const curSel = dsbRuntime.externalSelection[hId] || {};
+      if (curSel.sessionId && patch && typeof patch === 'object') {
+        const dKey = hId + ':' + curSel.sessionId;
+        const set = dsbRuntime.sessionDirtyKeys[dKey] || new Set();
+        for (const k of ['model', 'effort', 'mode', 'planMode']) {
+          if (Object.prototype.hasOwnProperty.call(patch, k)) set.add(k);
+        }
+        dsbRuntime.sessionDirtyKeys[dKey] = set;
+      }
       if (hId === 'claude_code' && next.mode) {
         dsbRuntime.claudePermissionMode = next.mode;
         writeStoredString(STORAGE_KEY_CLAUDE_PERM, next.mode);
       }
       notifyBarRuntime();
       return next;
+    }
+
+    function syncExternalSessionState(harnessId, sessionId, forceOverwrite = true) {
+      const hId = normalizeHarnessId(harnessId);
+      if (!IS_BAR || hId === 'dsh') return Promise.resolve(null);
+      const sid = String(sessionId || '').trim();
+      if (!sid) {
+        delete dsbRuntime.sessionSyncState[hId];
+        dsbRuntime.harnessPrefs[hId] = readStoredHarnessPrefs(hId);
+        notifyBarRuntime();
+        return Promise.resolve(null);
+      }
+      return tauriInvoke('harness_session_state', { harness: hId, sessionId: sid })
+        .then((st) => {
+          const curSel = dsbRuntime.externalSelection[hId] || {};
+          if (String(curSel.sessionId || '').trim() !== sid) return null;
+          if (!st || typeof st !== 'object') return null;
+          dsbRuntime.sessionSyncState[hId] = st;
+          const dKey = hId + ':' + sid;
+          if (forceOverwrite) {
+            delete dsbRuntime.sessionDirtyKeys[dKey];
+          }
+          const dirty = dsbRuntime.sessionDirtyKeys[dKey];
+          const base = forceOverwrite
+            ? Object.assign({}, readStoredHarnessPrefs(hId))
+            : Object.assign({}, dsbRuntime.harnessPrefs[hId] || {});
+          const allowApply = (field) => forceOverwrite || Boolean(st.readOnlyInDesktop) || !dirty || !dirty.has(field);
+          if (st.model && allowApply('model')) base.model = st.model;
+          if (st.effort && allowApply('effort')) base.effort = st.effort;
+          if (st.mode && allowApply('mode')) base.mode = st.mode;
+          if (typeof st.planMode === 'boolean' && allowApply('planMode')) base.planMode = st.planMode;
+          // Update live display/turn prefs for the bound conversation without mutating global localStorage defaults
+          dsbRuntime.harnessPrefs[hId] = base;
+          notifyBarRuntime();
+          return st;
+        })
+        .catch(() => null);
     }
 
     function addExtAttachments(items) {
@@ -746,6 +794,7 @@ window.__ModuleLoader__.load({
                 if (!Array.isArray(dsbRuntime.externalMessages[hId]) || dsbRuntime.externalMessages[hId].length === 0) {
                   loadExternalConversationMessages(hId, cur.sessionId);
                 }
+                syncExternalSessionState(hId, cur.sessionId, false);
               } else if (groups.length > 0) {
                 const firstWs = groups[0];
                 const firstConv = Array.isArray(firstWs.convs) && firstWs.convs.length > 0 ? firstWs.convs[0] : null;
@@ -763,7 +812,12 @@ window.__ModuleLoader__.load({
                       title: (firstWs.label || HARNESS_META[hId].label) + ' · 新对话',
                     };
                 writeStoredExtSelection(hId, dsbRuntime.externalSelection[hId]);
-                if (firstConv) loadExternalConversationMessages(hId, firstConv.id);
+                if (firstConv) {
+                  loadExternalConversationMessages(hId, firstConv.id);
+                  syncExternalSessionState(hId, firstConv.id, true);
+                } else {
+                  syncExternalSessionState(hId, '', true);
+                }
               }
             } else if (
               (autoSelectIfEmpty ||
@@ -780,6 +834,7 @@ window.__ModuleLoader__.load({
                   title: firstConv.title || firstWs.label || '新对话',
                 };
                 loadExternalConversationMessages(hId, firstConv.id);
+                syncExternalSessionState(hId, firstConv.id, true);
               } else {
                 dsbRuntime.externalSelection[hId] = {
                   workspaceId: firstWs.workspaceId || '',
@@ -787,6 +842,7 @@ window.__ModuleLoader__.load({
                   sessionId: '',
                   title: (firstWs.label || HARNESS_META[hId].label) + ' · 新对话',
                 };
+                syncExternalSessionState(hId, '', true);
               }
             } else if (catalog.available && groups.length === 0) {
               // Cold-start with zero existing workspaces/conversations: auto-bind unified default workspace
@@ -819,6 +875,9 @@ window.__ModuleLoader__.load({
       }
       if (!getHarnessMeta(norm).useNativeComposer && !skipCatalogRefresh) {
         refreshExternalCatalog(norm, true);
+      } else if (!getHarnessMeta(norm).useNativeComposer) {
+        const curSel = dsbRuntime.externalSelection[norm] || {};
+        if (curSel.sessionId) syncExternalSessionState(norm, curSel.sessionId, false);
       }
       notifyBarRuntime();
       if (typeof dsbRuntime.scheduleLayoutReport === 'function') {
@@ -841,6 +900,7 @@ window.__ModuleLoader__.load({
       writeStoredExtSelection(hId, dsbRuntime.externalSelection[hId]);
       notifyBarRuntime();
       loadExternalConversationMessages(hId, conv.id);
+      syncExternalSessionState(hId, conv.id, true);
     }
 
     function startNewExternalConversation(harnessId, group) {
@@ -860,6 +920,7 @@ window.__ModuleLoader__.load({
       };
       writeStoredExtSelection(hId, dsbRuntime.externalSelection[hId]);
       dsbRuntime.externalMessages[hId] = [];
+      syncExternalSessionState(hId, '', true);
       notifyBarRuntime();
     }
 
@@ -1056,7 +1117,14 @@ window.__ModuleLoader__.load({
         if (turn && turn.turnId === evt.turnId) {
           dsbRuntime.externalActiveTurn = null;
         }
-        setTimeout(() => refreshExternalCatalog(hId, false), 450);
+        const doneSid = evt.sessionId || (dsbRuntime.externalSelection[hId] && dsbRuntime.externalSelection[hId].sessionId) || '';
+        if (doneSid) {
+          delete dsbRuntime.sessionDirtyKeys[hId + ':' + doneSid];
+        }
+        setTimeout(() => {
+          refreshExternalCatalog(hId, false);
+          if (doneSid) syncExternalSessionState(hId, doneSid, true);
+        }, 450);
       } else if (evt.kind === 'error') {
         if (idx >= 0) {
           const prefix = list[idx].text ? list[idx].text + '\n\n' : '';
@@ -1187,6 +1255,7 @@ window.__ModuleLoader__.load({
           dsbRuntime.externalMessages[hId] = incomingMsgs;
         }
         activeSessionUpdated = hId === dsbRuntime.activeHarness;
+        syncExternalSessionState(hId, incomingSessionId, false);
       } else if (!curSel.sessionId && incomingSessionId && barIsHiddenOrLip && !hasDraftOrCapsules) {
         // Brand-new unbound harness bootstrap only when Bar is not actively being used
         dsbRuntime.externalSelection[hId] = {
@@ -1199,6 +1268,7 @@ window.__ModuleLoader__.load({
           dsbRuntime.externalMessages[hId] = incomingMsgs;
         }
         activeSessionUpdated = hId === dsbRuntime.activeHarness;
+        syncExternalSessionState(hId, incomingSessionId, true);
       }
 
       dsbRuntime.liveSyncMeta[hId] = {
@@ -5018,6 +5088,14 @@ window.__ModuleLoader__.load({
         const extSel = dsbRuntime.externalSelection[activeHarness] || {};
         const activeHarnessOpts = dsbRuntime.harnessOptions[activeHarness] || null;
         const activeHarnessPrefs = dsbRuntime.harnessPrefs[activeHarness] || {};
+        const activeSessionSync = dsbRuntime.sessionSyncState[activeHarness] || null;
+        const isDesktopReadOnly = Boolean(
+          activeSessionSync &&
+            activeSessionSync.readOnlyInDesktop &&
+            activeSessionSync.sessionId &&
+            extSel &&
+            String(extSel.sessionId || '') === String(activeSessionSync.sessionId),
+        );
 
         const insertTextIntoExtComposer = (snippet) => {
           const prev = dsbRuntime.extDraftText || '';
@@ -5488,6 +5566,7 @@ window.__ModuleLoader__.load({
           if (ev.key === 'Tab' && ev.shiftKey && !ev.isComposing) {
             ev.preventDefault();
             ev.stopPropagation();
+            if (isDesktopReadOnly) return;
             const uo = getUnifiedOptions(activeHarness, activeHarnessOpts);
             const curModeId = (activeHarnessPrefs && activeHarnessPrefs.mode) || uo.defaultMode;
             const idx = Math.max(0, uo.modes.findIndex((m) => m.id === curModeId));
@@ -5556,7 +5635,19 @@ window.__ModuleLoader__.load({
           const curModelId = prefs.model || uo.defaultModel;
           const curEffortId = prefs.effort || uo.defaultEffort;
           const curModeId = prefs.mode || uo.defaultMode;
-          const curModel = uo.models.find((x) => x.id === curModelId) || uo.models[0];
+          const formatDynamicModelLabel = (rawId) => {
+            const s = String(rawId || '').trim();
+            if (!s) return '';
+            return s
+              .replace(/^gpt-/i, 'GPT-')
+              .replace(/^claude-/i, 'Claude ')
+              .replace(/^gemini-/i, 'Gemini ')
+              .replace(/-/g, ' ')
+              .replace(/\b([a-z])/g, (m) => m.toUpperCase());
+          };
+          const curModel =
+            uo.models.find((x) => x.id === curModelId) ||
+            (curModelId ? { id: curModelId, label: formatDynamicModelLabel(curModelId) } : uo.models[0]);
           const curEffort = uo.efforts.find((x) => x.id === curEffortId) || uo.efforts[Math.min(2, uo.efforts.length - 1)] || uo.efforts[0];
           const curMode = uo.modes.find((x) => x.id === curModeId) || uo.modes[0];
           const isDangerMode = Boolean(
@@ -6155,8 +6246,34 @@ window.__ModuleLoader__.load({
           } else if (composerPopover.kind === 'mode') {
             panelWidth = 324;
             const curMode = prefs.mode || uo.defaultMode;
+            const syncNote =
+              activeSessionSync && activeSessionSync.sessionId && extSel && String(extSel.sessionId || '') === String(activeSessionSync.sessionId)
+                ? activeSessionSync.sourceNote || ''
+                : '';
             content = [
-              sectionHdr('m-hdr', meta.label + ' · 权限模式（Shift+Tab 循环）', false),
+              sectionHdr(
+                'm-hdr',
+                meta.label + (isDesktopReadOnly ? ' · 权限模式（桌面端同步只读）' : ' · 权限模式（Shift+Tab 循环）'),
+                false,
+              ),
+              syncNote
+                ? h(
+                    'div',
+                    {
+                      key: 'm-sync-note',
+                      style: {
+                        fontSize: '10.5px',
+                        lineHeight: '1.4',
+                        color: isDesktopReadOnly ? t.accent : t.muted,
+                        background: isDesktopReadOnly ? t.accentBg : 'transparent',
+                        borderRadius: '7px',
+                        padding: isDesktopReadOnly ? '5px 8px' : '0 10px 5px',
+                        marginBottom: '4px',
+                      },
+                    },
+                    syncNote,
+                  )
+                : null,
               ...uo.modes.map((md) => {
                 const isSel = md.id === curMode;
                 const isDanger = Boolean(
@@ -6169,6 +6286,7 @@ window.__ModuleLoader__.load({
                   md.desc || '',
                   isSel,
                   () => {
+                    if (isDesktopReadOnly) return;
                     updateHarnessPrefs(activeHarness, { mode: md.id });
                     setComposerPopover(null);
                   },
@@ -6181,16 +6299,45 @@ window.__ModuleLoader__.load({
             panelWidth = 312;
             const curModel = prefs.model || uo.defaultModel;
             const curEffort = prefs.effort || uo.defaultEffort;
+            const syncNote =
+              activeSessionSync && activeSessionSync.sessionId && extSel && String(extSel.sessionId || '') === String(activeSessionSync.sessionId)
+                ? activeSessionSync.sourceNote || ''
+                : '';
+            const modelList = uo.models.some((m) => m.id === curModel || (curModel === 'gemini-4-neon' && m.id === 'gemini-4-neon-high'))
+              ? uo.models
+              : (curModel ? [{ id: curModel, label: curModel, tag: '当前会话' }].concat(uo.models) : uo.models);
             content = [
               h(
                 'div',
                 { key: 'mdl-hdr', style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '3px 10px 5px' } },
-                h('span', { style: { fontSize: '11px', fontWeight: 500, color: t.muted } }, meta.label + ' · 选择模型'),
+                h(
+                  'span',
+                  { style: { fontSize: '11px', fontWeight: 500, color: t.muted } },
+                  meta.label + (isDesktopReadOnly ? ' · 当前模型（桌面端同步只读）' : ' · 选择模型'),
+                ),
                 adapter && typeof adapter.renderModelHeaderExtra === 'function'
                   ? adapter.renderModelHeaderExtra(harnessPopCtx)
                   : null,
               ),
-              ...uo.models.map((m) => {
+              syncNote
+                ? h(
+                    'div',
+                    {
+                      key: 'mdl-sync-note',
+                      style: {
+                        fontSize: '10.5px',
+                        lineHeight: '1.4',
+                        color: isDesktopReadOnly ? t.accent : t.muted,
+                        background: isDesktopReadOnly ? t.accentBg : 'transparent',
+                        borderRadius: '7px',
+                        padding: isDesktopReadOnly ? '5px 8px' : '0 10px 5px',
+                        marginBottom: '4px',
+                      },
+                    },
+                    syncNote,
+                  )
+                : null,
+              ...modelList.map((m) => {
                 const isSel = m.id === curModel || (curModel === 'gemini-4-neon' && m.id === 'gemini-4-neon-high');
                 const tagText = m.tag || (m.desc && m.desc.includes('|') ? m.desc.split('|')[1] : '');
                 return popRow(
@@ -6200,6 +6347,7 @@ window.__ModuleLoader__.load({
                   '',
                   isSel,
                   () => {
+                    if (isDesktopReadOnly) return;
                     updateHarnessPrefs(activeHarness, { model: m.id });
                   },
                   h(
@@ -6233,6 +6381,7 @@ window.__ModuleLoader__.load({
                         marginTop: '6px',
                         padding: '7px 6px 2px',
                         borderTop: '1px solid ' + t.subtleBorder,
+                        opacity: isDesktopReadOnly ? 0.65 : 1,
                       },
                     },
                     h('div', { style: { fontSize: '10.5px', color: t.muted, marginBottom: '5px', paddingLeft: '2px' } }, '推理强度'),
@@ -6248,6 +6397,7 @@ window.__ModuleLoader__.load({
                             type: 'button',
                             onClick: (ev) => {
                               ev.stopPropagation();
+                              if (isDesktopReadOnly) return;
                               updateHarnessPrefs(activeHarness, { effort: ef.id });
                             },
                             style: {
@@ -6259,7 +6409,7 @@ window.__ModuleLoader__.load({
                               color: isSel ? t.accent : t.muted,
                               fontSize: '11.5px',
                               fontWeight: isSel ? 600 : 400,
-                              cursor: 'pointer',
+                              cursor: isDesktopReadOnly ? 'default' : 'pointer',
                             },
                           },
                           ef.label,

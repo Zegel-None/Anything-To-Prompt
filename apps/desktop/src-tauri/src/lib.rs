@@ -669,6 +669,12 @@ fn harness_session_stats(harness: String, session_id: String) -> harness::Harnes
 }
 
 #[tauri::command]
+fn harness_session_state(harness: String, session_id: String) -> harness::HarnessSessionState {
+    let kind = harness::HarnessKind::parse(&harness);
+    harness::load_session_state(kind, &session_id)
+}
+
+#[tauri::command]
 fn harness_cancel_turn(app: AppHandle, turn_id: String) -> bool {
     let Some(shared) = app.try_state::<AppShared>() else {
         return false;
@@ -2497,6 +2503,7 @@ pub fn run() {
             harness_cancel_turn,
             harness_focus_desktop,
             harness_session_stats,
+            harness_session_state,
             app_get_settings,
             app_update_settings,
             app_settings_action,

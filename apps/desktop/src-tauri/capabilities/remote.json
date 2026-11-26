@@ -30,6 +30,7 @@
     "allow-harness-cancel-turn",
     "allow-harness-focus-desktop",
     "allow-harness-session-stats",
+    "allow-harness-session-state",
     "allow-app-get-settings",
     "allow-app-update-settings",
     "allow-app-settings-action",
