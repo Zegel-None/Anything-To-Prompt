@@ -1933,9 +1933,9 @@ window.__ModuleLoader__.load({
         return clean.length > 64 ? ' ' + clean.slice(0, 64) + '… ' : ' ' + clean + ' ';
       });
       s = s.replace(/```[^\n]*/g, ' ');
-      // Replace markdown images and links with their visible labels
-      s = s.replace(/!\[([^\]]*)\]\((?:[^()\s]+|\([^)]*\))+\)/g, '$1');
-      s = s.replace(/\[([^\]]+)\]\((?:[^()\s]+|\([^)]*\))+\)/g, '$1');
+      // Replace markdown images and links with their visible labels (linear-time, zero ReDoS backtracking)
+      s = s.replace(/!\[([^\]]*)\]\(([^()\n]*(?:\([^()\n]*\)[^()\n]*)*)\)/g, '$1');
+      s = s.replace(/\[([^\]]+)\]\(([^()\n]*(?:\([^()\n]*\)[^()\n]*)*)\)/g, '$1');
       // Strip ATX headings, horizontal rules, table separator lines, blockquote markers, alerts, list markers
       s = s.replace(/^\s*([-*_])(?:\s*\1){2,}\s*$/gm, ' ');
       s = s.replace(/^\s*\|?\s*:?-{2,}:?\s*(?:\|\s*:?-{2,}:?\s*)+\|?\s*$/gm, ' ');
@@ -2129,6 +2129,7 @@ window.__ModuleLoader__.load({
           if (bracketDepth === 0 && src[j] === '(') {
             let k = j + 1;
             let parenDepth = 1;
+            const allowSpaces = src.slice(j + 1, j + 8).toLowerCase() === 'file://';
             while (k < len && parenDepth > 0) {
               if (src[k] === '\\') {
                 k += 2;
@@ -2136,7 +2137,7 @@ window.__ModuleLoader__.load({
               }
               if (src[k] === '(') parenDepth += 1;
               else if (src[k] === ')') parenDepth -= 1;
-              else if (/\s/.test(src[k])) break;
+              else if (allowSpaces ? /[\r\n]/.test(src[k]) : /\s/.test(src[k])) break;
               k += 1;
             }
             if (parenDepth === 0) {

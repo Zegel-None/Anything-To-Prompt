@@ -59,6 +59,22 @@ pub enum PluginSyncResult {
     InstalledOrUpdated,
 }
 
+fn parse_semver_tuple(raw: &str) -> Option<(u64, u64, u64)> {
+    let clean = raw.trim().trim_start_matches('v').split('-').next()?;
+    let mut parts = clean.split('.');
+    let major = parts.next()?.parse().ok()?;
+    let minor = parts.next().unwrap_or("0").parse().ok()?;
+    let patch = parts.next().unwrap_or("0").parse().ok()?;
+    Some((major, minor, patch))
+}
+
+fn should_skip_downgrade(existing_ver: Option<&str>, current_ver: &str) -> bool {
+    match (existing_ver.and_then(parse_semver_tuple), parse_semver_tuple(current_ver)) {
+        (Some(existing), Some(current)) => existing > current,
+        _ => false,
+    }
+}
+
 /// Ensures Anything-to-Prompt's single built-in DSH companion plugin (`@local/anything-to-prompt`)
 /// is deployed into `<DSH_HOME>/profiles/web/local-plugins/anything-to-prompt` and registered in `package.json`,
 /// while cleaning up legacy `@local/dsh-card-dock` / `@local/deepseek-bar` manifest entries.
@@ -71,6 +87,20 @@ pub fn ensure_dsh_plugin_synced() -> PluginSyncResult {
     }
 
     let plugin_dir = profile_dir.join("local-plugins").join("anything-to-prompt");
+    let version_stamp_path = plugin_dir.join(".atp-version");
+    let current_ver = env!("CARGO_PKG_VERSION");
+    let existing_ver = fs::read_to_string(&version_stamp_path).ok();
+    if should_skip_downgrade(existing_ver.as_deref(), current_ver)
+        && plugin_dir.join("lib").join("client.js").is_file()
+    {
+        log::info!(
+            "Skipping DSH plugin downgrade (installed {} > current {})",
+            existing_ver.as_deref().unwrap_or("").trim(),
+            current_ver
+        );
+        return PluginSyncResult::UpToDate;
+    }
+
     let mut changed = false;
 
     for (rel, content) in EMBEDDED_FILES {
@@ -87,6 +117,10 @@ pub fn ensure_dsh_plugin_synced() -> PluginSyncResult {
                 changed = true;
             }
         }
+    }
+    if existing_ver.as_deref().map(str::trim) != Some(current_ver) {
+        let _ = fs::create_dir_all(&plugin_dir);
+        let _ = fs::write(&version_stamp_path, current_ver);
     }
 
     // Ensure node_modules/@local/anything-to-prompt links to local-plugins/anything-to-prompt
@@ -273,5 +307,14 @@ mod tests {
 
         // Second pass must be a clean no-op
         assert!(sync_profile_manifest_json(&out).is_none());
+    }
+
+    #[test]
+    fn downgrade_guard_blocks_older_binary_from_overwriting_newer_plugin() {
+        assert!(should_skip_downgrade(Some("0.7.1"), "0.6.2"));
+        assert!(should_skip_downgrade(Some("0.7.1\n"), "0.7.0"));
+        assert!(!should_skip_downgrade(Some("0.7.0"), "0.7.1"));
+        assert!(!should_skip_downgrade(Some("0.7.1"), "0.7.1"));
+        assert!(!should_skip_downgrade(None, "0.7.1"));
     }
 }

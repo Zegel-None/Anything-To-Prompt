@@ -417,6 +417,46 @@ fn codex_plugin_dir(home: &Path) -> PathBuf {
     home.join(".codex").join("plugins").join(PLUGIN_DIR_NAME)
 }
 
+/// Atomically replaces `dst` with `src` even when `dst` is a currently running Windows executable
+/// (e.g., locked by `--mcp-sidecar` or `--antigravity-sidecar`): NTFS allows renaming a running `.exe`
+/// on the same volume, freeing the canonical path immediately for the new binary.
+fn atomic_sync_exe(src: &Path, dst: &Path) -> std::io::Result<()> {
+    if let Some(parent) = dst.parent() {
+        let _ = fs::create_dir_all(parent);
+        // Best-effort cleanup of stale `.old.*` binaries whose sidecar processes have exited
+        if let Ok(entries) = fs::read_dir(parent) {
+            for ent in entries.flatten() {
+                let name = ent.file_name().to_string_lossy().to_ascii_lowercase();
+                if name.starts_with("anything-to-prompt.exe.old") {
+                    let _ = fs::remove_file(ent.path());
+                }
+            }
+        }
+    }
+    if fs::copy(src, dst).is_ok() {
+        return Ok(());
+    }
+    if dst.exists() {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        let backup = dst.with_file_name(format!(
+            "anything-to-prompt.exe.old.{}.{}",
+            std::process::id(),
+            stamp
+        ));
+        fs::rename(dst, &backup)?;
+        if let Err(copy_err) = fs::copy(src, dst) {
+            let _ = fs::rename(&backup, dst);
+            return Err(copy_err);
+        }
+        let _ = fs::remove_file(&backup);
+        return Ok(());
+    }
+    fs::copy(src, dst).map(|_| ())
+}
+
 /// Mirrors the running executable into `%LOCALAPPDATA%\AnythingToPrompt\bin\anything-to-prompt.exe`
 /// so all 4 Harness plugins reference one stable, permanent dependency binary even if the user
 /// moves or deletes their downloaded portable EXE.
@@ -448,12 +488,18 @@ pub fn ensure_runtime_exe_installed() -> PathBuf {
         _ => true,
     };
     if needs_copy {
-        if let Some(parent) = canonical.parent() {
-            let _ = fs::create_dir_all(parent);
-        }
-        if fs::copy(&cur, &canonical).is_ok() {
-            log::info!("Synced stable runtime dependency exe -> {}", canonical.display());
-            return canonical;
+        match atomic_sync_exe(&cur, &canonical) {
+            Ok(()) => {
+                log::info!("Synced stable runtime dependency exe -> {}", canonical.display());
+                return canonical;
+            }
+            Err(e) => {
+                log::warn!(
+                    "Failed to sync runtime dependency exe {} -> {}: {e}",
+                    cur.display(),
+                    canonical.display()
+                );
+            }
         }
     }
     if canonical.is_file() {
@@ -1753,5 +1799,24 @@ mod tests {
         }
 
         let _ = srv.join();
+    }
+
+    #[test]
+    fn atomic_sync_exe_replaces_existing_file_and_cleans_stale_backups() {
+        let dir = std::env::temp_dir().join(format!("atp-atomic-exe-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let src = dir.join("new.exe");
+        let dst = dir.join("anything-to-prompt.exe");
+        let stale = dir.join("anything-to-prompt.exe.old.12345");
+        fs::write(&src, b"new-binary-payload").unwrap();
+        fs::write(&dst, b"old-binary").unwrap();
+        fs::write(&stale, b"stale-old").unwrap();
+
+        atomic_sync_exe(&src, &dst).expect("atomic_sync_exe must succeed");
+        assert_eq!(fs::read(&dst).unwrap(), b"new-binary-payload");
+        assert!(!stale.exists(), "stale .old backup should be cleaned up");
+
+        let _ = fs::remove_dir_all(&dir);
     }
 }
