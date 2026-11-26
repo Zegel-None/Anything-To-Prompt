@@ -1008,8 +1008,10 @@ fn emit_stream_event(writer: &mut impl Write, evt: &HarnessStreamEvent) {
     }
 }
 
-/// Runs a complete real ACP v1 turn (`initialize` -> `session/load` or `session/new` ->
-/// `session/set_config_option` -> `session/prompt`) streaming deltas & tools over the named pipe.
+/// Runs a complete real ACP v1 turn (`initialize` -> `session/resume` / `session/load` / `session/new` ->
+/// `session/set_config_option` / `session/set_model` / `session/set_mode` -> `session/prompt`),
+/// streaming deltas & tools over the named pipe.
+/// Returns `true` if the session started/streamed cleanly, or `false` if pre-prompt handshake failed.
 pub fn run_acp_turn_in_medium(
     turn_id: &str,
     harness_id: &str,
@@ -1023,33 +1025,36 @@ pub fn run_acp_turn_in_medium(
     attachments: &[TurnAttachment],
     prompt: &str,
     pipe_writer: &mut impl Write,
-) {
+    emit_pre_prompt_errors: bool,
+) -> bool {
     let effective_cwd = resolve_effective_workspace_dir(cwd)
         .unwrap_or_else(|| ensure_default_workspace_dir().to_string_lossy().to_string());
 
     let mut child = match spawn_acp_command(exe, acp_args, Some(&effective_cwd)) {
         Ok(c) => c,
         Err(e) => {
-            emit_stream_event(
-                pipe_writer,
-                &HarnessStreamEvent {
-                    turn_id: turn_id.to_string(),
-                    harness: harness_id.to_string(),
-                    kind: "error".to_string(),
-                    session_id: session_id.map(|s| s.to_string()),
-                    text: None,
-                    tool_name: None,
-                    error: Some(format!("启动 ACP Agent 失败 ({exe}): {e}")),
-                },
-            );
-            return;
+            if emit_pre_prompt_errors {
+                emit_stream_event(
+                    pipe_writer,
+                    &HarnessStreamEvent {
+                        turn_id: turn_id.to_string(),
+                        harness: harness_id.to_string(),
+                        kind: "error".to_string(),
+                        session_id: session_id.map(|s| s.to_string()),
+                        text: None,
+                        tool_name: None,
+                        error: Some(format!("启动 ACP Agent 失败 ({exe}): {e}")),
+                    },
+                );
+            }
+            return false;
         }
     };
     register_turn_pid(turn_id, child.id());
 
     let (Some(mut stdin), Some(stdout)) = (child.stdin.take(), child.stdout.take()) else {
         let _ = child.kill();
-        return;
+        return false;
     };
 
     let init_req = serde_json::json!({
@@ -1070,36 +1075,39 @@ pub fn run_acp_turn_in_medium(
         }
     });
     if let Err(e) = send_jsonrpc_line(&mut stdin, &init_req) {
-        emit_stream_event(
-            pipe_writer,
-            &HarnessStreamEvent {
-                turn_id: turn_id.to_string(),
-                harness: harness_id.to_string(),
-                kind: "error".to_string(),
-                session_id: None,
-                text: None,
-                tool_name: None,
-                error: Some(format!("ACP initialize 失败: {e}")),
-            },
-        );
+        if emit_pre_prompt_errors {
+            emit_stream_event(
+                pipe_writer,
+                &HarnessStreamEvent {
+                    turn_id: turn_id.to_string(),
+                    harness: harness_id.to_string(),
+                    kind: "error".to_string(),
+                    session_id: None,
+                    text: None,
+                    tool_name: None,
+                    error: Some(format!("ACP initialize 失败: {e}")),
+                },
+            );
+        }
         let _ = child.kill();
-        return;
+        return false;
     }
 
     let reader = BufReader::new(stdout);
-    let mut stage = 1u8; // 1=init, 2=session/new|load, 3=prompting
+    let mut stage = 1u8; // 1=init, 2=session/resume|load|new, 3=prompting
+    let mut supports_resume_session = false;
     let mut supports_load_session = false;
     let mut supports_image = false;
     let mut resolved_sid = session_id
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty());
-    let mut tried_load = false;
+    let mut tried_resume_or_load = false;
     let mut accumulated_text = String::new();
     let mut finished = false;
     let read_only_mode = mode
         .map(|m| {
             let l = m.to_ascii_lowercase();
-            l.contains("read") || l == "plan"
+            l.contains("read") || l == "plan" || l == "request-review"
         })
         .unwrap_or(false);
     let mut next_req_id = 10i64;
@@ -1172,9 +1180,9 @@ pub fn run_acp_turn_in_medium(
         // Handle JSON-RPC responses
         if let Some(id_num) = v.get("id").and_then(|i| i.as_i64()) {
             if let Some(err) = v.get("error") {
-                // If session/load failed (e.g. expired session), gracefully fall back to session/new
-                if id_num == 2 && stage == 2 && tried_load {
-                    tried_load = false;
+                // If session/resume or session/load failed (e.g. expired session), gracefully fall back to session/new
+                if id_num == 2 && stage == 2 && tried_resume_or_load {
+                    tried_resume_or_load = false;
                     resolved_sid = None;
                     let new_req = serde_json::json!({
                         "jsonrpc": "2.0",
@@ -1194,24 +1202,32 @@ pub fn run_acp_turn_in_medium(
                     .and_then(|m| m.as_str())
                     .unwrap_or("ACP Agent 返回错误")
                     .to_string();
-                emit_stream_event(
-                    pipe_writer,
-                    &HarnessStreamEvent {
-                        turn_id: turn_id.to_string(),
-                        harness: harness_id.to_string(),
-                        kind: "error".to_string(),
-                        session_id: resolved_sid.clone(),
-                        text: None,
-                        tool_name: None,
-                        error: Some(msg),
-                    },
-                );
-                finished = true;
+                if stage >= 3 || emit_pre_prompt_errors {
+                    emit_stream_event(
+                        pipe_writer,
+                        &HarnessStreamEvent {
+                            turn_id: turn_id.to_string(),
+                            harness: harness_id.to_string(),
+                            kind: "error".to_string(),
+                            session_id: resolved_sid.clone(),
+                            text: None,
+                            tool_name: None,
+                            error: Some(msg),
+                        },
+                    );
+                }
+                finished = stage >= 3;
                 break;
             }
 
             if id_num == 1 && stage == 1 {
                 if let Some(res) = v.get("result") {
+                    supports_resume_session = res
+                        .pointer("/agentCapabilities/sessionCapabilities/resume")
+                        .is_some()
+                        || res
+                            .pointer("/agentCapabilities/session_capabilities/resume")
+                            .is_some();
                     supports_load_session = res
                         .pointer("/agentCapabilities/loadSession")
                         .and_then(|b| b.as_bool())
@@ -1221,8 +1237,20 @@ pub fn run_acp_turn_in_medium(
                         .and_then(|b| b.as_bool())
                         .unwrap_or(false);
                 }
-                let sess_req = if supports_load_session && resolved_sid.is_some() {
-                    tried_load = true;
+                let sess_req = if supports_resume_session && resolved_sid.is_some() {
+                    tried_resume_or_load = true;
+                    serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": 2,
+                        "method": "session/resume",
+                        "params": {
+                            "sessionId": resolved_sid.clone().unwrap_or_default(),
+                            "cwd": effective_cwd,
+                            "mcpServers": []
+                        }
+                    })
+                } else if supports_load_session && resolved_sid.is_some() {
+                    tried_resume_or_load = true;
                     serde_json::json!({
                         "jsonrpc": "2.0",
                         "id": 2,
@@ -1245,7 +1273,6 @@ pub fn run_acp_turn_in_medium(
                     })
                 };
                 if send_jsonrpc_line(&mut stdin, &sess_req).is_err() {
-                    finished = true;
                     break;
                 }
                 stage = 2;
@@ -1262,19 +1289,20 @@ pub fn run_acp_turn_in_medium(
                     resolved_sid = Some(sid.trim().to_string());
                 }
                 let Some(ref sid) = resolved_sid else {
-                    emit_stream_event(
-                        pipe_writer,
-                        &HarnessStreamEvent {
-                            turn_id: turn_id.to_string(),
-                            harness: harness_id.to_string(),
-                            kind: "error".to_string(),
-                            session_id: None,
-                            text: None,
-                            tool_name: None,
-                            error: Some("ACP Agent 未返回有效 sessionId".to_string()),
-                        },
-                    );
-                    finished = true;
+                    if emit_pre_prompt_errors {
+                        emit_stream_event(
+                            pipe_writer,
+                            &HarnessStreamEvent {
+                                turn_id: turn_id.to_string(),
+                                harness: harness_id.to_string(),
+                                kind: "error".to_string(),
+                                session_id: None,
+                                text: None,
+                                tool_name: None,
+                                error: Some("ACP Agent 未返回有效 sessionId".to_string()),
+                            },
+                        );
+                    }
                     break;
                 };
                 emit_stream_event(
@@ -1293,18 +1321,8 @@ pub fn run_acp_turn_in_medium(
                 // Apply dynamic ACP config options (model / mode / effort) live on the session!
                 let parsed_caps = parse_acp_session_options_from_result(&res);
                 if let Some(m) = model.map(|s| s.trim()).filter(|s| !s.is_empty() && *s != "default") {
-                    if let Some(ref cfg_id) = parsed_caps.model_config_id {
-                        next_req_id += 1;
-                        let _ = send_jsonrpc_line(
-                            &mut stdin,
-                            &serde_json::json!({
-                                "jsonrpc": "2.0",
-                                "id": next_req_id,
-                                "method": "session/set_config_option",
-                                "params": { "sessionId": sid, "configId": cfg_id, "value": m }
-                            }),
-                        );
-                    } else if !parsed_caps.models.is_empty() {
+                    let has_legacy_models = res.pointer("/models/availableModels").is_some();
+                    if has_legacy_models {
                         next_req_id += 1;
                         let _ = send_jsonrpc_line(
                             &mut stdin,
@@ -1316,12 +1334,20 @@ pub fn run_acp_turn_in_medium(
                             }),
                         );
                     }
-                }
-                if let Some(md) = mode
-                    .map(|s| s.trim())
-                    .filter(|s| !s.is_empty() && *s != "auto" && *s != "read-only")
-                {
-                    if let Some(ref cfg_id) = parsed_caps.mode_config_id {
+                    if let Some(ref cfg_id) = parsed_caps.model_config_id {
+                        let base_m = m
+                            .strip_suffix("-xhigh")
+                            .or_else(|| m.strip_suffix("-high"))
+                            .or_else(|| m.strip_suffix("-medium"))
+                            .or_else(|| m.strip_suffix("-low"))
+                            .unwrap_or(m);
+                        let matched_val = if parsed_caps.models.iter().any(|x| x.id == m) {
+                            m
+                        } else if parsed_caps.models.iter().any(|x| x.id == base_m) {
+                            base_m
+                        } else {
+                            m
+                        };
                         next_req_id += 1;
                         let _ = send_jsonrpc_line(
                             &mut stdin,
@@ -1329,10 +1355,31 @@ pub fn run_acp_turn_in_medium(
                                 "jsonrpc": "2.0",
                                 "id": next_req_id,
                                 "method": "session/set_config_option",
-                                "params": { "sessionId": sid, "configId": cfg_id, "value": md }
+                                "params": { "sessionId": sid, "configId": cfg_id, "value": matched_val }
                             }),
                         );
-                    } else if !parsed_caps.modes.is_empty() {
+                    }
+                }
+                if let Some(md) = mode.map(|s| s.trim()).filter(|s| !s.is_empty()) {
+                    let mapped_md = match md {
+                        "turbo" => "auto",
+                        "request-review" => "plan",
+                        other => other,
+                    };
+                    if let Some(ref cfg_id) = parsed_caps.mode_config_id {
+                        if parsed_caps.modes.iter().any(|x| x.id == mapped_md) {
+                            next_req_id += 1;
+                            let _ = send_jsonrpc_line(
+                                &mut stdin,
+                                &serde_json::json!({
+                                    "jsonrpc": "2.0",
+                                    "id": next_req_id,
+                                    "method": "session/set_config_option",
+                                    "params": { "sessionId": sid, "configId": cfg_id, "value": mapped_md }
+                                }),
+                            );
+                        }
+                    } else if res.pointer("/modes/availableModes").is_some() {
                         next_req_id += 1;
                         let _ = send_jsonrpc_line(
                             &mut stdin,
@@ -1340,13 +1387,21 @@ pub fn run_acp_turn_in_medium(
                                 "jsonrpc": "2.0",
                                 "id": next_req_id,
                                 "method": "session/set_mode",
-                                "params": { "sessionId": sid, "modeId": md }
+                                "params": { "sessionId": sid, "modeId": mapped_md }
                             }),
                         );
                     }
                 }
                 if let Some(ef) = effort.map(|s| s.trim()).filter(|s| !s.is_empty()) {
                     if let Some(ref cfg_id) = parsed_caps.effort_config_id {
+                        let mapped_ef = if ef == "max"
+                            && !parsed_caps.efforts.iter().any(|x| x.id == "max")
+                            && parsed_caps.efforts.iter().any(|x| x.id == "xhigh")
+                        {
+                            "xhigh"
+                        } else {
+                            ef
+                        };
                         next_req_id += 1;
                         let _ = send_jsonrpc_line(
                             &mut stdin,
@@ -1354,7 +1409,7 @@ pub fn run_acp_turn_in_medium(
                                 "jsonrpc": "2.0",
                                 "id": next_req_id,
                                 "method": "session/set_config_option",
-                                "params": { "sessionId": sid, "configId": cfg_id, "value": ef }
+                                "params": { "sessionId": sid, "configId": cfg_id, "value": mapped_ef }
                             }),
                         );
                     }
@@ -1422,17 +1477,19 @@ pub fn run_acp_turn_in_medium(
             }
 
             if id_num == prompt_req_id && stage == 3 {
-                if let Some(ref sid) = resolved_sid {
-                    record_acp_turn_history(
-                        harness_id,
-                        sid,
-                        &effective_cwd,
-                        model,
-                        effort,
-                        mode,
-                        prompt,
-                        &accumulated_text,
-                    );
+                if is_acp_harness_id(harness_id) {
+                    if let Some(ref sid) = resolved_sid {
+                        record_acp_turn_history(
+                            harness_id,
+                            sid,
+                            &effective_cwd,
+                            model,
+                            effort,
+                            mode,
+                            prompt,
+                            &accumulated_text,
+                        );
+                    }
                 }
                 emit_stream_event(
                     pipe_writer,
@@ -1515,7 +1572,7 @@ pub fn run_acp_turn_in_medium(
     let _ = child.kill();
     let _ = child.wait();
 
-    if !finished {
+    if !finished && (stage >= 3 || emit_pre_prompt_errors) {
         emit_stream_event(
             pipe_writer,
             &HarnessStreamEvent {
@@ -1529,6 +1586,7 @@ pub fn run_acp_turn_in_medium(
             },
         );
     }
+    finished || stage >= 3
 }
 
 #[cfg(test)]

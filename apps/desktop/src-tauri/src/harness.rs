@@ -3502,8 +3502,9 @@ pub fn load_session_state(kind: HarnessKind, session_id: &str) -> HarnessSession
             }
         }
         HarnessKind::Antigravity => {
-            let is_cli = is_antigravity_cli_conversation(sid);
-            out.read_only_in_desktop = !is_cli;
+            // Official `agy acp` natively supports `session/resume` + `session/set_model` + `session/set_mode`
+            // on ALL Antigravity conversations (both Desktop and CLI), so model & mode are fully editable!
+            out.read_only_in_desktop = false;
             let anno_path = home
                 .join(".gemini")
                 .join("antigravity")
@@ -3538,11 +3539,8 @@ pub fn load_session_state(kind: HarnessKind, session_id: &str) -> HarnessSession
                     }
                 }
             }
-            out.source_note = if out.read_only_in_desktop {
-                "当前绑定 Antigravity 桌面端对话：模型与权限以桌面端为准（新建或 CLI 对话可在此修改）".to_string()
-            } else {
-                "已同步 Antigravity 当前对话设置".to_string()
-            };
+            out.source_note =
+                "已同步 Antigravity 当前对话（通过官方 agy acp 实时生效）".to_string();
         }
         HarnessKind::Dsh => {}
     }
@@ -3621,7 +3619,7 @@ pub fn execute_harness_turn_in_medium(params: MediumTurnParams) {
             .as_deref()
             .or(params.permission_mode.as_deref())
             .or(params.sandbox_mode.as_deref());
-        crate::acp::run_acp_turn_in_medium(
+        let _ = crate::acp::run_acp_turn_in_medium(
             &params.turn_id,
             &params.harness,
             &params.exe,
@@ -3634,6 +3632,7 @@ pub fn execute_harness_turn_in_medium(params: MediumTurnParams) {
             &params.attachments,
             &params.prompt,
             &mut pipe_writer,
+            true,
         );
         unregister_turn_pid(&params.turn_id);
         return;
@@ -3995,8 +3994,34 @@ fn run_antigravity_turn_in_medium(
     let resolved_model = model
         .map(|m| resolve_antigravity_model_for_effort(m, effort))
         .filter(|s| !s.is_empty());
-    // Route existing Antigravity Desktop conversations (and Desktop projects) silently
-    // through the official Plugin Sidecar (`agentapi`) — zero CLI, zero foreground stealing!
+    // Primary path: official `agy acp` (Antigravity built-in ACP v1 server) supports `session/resume`,
+    // `session/set_model`, `session/set_mode`, `thought_level`, and live streaming on BOTH Desktop and CLI conversations!
+    let effective_mode = if plan_mode == Some(true) {
+        Some("plan")
+    } else {
+        execution_mode
+    };
+    if !exe.trim().is_empty() && Path::new(exe).is_file() {
+        let acp_args = vec!["acp".to_string()];
+        if crate::acp::run_acp_turn_in_medium(
+            turn_id,
+            "antigravity",
+            exe,
+            &acp_args,
+            cwd,
+            session_id,
+            resolved_model.as_deref(),
+            effort,
+            effective_mode,
+            attachments,
+            prompt,
+            pipe_writer,
+            false,
+        ) {
+            return;
+        }
+    }
+    // Fallback for desktop conversations if `agy acp` handshake is unavailable: official `agentapi` sidecar
     let is_cli_target = match (session_id, project_id) {
         (Some(sid), _) if !sid.trim().is_empty() => is_antigravity_cli_conversation(sid),
         (_, Some("default-cli-project")) => true,
