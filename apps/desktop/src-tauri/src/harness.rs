@@ -73,6 +73,18 @@ pub struct HarnessAvailability {
     pub model_label: String,
     pub effort_label: String,
     pub access_label: String,
+    #[serde(default)]
+    pub provider_kind: String, // "native" | "acp" | "universal"
+    #[serde(default)]
+    pub accent: String,
+    #[serde(default)]
+    pub badge: String,
+    #[serde(default)]
+    pub custom: bool,
+    #[serde(default)]
+    pub command: String,
+    #[serde(default)]
+    pub args: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -424,7 +436,7 @@ fn read_claude_code_config_display() -> (String, String, String) {
     (model_label, effort_label, access_label)
 }
 
-fn find_in_path(binary: &str) -> Option<PathBuf> {
+pub(crate) fn find_in_path(binary: &str) -> Option<PathBuf> {
     let path_var = std::env::var_os("PATH")?;
     for dir in std::env::split_paths(&path_var) {
         let candidate = dir.join(binary);
@@ -1497,7 +1509,11 @@ pub fn load_harness_composer_options(kind: HarnessKind) -> HarnessComposerOption
     }
 }
 
-pub fn list_harness_availability(dsh_connected: bool) -> Vec<HarnessAvailability> {
+pub fn list_harness_availability(
+    dsh_connected: bool,
+    custom_acp: &[crate::config::CustomAcpHarness],
+    target_window_label: Option<&str>,
+) -> Vec<HarnessAvailability> {
     let agy = resolve_agy_exe();
     let codex = resolve_codex_exe();
     let claude = resolve_claude_exe();
@@ -1507,7 +1523,7 @@ pub fn list_harness_availability(dsh_connected: bool) -> Vec<HarnessAvailability
     let claude_running = find_main_window_for_exe("claude.exe").is_some();
     let (codex_model, codex_effort, codex_access) = read_codex_config_display();
     let (claude_model, claude_effort, claude_access) = read_claude_code_config_display();
-    vec![
+    let mut list = vec![
         HarnessAvailability {
             id: "dsh".to_string(),
             label: "DeepSeek Harness".to_string(),
@@ -1523,6 +1539,12 @@ pub fn list_harness_availability(dsh_connected: bool) -> Vec<HarnessAvailability
             model_label: String::new(),
             effort_label: String::new(),
             access_label: String::new(),
+            provider_kind: "native".to_string(),
+            accent: "#4d6bfe".to_string(),
+            badge: "DS".to_string(),
+            custom: false,
+            command: String::new(),
+            args: Vec::new(),
         },
         HarnessAvailability {
             id: "antigravity".to_string(),
@@ -1535,6 +1557,12 @@ pub fn list_harness_availability(dsh_connected: bool) -> Vec<HarnessAvailability
             model_label: "Gemini 4 Neon".to_string(),
             effort_label: "High".to_string(),
             access_label: "Turbo".to_string(),
+            provider_kind: "native".to_string(),
+            accent: "#4285f4".to_string(),
+            badge: "AG".to_string(),
+            custom: false,
+            command: String::new(),
+            args: Vec::new(),
         },
         HarnessAvailability {
             id: "codex".to_string(),
@@ -1547,6 +1575,12 @@ pub fn list_harness_availability(dsh_connected: bool) -> Vec<HarnessAvailability
             model_label: codex_model,
             effort_label: codex_effort,
             access_label: codex_access,
+            provider_kind: "native".to_string(),
+            accent: "#10a37f".to_string(),
+            badge: "CX".to_string(),
+            custom: false,
+            command: String::new(),
+            args: Vec::new(),
         },
         HarnessAvailability {
             id: "claude_code".to_string(),
@@ -1559,8 +1593,44 @@ pub fn list_harness_availability(dsh_connected: bool) -> Vec<HarnessAvailability
             model_label: claude_model,
             effort_label: claude_effort,
             access_label: claude_access,
+            provider_kind: "native".to_string(),
+            accent: "#d97757".to_string(),
+            badge: "CC".to_string(),
+            custom: false,
+            command: String::new(),
+            args: Vec::new(),
         },
-    ]
+    ];
+
+    // Append auto-discovered native ACP agents & user-configured custom ACP harnesses
+    list.extend(crate::acp::list_acp_availability(custom_acp));
+
+    // Append Universal Focused-Window Drop-In fallback (works with ANY closed app or webpage)
+    let tgt_desc = target_window_label
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(|s| format!("目标窗口：{s}"))
+        .unwrap_or_else(|| "一键投递到任意聊天窗 / 网页输入框".to_string());
+    list.push(HarnessAvailability {
+        id: "universal".to_string(),
+        label: "任意窗口投递".to_string(),
+        subtitle: tgt_desc,
+        available: true,
+        running: true,
+        exe_path: None,
+        sync_note: "零侵入 · 粘贴后自动还原原剪贴板".to_string(),
+        model_label: "万能投递".to_string(),
+        effort_label: String::new(),
+        access_label: "仅粘贴".to_string(),
+        provider_kind: "universal".to_string(),
+        accent: "#06b6d4".to_string(),
+        badge: "投".to_string(),
+        custom: false,
+        command: String::new(),
+        args: Vec::new(),
+    });
+
+    list
 }
 
 pub(crate) fn clean_windows_path(raw: &str) -> String {
@@ -3484,6 +3554,7 @@ pub struct MediumTurnParams {
     pub turn_id: String,
     pub harness: String,
     pub exe: String,
+    pub acp_args: Vec<String>,
     pub cwd: Option<String>,
     pub project_id: Option<String>,
     pub session_id: Option<String>,
@@ -3502,7 +3573,7 @@ pub struct MediumTurnParams {
     pub out_pipe: String,
 }
 
-fn build_prompt_with_file_attachments(
+pub(crate) fn build_prompt_with_file_attachments(
     prompt: &str,
     attachments: &[TurnAttachment],
     include_images_as_paths: bool,
@@ -3543,6 +3614,30 @@ pub fn execute_harness_turn_in_medium(params: MediumTurnParams) {
         log::warn!("Medium harness worker failed to open stream pipe {full_pipe}");
         return;
     };
+
+    if crate::acp::is_acp_harness_id(&params.harness) {
+        let mode_choice = params
+            .execution_mode
+            .as_deref()
+            .or(params.permission_mode.as_deref())
+            .or(params.sandbox_mode.as_deref());
+        crate::acp::run_acp_turn_in_medium(
+            &params.turn_id,
+            &params.harness,
+            &params.exe,
+            &params.acp_args,
+            params.cwd.as_deref(),
+            params.session_id.as_deref(),
+            params.model.as_deref(),
+            params.effort.as_deref(),
+            mode_choice,
+            &params.attachments,
+            &params.prompt,
+            &mut pipe_writer,
+        );
+        unregister_turn_pid(&params.turn_id);
+        return;
+    }
 
     match HarnessKind::parse(&params.harness) {
         HarnessKind::Antigravity => {
@@ -5121,6 +5216,7 @@ pub fn start_external_harness_turn(
         turn_id: turn_id.clone(),
         harness: harness.as_str().to_string(),
         exe: exe.to_string_lossy().to_string(),
+        acp_args: Vec::new(),
         cwd: req_in.cwd,
         project_id: req_in.project_id,
         session_id: req_in.session_id,
@@ -5173,6 +5269,88 @@ pub fn start_external_harness_turn(
             }
         })
         .map_err(|e| format!("启动流式读取线程失败: {e}"))?;
+
+    Ok(())
+}
+
+pub fn start_acp_harness_turn(
+    app: AppHandle,
+    broker: std::sync::Arc<BrokerClient>,
+    harness_id: String,
+    spec: crate::acp::AcpAgentSpec,
+    turn_id: String,
+    cwd: Option<String>,
+    session_id: Option<String>,
+    model: Option<String>,
+    effort: Option<String>,
+    mode: Option<String>,
+    attachments: Vec<TurnAttachment>,
+    prompt: String,
+) -> Result<(), String> {
+    if !spec.available {
+        return Err(format!("未找到 ACP 命令：{}", spec.command));
+    }
+    let (pipe_short, server_pipe) = broker
+        .create_oneshot_read_pipe(&turn_id)
+        .map_err(|e| format!("创建流式管道失败: {e}"))?;
+
+    let req = BrokerRequest::StartHarnessTurn {
+        turn_id: turn_id.clone(),
+        harness: harness_id.clone(),
+        exe: spec.command,
+        acp_args: spec.args,
+        cwd: cwd.or(spec.default_cwd),
+        project_id: None,
+        session_id,
+        permission_mode: mode.clone(),
+        model,
+        effort,
+        sandbox_mode: None,
+        execution_mode: mode,
+        fast_speed: None,
+        plan_mode: None,
+        sandbox_enabled: None,
+        chrome_enabled: None,
+        enabled_plugins: Vec::new(),
+        attachments,
+        prompt,
+        out_pipe: pipe_short,
+    };
+
+    let resp = broker.call(req);
+    if !resp.ok {
+        return Err(resp
+            .error
+            .unwrap_or_else(|| "启动 ACP Agent 进程失败".to_string()));
+    }
+
+    std::thread::Builder::new()
+        .name(format!("acp-stream-{}", crate::acp::normalize_acp_slug(&harness_id)))
+        .spawn(move || {
+            let Ok(reader) = server_pipe.accept_and_read() else {
+                let err_evt = HarnessStreamEvent {
+                    turn_id: turn_id.clone(),
+                    harness: harness_id.clone(),
+                    kind: "error".to_string(),
+                    session_id: None,
+                    text: None,
+                    tool_name: None,
+                    error: Some("ACP 流式管道未能连接".to_string()),
+                };
+                push_harness_event_to_bar(&app, &err_evt);
+                return;
+            };
+            for line in reader.lines().map_while(Result::ok) {
+                let trimmed = line.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+                if let Ok(evt) = serde_json::from_str::<HarnessStreamEvent>(trimmed) {
+                    push_harness_event_to_bar(&app, &evt);
+                }
+            }
+        })
+        .map_err(|e| format!("启动 ACP 流式读取线程失败: {e}"))?;
 
     Ok(())
 }
@@ -5312,9 +5490,10 @@ mod tests {
 
     #[test]
     fn readonly_catalog_loaders_succeed_without_mutating_local_dbs() {
-        let avail = list_harness_availability(true);
-        assert_eq!(avail.len(), 4);
+        let avail = list_harness_availability(true, &[], Some("Chrome · ChatGPT"));
+        assert!(avail.len() >= 5);
         assert!(avail.iter().any(|a| a.id == "claude_code"));
+        assert!(avail.iter().any(|a| a.id == "universal" && a.subtitle.contains("Chrome")));
         let ag = load_antigravity_catalog();
         assert_eq!(ag.harness, "antigravity");
         assert!(ag.error.is_none());

@@ -1212,8 +1212,8 @@ mod tests {
     #[ignore = "live host smoke & latency benchmark"]
     fn live_full_stack_smoke_and_benchmark() {
         // 1. Harness availability & real read-only catalog sync
-        let avail = crate::harness::list_harness_availability(true);
-        assert_eq!(avail.len(), 3);
+        let avail = crate::harness::list_harness_availability(true, &[], None);
+        assert!(avail.len() >= 5);
         let ag = avail.iter().find(|a| a.id == "antigravity").unwrap();
         let cx = avail.iter().find(|a| a.id == "codex").unwrap();
         eprintln!(

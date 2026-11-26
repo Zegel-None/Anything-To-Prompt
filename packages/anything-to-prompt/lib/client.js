@@ -292,9 +292,163 @@ window.__ModuleLoader__.load({
       return HARNESS_ADAPTERS[id] || {};
     }
 
+    function hexToRgba(hex, alpha) {
+      const clean = String(hex || '#38bdf8').replace('#', '').trim();
+      const full = clean.length === 3 ? clean.split('').map((c) => c + c).join('') : clean;
+      if (full.length !== 6) return 'rgba(56, 189, 248, ' + alpha + ')';
+      const n = parseInt(full, 16);
+      if (!Number.isFinite(n)) return 'rgba(56, 189, 248, ' + alpha + ')';
+      const r = (n >> 16) & 255;
+      const g = (n >> 8) & 255;
+      const b = n & 255;
+      return 'rgba(' + r + ', ' + g + ', ' + b + ', ' + alpha + ')';
+    }
+
+    function buildDynamicPalette(accentHex) {
+      const accent = accentHex && accentHex.startsWith('#') ? accentHex : '#38bdf8';
+      return {
+        dotStyle: accent,
+        dark: {
+          surface: '#1b1d22',
+          popover: '#1f2228',
+          drawer: '#181a1f',
+          border: 'rgba(255, 255, 255, 0.11)',
+          subtleBorder: 'rgba(255, 255, 255, 0.08)',
+          fg: '#eceff4',
+          muted: '#9ca3af',
+          hoverBg: 'rgba(255, 255, 255, 0.06)',
+          plusBg: 'rgba(255, 255, 255, 0.08)',
+          accent,
+          accentBg: hexToRgba(accent, 0.16),
+          accentBorder: hexToRgba(accent, 0.42),
+          topBar: accent,
+          sendBg: accent,
+          sendFg: '#ffffff',
+          sendRing: '0 2px 10px ' + hexToRgba(accent, 0.35),
+          permDanger: '#fb923c',
+        },
+        light: {
+          surface: '#ffffff',
+          popover: '#ffffff',
+          drawer: '#f8fafc',
+          border: 'rgba(15, 23, 42, 0.11)',
+          subtleBorder: 'rgba(15, 23, 42, 0.08)',
+          fg: '#0f172a',
+          muted: '#64748b',
+          hoverBg: 'rgba(15, 23, 42, 0.05)',
+          plusBg: 'rgba(15, 23, 42, 0.06)',
+          accent,
+          accentBg: hexToRgba(accent, 0.12),
+          accentBorder: hexToRgba(accent, 0.34),
+          topBar: accent,
+          sendBg: accent,
+          sendFg: '#ffffff',
+          sendRing: '0 2px 10px ' + hexToRgba(accent, 0.28),
+          permDanger: '#ea580c',
+        },
+      };
+    }
+
+    const BUILTIN_STATIC_HARNESS_IDS = new Set(HARNESS_ORDER.slice());
+
+    function ensureExternalRuntimeSlots(id) {
+      if (!dsbRuntime || id === 'dsh') return;
+      if (!Object.prototype.hasOwnProperty.call(dsbRuntime.externalCatalogs, id)) {
+        dsbRuntime.externalCatalogs[id] = null;
+      }
+      if (!Object.prototype.hasOwnProperty.call(dsbRuntime.externalSelection, id)) {
+        const meta = getHarnessMeta(id);
+        dsbRuntime.externalSelection[id] = readStoredExtSelection(id, meta.defaultSelection);
+      }
+      if (!Object.prototype.hasOwnProperty.call(dsbRuntime.externalMessages, id)) {
+        dsbRuntime.externalMessages[id] = [];
+      }
+      if (!Object.prototype.hasOwnProperty.call(dsbRuntime.externalLoading, id)) {
+        dsbRuntime.externalLoading[id] = false;
+      }
+      if (!Object.prototype.hasOwnProperty.call(dsbRuntime.liveSyncMeta, id)) {
+        dsbRuntime.liveSyncMeta[id] = null;
+      }
+      if (!Object.prototype.hasOwnProperty.call(dsbRuntime.lastSyncCatalogRefresh, id)) {
+        dsbRuntime.lastSyncCatalogRefresh[id] = 0;
+      }
+      if (!Object.prototype.hasOwnProperty.call(dsbRuntime.harnessPrefs, id)) {
+        dsbRuntime.harnessPrefs[id] = readStoredHarnessPrefs(id);
+      }
+    }
+
+    function syncDynamicHarnessesFromAvailability(list) {
+      if (!Array.isArray(list)) return;
+      const incomingDynamicIds = new Set();
+      for (const item of list) {
+        if (!item || !item.id) continue;
+        const id = String(item.id).trim().toLowerCase();
+        if (!id || BUILTIN_STATIC_HARNESS_IDS.has(id)) continue;
+        incomingDynamicIds.add(id);
+        const isUniversal = id === 'universal' || item.providerKind === 'universal';
+        const accent = item.accent && String(item.accent).startsWith('#') ? item.accent : (isUniversal ? '#06b6d4' : '#38bdf8');
+        const label = item.label || id;
+        const meta = {
+          id,
+          order: isUniversal ? 999 : (item.custom ? 700 : 600),
+          aliases: [id],
+          label,
+          fullLabel: label,
+          badge: item.badge || (isUniversal ? '投' : 'AC'),
+          providerKind: item.providerKind || (isUniversal ? 'universal' : 'acp'),
+          custom: Boolean(item.custom),
+          syncHint: item.syncNote || item.subtitle || (isUniversal ? '一键投递到任意焦点窗口' : 'ACP 标准协议实时握手'),
+          placeholder: isUniversal
+            ? '输入或圈选内容，回车一键投递到目标窗口输入框…'
+            : '向 ' + label + ' 发送消息（ACP 标准协议，支持 Ctrl 圈选屏幕）…',
+          accent,
+          accentBg: hexToRgba(accent, 0.16),
+          accentBorder: hexToRgba(accent, 0.42),
+          surface: '#1b1d22',
+          border: 'rgba(255, 255, 255, 0.11)',
+          useNativeComposer: false,
+          cornerRadius: 18,
+          fallbackSlabHeight: 168,
+          chipIconStyle: 'dot',
+          newWorkspaceLabel: isUniversal ? '刷新目标窗口' : '选择工作区目录…',
+          detailButtonTitle: isUniversal ? '查看当前目标窗口' : ('ACP 标准会话 · ' + label),
+          emptyHistoryHint: isUniversal
+            ? '万能投递模式 — 圈选屏幕元素或写好 Prompt，回车直接粘贴到上一个聚焦的聊天窗口'
+            : (label + ' (ACP) 已就绪 — 模型与权限由 Agent 实时下发'),
+          emptyLipHint: label + ' 已就绪 · 双击 Ctrl 唤出输入框',
+          defaultSelection: {
+            workspaceId: isUniversal ? 'universal-focus' : '',
+            workspacePath: '',
+            sessionId: isUniversal ? 'universal-active' : '',
+            title: isUniversal ? '当前焦点窗口' : (label + ' · 新对话'),
+          },
+        };
+        if (!HARNESS_META[id]) {
+          HARNESS_ORDER.push(id);
+        }
+        HARNESS_META[id] = meta;
+        HARNESS_ALIAS_MAP[id] = id;
+        UNIFIED_PALETTES[id] = buildDynamicPalette(accent);
+        ensureExternalRuntimeSlots(id);
+      }
+      // Prune removed custom ACP harnesses
+      for (let i = HARNESS_ORDER.length - 1; i >= 0; i -= 1) {
+        const hid = HARNESS_ORDER[i];
+        if (!BUILTIN_STATIC_HARNESS_IDS.has(hid) && !incomingDynamicIds.has(hid)) {
+          HARNESS_ORDER.splice(i, 1);
+          delete HARNESS_META[hid];
+          delete HARNESS_ALIAS_MAP[hid];
+          if (dsbRuntime && dsbRuntime.activeHarness === hid) {
+            dsbRuntime.activeHarness = 'dsh';
+          }
+        }
+      }
+    }
+
     function normalizeHarnessId(raw) {
       const s = String(raw || '').trim().toLowerCase();
       if (s && HARNESS_ALIAS_MAP[s]) return HARNESS_ALIAS_MAP[s];
+      if (s === 'universal' || s.startsWith('acp:')) return s;
       return HARNESS_ORDER[0] || 'dsh';
     }
 
@@ -486,6 +640,7 @@ window.__ModuleLoader__.load({
       ),
       sessionSyncState: {},
       sessionDirtyKeys: {},
+      universalTarget: null,
       unreadCount: 0,
       unreadPreview: '',
       toggleHarnessMenu: null,
@@ -688,12 +843,26 @@ window.__ModuleLoader__.load({
       return tauriInvoke('harness_list_available')
         .then((list) => {
           if (Array.isArray(list)) {
+            syncDynamicHarnessesFromAvailability(list);
             dsbRuntime.harnessAvailability = list;
             notifyBarRuntime();
           }
           return list;
         })
         .catch(() => []);
+    }
+
+    function refreshUniversalTarget() {
+      if (!IS_BAR) return Promise.resolve(null);
+      return tauriInvoke('universal_get_target')
+        .then((info) => {
+          if (info && typeof info === 'object') {
+            dsbRuntime.universalTarget = info;
+            notifyBarRuntime();
+          }
+          return info;
+        })
+        .catch(() => null);
     }
 
     function loadExternalConversationMessages(harnessId, sessionId) {
@@ -862,6 +1031,7 @@ window.__ModuleLoader__.load({
 
     function setActiveHarness(harnessId, persist = true, skipCatalogRefresh = false) {
       const norm = normalizeHarnessId(harnessId);
+      ensureExternalRuntimeSlots(norm);
       if (dsbRuntime.activeHarness !== norm) {
         dsbRuntime.unreadCount = 0;
         dsbRuntime.unreadPreview = '';
@@ -873,8 +1043,14 @@ window.__ModuleLoader__.load({
         writeStoredString(STORAGE_KEY_ACTIVE_HARNESS, norm);
         tauriInvoke('harness_set_active', { harness: norm }).catch(() => {});
       }
-      if (!getHarnessMeta(norm).useNativeComposer && !skipCatalogRefresh) {
+      if (norm === 'universal') {
+        refreshUniversalTarget();
+        refreshHarnessOptions('universal');
+      } else if (!getHarnessMeta(norm).useNativeComposer && !skipCatalogRefresh) {
         refreshExternalCatalog(norm, true);
+        if (norm.startsWith('acp:') || !dsbRuntime.harnessOptions[norm]) {
+          refreshHarnessOptions(norm);
+        }
       } else if (!getHarnessMeta(norm).useNativeComposer) {
         const curSel = dsbRuntime.externalSelection[norm] || {};
         if (curSel.sessionId) syncExternalSessionState(norm, curSel.sessionId, false);
@@ -1036,7 +1212,12 @@ window.__ModuleLoader__.load({
               model: resolvedModel,
               effort: resolvedEffort,
               sandboxMode: hId === 'codex' ? (resolvedMode || 'danger-full-access') : null,
-              executionMode: hId === 'antigravity' ? (resolvedMode || 'auto') : null,
+              executionMode:
+                hId === 'universal'
+                  ? (resolvedMode || 'paste_only')
+                  : hId.startsWith('acp:') || hId === 'antigravity'
+                    ? (resolvedMode || 'auto')
+                    : null,
             };
 
       tauriInvoke('harness_send_message', {
@@ -1417,6 +1598,12 @@ window.__ModuleLoader__.load({
       applyHarnessThemeAttribute(dsbRuntime.activeHarness);
       window.__DSB_HARNESS_EVENT__ = handleIncomingHarnessEvent;
       window.__DSB_HARNESS_SYNC__ = handleIncomingHarnessSync;
+      window.__DSB_TARGET_WINDOW__ = (info) => {
+        if (info && typeof info === 'object') {
+          dsbRuntime.universalTarget = info;
+          notifyBarRuntime();
+        }
+      };
       window.__DSB_BRIDGE__ = {
         setMode(mode) {
           setBarMode(mode);
@@ -5664,12 +5851,15 @@ window.__ModuleLoader__.load({
             adapter && typeof adapter.getActiveChips === 'function'
               ? adapter.getActiveChips(buildHarnessActionCtx(m.id))
               : [];
-          const wsLabel =
-            (ctx.selection && ctx.selection.workspacePath
-              ? ctx.workspaceBasename(ctx.selection.workspacePath)
-              : '') ||
-            (ctx.selection && ctx.selection.title) ||
-            m.label;
+          const isUniversalMode = m.id === 'universal';
+          const univTgt = dsbRuntime.universalTarget;
+          const wsLabel = isUniversalMode
+            ? (univTgt && univTgt.valid && univTgt.displayLabel ? '🎯 ' + univTgt.displayLabel : '🎯 上一个焦点窗口')
+            : (ctx.selection && ctx.selection.workspacePath
+                ? ctx.workspaceBasename(ctx.selection.workspacePath)
+                : '') ||
+              (ctx.selection && ctx.selection.title) ||
+              m.label;
           const cardShadow = t.isDark
             ? '0 14px 36px rgba(0, 0, 0, 0.46)'
             : '0 8px 24px rgba(15, 23, 42, 0.09)';
@@ -5921,38 +6111,52 @@ window.__ModuleLoader__.load({
               h(
                 'div',
                 { style: { display: 'flex', alignItems: 'center', gap: '8px', flexShrink: 0 } },
-                h(
-                  'button',
-                  {
-                    type: 'button',
-                    'data-dsb-model-btn': '1',
-                    title: '切换模型与推理强度',
-                    onClick: (ev) => {
-                      ev.stopPropagation();
-                      ctx.openComposerPopover && ctx.openComposerPopover('model', ev.currentTarget);
-                    },
-                    style: {
-                      height: '26px',
-                      border: 'none',
-                      borderRadius: '8px',
-                      padding: '0 7px',
-                      background: ctx.activePopover === 'model' ? t.accentBg : 'transparent',
-                      color: t.fg,
-                      fontSize: '12.5px',
-                      fontWeight: 500,
-                      cursor: 'pointer',
-                      display: 'inline-flex',
-                      alignItems: 'center',
-                      gap: '5px',
-                      whiteSpace: 'nowrap',
-                    },
-                  },
-                  h('span', null, (curModel && curModel.label) || ''),
-                  curEffort && curEffort.label
-                    ? h('span', { style: { color: t.muted, fontWeight: 400 } }, curEffort.label)
-                    : null,
-                  HARNESS_SDK_ICONS.chevronDown(t.muted),
-                ),
+                isUniversalMode
+                  ? h(
+                      'span',
+                      {
+                        title: '万能投递模式：发送后将自动切回目标窗口并粘贴',
+                        style: {
+                          fontSize: '11.5px',
+                          color: t.muted,
+                          padding: '0 4px',
+                          whiteSpace: 'nowrap',
+                        },
+                      },
+                      '万能投递 · 零侵入',
+                    )
+                  : h(
+                      'button',
+                      {
+                        type: 'button',
+                        'data-dsb-model-btn': '1',
+                        title: '切换模型与推理强度',
+                        onClick: (ev) => {
+                          ev.stopPropagation();
+                          ctx.openComposerPopover && ctx.openComposerPopover('model', ev.currentTarget);
+                        },
+                        style: {
+                          height: '26px',
+                          border: 'none',
+                          borderRadius: '8px',
+                          padding: '0 7px',
+                          background: ctx.activePopover === 'model' ? t.accentBg : 'transparent',
+                          color: t.fg,
+                          fontSize: '12.5px',
+                          fontWeight: 500,
+                          cursor: 'pointer',
+                          display: 'inline-flex',
+                          alignItems: 'center',
+                          gap: '5px',
+                          whiteSpace: 'nowrap',
+                        },
+                      },
+                      h('span', null, (curModel && curModel.label) || ''),
+                      curEffort && curEffort.label
+                        ? h('span', { style: { color: t.muted, fontWeight: 400 } }, curEffort.label)
+                        : null,
+                      HARNESS_SDK_ICONS.chevronDown(t.muted),
+                    ),
                 h(
                   'button',
                   {
@@ -7250,6 +7454,10 @@ window.__ModuleLoader__.load({
         const [manualPathMode, setManualPathMode] = useState(false);
         const [manualPathValue, setManualPathValue] = useState('');
         const [pickerError, setPickerError] = useState('');
+        const [customAcpLabel, setCustomAcpLabel] = useState('');
+        const [customAcpCmd, setCustomAcpCmd] = useState('');
+        const [customAcpArgs, setCustomAcpArgs] = useState('');
+        const [customAcpErr, setCustomAcpErr] = useState('');
         const [pillMetrics, setPillMetrics] = useState(null);
         const [wsMarginBottom, setWsMarginBottom] = useState(0);
         const [submenuMarginBottom, setSubmenuMarginBottom] = useState(0);
@@ -8197,6 +8405,194 @@ window.__ModuleLoader__.load({
                   (v) => updateAppSettings({ autostart: v }),
                 ),
               ),
+              // Open Harness Platform: Auto-Discovered ACP & Custom ACP Registration
+              h(
+                'div',
+                {
+                  'data-dsb-acp-settings': '1',
+                  style: {
+                    display: 'flex',
+                    flexDirection: 'column',
+                    gap: '5px',
+                    padding: '7px 8px',
+                    borderRadius: '10px',
+                    background: panelRowBg,
+                    border: '1px solid ' + panelBorder,
+                  },
+                },
+                h(
+                  'div',
+                  { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '6px' } },
+                  h('span', { style: { fontSize: '11.5px', fontWeight: 600, color: panelFg } }, '开放 Harness（ACP 标准生态 & 自定义）'),
+                  h('span', { style: { fontSize: '10px', color: panelMuted } }, '自动探测本机 · 零代码接入新工具'),
+                ),
+                h(
+                  'div',
+                  { style: { display: 'flex', flexWrap: 'wrap', gap: '4px' } },
+                  (dsbRuntime.harnessAvailability || [])
+                    .filter((x) => x && x.providerKind === 'acp')
+                    .map((item) =>
+                      h(
+                        'span',
+                        {
+                          key: 'acp-chip-' + item.id,
+                          title: (item.command || '') + (Array.isArray(item.args) && item.args.length ? ' ' + item.args.join(' ') : ''),
+                          style: {
+                            display: 'inline-flex',
+                            alignItems: 'center',
+                            gap: '5px',
+                            padding: '2px 7px',
+                            borderRadius: '999px',
+                            fontSize: '11px',
+                            background: item.available ? 'rgba(16, 185, 129, 0.14)' : 'rgba(148, 163, 184, 0.14)',
+                            border: '1px solid ' + (item.available ? 'rgba(16, 185, 129, 0.35)' : panelBorder),
+                            color: panelFg,
+                          },
+                        },
+                        h('span', null, (item.available ? '✓ ' : '· ') + item.label),
+                        item.custom
+                          ? h(
+                              'button',
+                              {
+                                type: 'button',
+                                title: '移除该自定义 ACP Harness',
+                                onClick: () => {
+                                  tauriInvoke('harness_remove_custom_acp', { id: item.id })
+                                    .then(() => {
+                                      refreshHarnessAvailability();
+                                      setActionToast('已移除 ' + item.label);
+                                      setTimeout(() => setActionToast(''), 1800);
+                                    })
+                                    .catch(() => {});
+                                },
+                                style: {
+                                  border: 'none',
+                                  background: 'transparent',
+                                  color: '#fca5a5',
+                                  cursor: 'pointer',
+                                  padding: '0 2px',
+                                  fontSize: '11px',
+                                  lineHeight: 1,
+                                },
+                              },
+                              '×',
+                            )
+                          : null,
+                      ),
+                    ),
+                ),
+                h(
+                  'div',
+                  { style: { display: 'flex', gap: '4px', alignItems: 'center' } },
+                  h('input', {
+                    type: 'text',
+                    placeholder: '名称（如 Goose）',
+                    value: customAcpLabel,
+                    onChange: (ev) => setCustomAcpLabel(ev.target.value),
+                    style: {
+                      width: '28%',
+                      padding: '4px 6px',
+                      borderRadius: '7px',
+                      fontSize: '11px',
+                      background: 'rgba(128,128,128,0.12)',
+                      border: '1px solid ' + panelBorder,
+                      color: panelFg,
+                      outline: 'none',
+                      boxSizing: 'border-box',
+                    },
+                  }),
+                  h('input', {
+                    type: 'text',
+                    placeholder: '命令（如 goose / npx）',
+                    value: customAcpCmd,
+                    onChange: (ev) => setCustomAcpCmd(ev.target.value),
+                    style: {
+                      width: '32%',
+                      padding: '4px 6px',
+                      borderRadius: '7px',
+                      fontSize: '11px',
+                      background: 'rgba(128,128,128,0.12)',
+                      border: '1px solid ' + panelBorder,
+                      color: panelFg,
+                      outline: 'none',
+                      boxSizing: 'border-box',
+                    },
+                  }),
+                  h('input', {
+                    type: 'text',
+                    placeholder: '参数（如 acp）',
+                    value: customAcpArgs,
+                    onChange: (ev) => setCustomAcpArgs(ev.target.value),
+                    style: {
+                      flex: 1,
+                      minWidth: 0,
+                      padding: '4px 6px',
+                      borderRadius: '7px',
+                      fontSize: '11px',
+                      background: 'rgba(128,128,128,0.12)',
+                      border: '1px solid ' + panelBorder,
+                      color: panelFg,
+                      outline: 'none',
+                      boxSizing: 'border-box',
+                    },
+                  }),
+                  h(
+                    'button',
+                    {
+                      type: 'button',
+                      'data-dsb-add-acp-btn': '1',
+                      onClick: () => {
+                        const cmd = customAcpCmd.trim();
+                        if (!cmd) {
+                          setCustomAcpErr('请先填写启动命令');
+                          return;
+                        }
+                        setCustomAcpErr('');
+                        const parsedArgs = customAcpArgs
+                          .trim()
+                          .split(/\s+/)
+                          .filter(Boolean);
+                        tauriInvoke('harness_upsert_custom_acp', {
+                          item: {
+                            id: customAcpLabel.trim() || cmd,
+                            label: customAcpLabel.trim() || cmd,
+                            command: cmd,
+                            args: parsedArgs,
+                            accent: '#38bdf8',
+                            defaultCwd: null,
+                          },
+                        })
+                          .then(() => {
+                            setCustomAcpLabel('');
+                            setCustomAcpCmd('');
+                            setCustomAcpArgs('');
+                            refreshHarnessAvailability();
+                            setActionToast('已接入自定义 ACP Harness');
+                            setTimeout(() => setActionToast(''), 2000);
+                          })
+                          .catch((err) => {
+                            setCustomAcpErr(String(err || '添加失败'));
+                          });
+                      },
+                      style: {
+                        padding: '4px 9px',
+                        borderRadius: '7px',
+                        border: '1px solid ' + unifiedPanelTheme.accentBorder,
+                        background: unifiedPanelTheme.accentBg,
+                        color: unifiedPanelTheme.accent,
+                        fontSize: '11px',
+                        fontWeight: 600,
+                        cursor: 'pointer',
+                        flexShrink: 0,
+                      },
+                    },
+                    '＋ 接入',
+                  ),
+                ),
+                customAcpErr
+                  ? h('div', { style: { fontSize: '10.5px', color: '#fca5a5' } }, customAcpErr)
+                  : null,
+              ),
               h(
                 'div',
                 {
@@ -8494,8 +8890,45 @@ window.__ModuleLoader__.load({
                               ),
                               h(
                                 'span',
-                                { style: { opacity: isBrowsedH ? 0.9 : 0.5, fontSize: '11.5px', flexShrink: 0 } },
-                                (isActiveH ? '● ' : '') + '›',
+                                { style: { display: 'inline-flex', alignItems: 'center', gap: '4px', flexShrink: 0 } },
+                                meta.providerKind === 'acp'
+                                  ? h(
+                                      'span',
+                                      {
+                                        style: {
+                                          fontSize: '9px',
+                                          padding: '0 4px',
+                                          borderRadius: '4px',
+                                          background: meta.accentBg,
+                                          color: meta.accent,
+                                          lineHeight: '14px',
+                                          fontWeight: 600,
+                                        },
+                                      },
+                                      'ACP',
+                                    )
+                                  : meta.providerKind === 'universal'
+                                    ? h(
+                                        'span',
+                                        {
+                                          style: {
+                                            fontSize: '9px',
+                                            padding: '0 4px',
+                                            borderRadius: '4px',
+                                            background: meta.accentBg,
+                                            color: meta.accent,
+                                            lineHeight: '14px',
+                                            fontWeight: 600,
+                                          },
+                                        },
+                                        '万能',
+                                      )
+                                    : null,
+                                h(
+                                  'span',
+                                  { style: { opacity: isBrowsedH ? 0.9 : 0.5, fontSize: '11.5px' } },
+                                  (isActiveH ? '● ' : '') + '›',
+                                ),
                               ),
                             );
                           }),

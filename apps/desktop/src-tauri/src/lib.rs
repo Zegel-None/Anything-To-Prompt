@@ -1,3 +1,4 @@
+pub mod acp;
 pub mod broker;
 pub mod captures;
 pub mod config;
@@ -17,6 +18,7 @@ pub mod process_guard;
 pub mod search;
 pub mod state;
 pub mod tray;
+pub mod universal;
 pub mod window;
 
 use crate::broker::BrokerClient;
@@ -303,6 +305,7 @@ pub struct AppShared {
     pub compose_waiters: Mutex<HashMap<String, mpsc::Sender<String>>>,
     pub last_outside_hide_at: Mutex<Option<std::time::Instant>>,
     pub live_sync_enabled: Arc<AtomicBool>,
+    pub last_target_window: Mutex<Option<universal::TargetWindowInfo>>,
 }
 
 impl AppShared {
@@ -572,6 +575,23 @@ struct HarnessSendPayload {
     prompt: String,
 }
 
+fn normalize_harness_route(raw: &str) -> String {
+    let trimmed = raw.trim().to_ascii_lowercase();
+    if trimmed == "universal" {
+        return "universal".to_string();
+    }
+    if acp::is_acp_harness_id(&trimmed) {
+        return format!("acp:{}", acp::normalize_acp_slug(&trimmed));
+    }
+    harness::HarnessKind::parse(&trimmed).as_str().to_string()
+}
+
+fn read_custom_acp_list(app: &AppHandle) -> Vec<config::CustomAcpHarness> {
+    app.try_state::<AppShared>()
+        .and_then(|s| s.config.lock().ok().map(|c| c.custom_acp_harnesses.clone()))
+        .unwrap_or_default()
+}
+
 #[tauri::command]
 fn harness_get_active(app: AppHandle) -> String {
     app.try_state::<AppShared>()
@@ -581,7 +601,7 @@ fn harness_get_active(app: AppHandle) -> String {
 
 #[tauri::command]
 fn harness_set_active(app: AppHandle, harness: String) -> String {
-    let normalized = harness::HarnessKind::parse(&harness).as_str().to_string();
+    let normalized = normalize_harness_route(&harness);
     if let Some(shared) = app.try_state::<AppShared>() {
         if let Ok(mut cfg) = shared.config.lock() {
             if cfg.active_harness != normalized {
@@ -599,12 +619,53 @@ fn harness_list_available(app: AppHandle) -> Vec<harness::HarnessAvailability> {
         .try_state::<AppShared>()
         .and_then(|s| s.dsh_conn.lock().ok().map(|c| c.active_port.is_some()))
         .unwrap_or(false);
-    harness::list_harness_availability(dsh_connected)
+    let custom_acp = read_custom_acp_list(&app);
+    let target_label = app
+        .try_state::<AppShared>()
+        .and_then(|s| {
+            s.last_target_window
+                .lock()
+                .ok()
+                .and_then(|g| g.as_ref().map(|t| t.display_label.clone()))
+        });
+    harness::list_harness_availability(dsh_connected, &custom_acp, target_label.as_deref())
 }
 
 #[tauri::command]
-fn harness_load_catalog(harness: String) -> harness::ExternalHarnessCatalog {
-    match harness::HarnessKind::parse(&harness) {
+fn harness_load_catalog(app: AppHandle, harness: String) -> harness::ExternalHarnessCatalog {
+    let norm = normalize_harness_route(&harness);
+    if norm == "universal" {
+        let target = universal_get_target(app);
+        let title = if target.valid && !target.display_label.is_empty() {
+            target.display_label.clone()
+        } else {
+            "上一个聚焦的任意窗口".to_string()
+        };
+        return harness::ExternalHarnessCatalog {
+            harness: "universal".to_string(),
+            available: true,
+            exe_path: None,
+            groups: vec![harness::ExternalWorkspaceGroup {
+                workspace_id: "universal-focus".to_string(),
+                label: "当前焦点窗口".to_string(),
+                path: String::new(),
+                convs: vec![harness::ExternalConversation {
+                    id: "universal-active".to_string(),
+                    title,
+                    updated_at: target.updated_at_ms,
+                    source: "universal".to_string(),
+                    cwd: String::new(),
+                    rollout_path: None,
+                }],
+            }],
+            error: None,
+        };
+    }
+    if acp::is_acp_harness_id(&norm) {
+        let custom_acp = read_custom_acp_list(&app);
+        return acp::load_acp_catalog(&norm, &custom_acp);
+    }
+    match harness::HarnessKind::parse(&norm) {
         harness::HarnessKind::Antigravity => harness::load_antigravity_catalog(),
         harness::HarnessKind::Codex => harness::load_codex_catalog(),
         harness::HarnessKind::ClaudeCode => harness::load_claude_code_catalog(),
@@ -620,13 +681,58 @@ fn harness_load_catalog(harness: String) -> harness::ExternalHarnessCatalog {
 
 #[tauri::command]
 fn harness_load_messages(harness: String, session_id: String) -> Vec<harness::ExternalChatMessage> {
-    let kind = harness::HarnessKind::parse(&harness);
+    let norm = normalize_harness_route(&harness);
+    if norm == "universal" {
+        return Vec::new();
+    }
+    if acp::is_acp_harness_id(&norm) {
+        return acp::load_acp_messages(&norm, &session_id);
+    }
+    let kind = harness::HarnessKind::parse(&norm);
     harness::load_external_messages(kind, &session_id)
 }
 
 #[tauri::command]
-fn harness_list_options(harness: String) -> harness::HarnessComposerOptions {
-    let kind = harness::HarnessKind::parse(&harness);
+fn harness_list_options(app: AppHandle, harness: String) -> harness::HarnessComposerOptions {
+    let norm = normalize_harness_route(&harness);
+    if norm == "universal" {
+        return harness::HarnessComposerOptions {
+            harness: "universal".to_string(),
+            models: vec![harness::HarnessOptionItem {
+                id: "universal-target".into(),
+                label: "当前目标窗口".into(),
+                desc: "自动投递到唤出悬浮条前的焦点窗口".into(),
+            }],
+            efforts: Vec::new(),
+            modes: vec![
+                harness::HarnessOptionItem {
+                    id: "paste_only".into(),
+                    label: "仅粘贴".into(),
+                    desc: "切回目标窗口并 Ctrl+V 粘贴，由你确认后发送（推荐）".into(),
+                },
+                harness::HarnessOptionItem {
+                    id: "paste_and_enter".into(),
+                    label: "粘贴并发送".into(),
+                    desc: "切回目标窗口粘贴后自动按 Enter 发送".into(),
+                },
+                harness::HarnessOptionItem {
+                    id: "clipboard_only".into(),
+                    label: "仅复制".into(),
+                    desc: "不切换窗口，仅将整理好的 Prompt 写入剪贴板".into(),
+                },
+            ],
+            plugins: Vec::new(),
+            actions: Vec::new(),
+            default_model: "universal-target".to_string(),
+            default_effort: String::new(),
+            default_mode: "paste_only".to_string(),
+        };
+    }
+    if acp::is_acp_harness_id(&norm) {
+        let custom_acp = read_custom_acp_list(&app);
+        return acp::probe_acp_options(&norm, &custom_acp);
+    }
+    let kind = harness::HarnessKind::parse(&norm);
     harness::load_harness_composer_options(kind)
 }
 
@@ -635,7 +741,97 @@ fn harness_send_message(app: AppHandle, payload: HarnessSendPayload) -> Result<(
     let Some(shared) = app.try_state::<AppShared>() else {
         return Err("应用状态未就绪".to_string());
     };
-    let kind = harness::HarnessKind::parse(&payload.harness);
+    let norm = normalize_harness_route(&payload.harness);
+
+    if norm == "universal" {
+        let mode = payload
+            .execution_mode
+            .as_deref()
+            .or(payload.permission_mode.as_deref())
+            .or(payload.sandbox_mode.as_deref())
+            .unwrap_or("paste_only")
+            .to_string();
+        let full_text = harness::build_prompt_with_file_attachments(
+            &payload.prompt,
+            &payload.attachments,
+            true,
+        );
+        let target_hwnd = shared
+            .last_target_window
+            .lock()
+            .ok()
+            .and_then(|g| g.as_ref().map(|t| t.hwnd))
+            .unwrap_or(0);
+        let turn_id = payload.turn_id.clone();
+        let app_clone = app.clone();
+        if mode != "clipboard_only" {
+            dispatch_state_event(&app, StateEvent::OutsideClickHide);
+        }
+        std::thread::spawn(move || {
+            if mode != "clipboard_only" {
+                std::thread::sleep(Duration::from_millis(60));
+            }
+            match universal::deliver_to_target_window(target_hwnd, &full_text, &mode) {
+                Ok(msg) => {
+                    harness::push_harness_event_to_bar(
+                        &app_clone,
+                        &harness::HarnessStreamEvent {
+                            turn_id,
+                            harness: "universal".to_string(),
+                            kind: "completed".to_string(),
+                            session_id: Some("universal-active".to_string()),
+                            text: Some(msg),
+                            tool_name: None,
+                            error: None,
+                        },
+                    );
+                }
+                Err(err) => {
+                    harness::push_harness_event_to_bar(
+                        &app_clone,
+                        &harness::HarnessStreamEvent {
+                            turn_id,
+                            harness: "universal".to_string(),
+                            kind: "error".to_string(),
+                            session_id: Some("universal-active".to_string()),
+                            text: None,
+                            tool_name: None,
+                            error: Some(err),
+                        },
+                    );
+                }
+            }
+        });
+        return Ok(());
+    }
+
+    if acp::is_acp_harness_id(&norm) {
+        let custom_acp = read_custom_acp_list(&app);
+        let Some(spec) = acp::resolve_acp_agent_spec(&norm, &custom_acp) else {
+            return Err(format!("未找到 ACP Harness：{norm}"));
+        };
+        let broker = shared.broker.clone();
+        let mode = payload
+            .execution_mode
+            .or(payload.permission_mode)
+            .or(payload.sandbox_mode);
+        return harness::start_acp_harness_turn(
+            app.clone(),
+            broker,
+            norm,
+            spec,
+            payload.turn_id,
+            payload.cwd,
+            payload.session_id,
+            payload.model,
+            payload.effort,
+            mode,
+            payload.attachments,
+            payload.prompt,
+        );
+    }
+
+    let kind = harness::HarnessKind::parse(&norm);
     let broker = shared.broker.clone();
     harness::start_external_harness_turn(
         app.clone(),
@@ -664,14 +860,126 @@ fn harness_send_message(app: AppHandle, payload: HarnessSendPayload) -> Result<(
 
 #[tauri::command]
 fn harness_session_stats(harness: String, session_id: String) -> harness::HarnessSessionStats {
-    let kind = harness::HarnessKind::parse(&harness);
+    let norm = normalize_harness_route(&harness);
+    if acp::is_acp_harness_id(&norm) || norm == "universal" {
+        let turns = acp::load_acp_messages(&norm, &session_id)
+            .into_iter()
+            .filter(|m| m.role == "assistant")
+            .count();
+        return harness::HarnessSessionStats {
+            harness: norm.clone(),
+            session_id: session_id.clone(),
+            model: "ACP".to_string(),
+            turns,
+            input_tokens: 0,
+            output_tokens: 0,
+            cache_read_tokens: 0,
+            cache_creation_tokens: 0,
+            total_tokens: 0,
+            summary_markdown: format!("### 📊 会话统计\n\n- **目标**：`{norm}`\n- **回复轮次**：`{turns}` 轮"),
+        };
+    }
+    let kind = harness::HarnessKind::parse(&norm);
     harness::load_session_stats(kind, &session_id)
 }
 
 #[tauri::command]
 fn harness_session_state(harness: String, session_id: String) -> harness::HarnessSessionState {
-    let kind = harness::HarnessKind::parse(&harness);
+    let norm = normalize_harness_route(&harness);
+    if norm == "universal" {
+        return harness::HarnessSessionState {
+            harness: "universal".to_string(),
+            session_id,
+            source_note: "万能投递模式：发送后将自动切回目标窗口粘贴".to_string(),
+            ..Default::default()
+        };
+    }
+    if acp::is_acp_harness_id(&norm) {
+        return acp::load_acp_session_state(&norm, &session_id);
+    }
+    let kind = harness::HarnessKind::parse(&norm);
     harness::load_session_state(kind, &session_id)
+}
+
+#[tauri::command]
+fn harness_upsert_custom_acp(
+    app: AppHandle,
+    mut item: config::CustomAcpHarness,
+) -> Result<Vec<config::CustomAcpHarness>, String> {
+    let Some(shared) = app.try_state::<AppShared>() else {
+        return Err("应用状态未就绪".to_string());
+    };
+    let cmd = item.command.trim().to_string();
+    if cmd.is_empty() {
+        return Err("启动命令不能为空（例如 opencode / gemini / npx）".to_string());
+    }
+    let label = if item.label.trim().is_empty() {
+        cmd.clone()
+    } else {
+        item.label.trim().to_string()
+    };
+    let slug = if item.id.trim().is_empty() {
+        acp::normalize_acp_slug(&label)
+    } else {
+        acp::normalize_acp_slug(&item.id)
+    };
+    item.id = slug.clone();
+    item.label = label;
+    item.command = cmd;
+    if !item.accent.trim().starts_with('#') {
+        item.accent = "#38bdf8".to_string();
+    }
+    let mut cfg = shared
+        .config
+        .lock()
+        .map_err(|_| "配置锁不可用".to_string())?;
+    if let Some(existing) = cfg
+        .custom_acp_harnesses
+        .iter_mut()
+        .find(|x| acp::normalize_acp_slug(&x.id) == slug)
+    {
+        *existing = item;
+    } else {
+        cfg.custom_acp_harnesses.push(item);
+    }
+    let list = cfg.custom_acp_harnesses.clone();
+    let _ = cfg.save();
+    Ok(list)
+}
+
+#[tauri::command]
+fn harness_remove_custom_acp(
+    app: AppHandle,
+    id: String,
+) -> Result<Vec<config::CustomAcpHarness>, String> {
+    let Some(shared) = app.try_state::<AppShared>() else {
+        return Err("应用状态未就绪".to_string());
+    };
+    let slug = acp::normalize_acp_slug(&id);
+    let mut cfg = shared
+        .config
+        .lock()
+        .map_err(|_| "配置锁不可用".to_string())?;
+    cfg.custom_acp_harnesses
+        .retain(|x| acp::normalize_acp_slug(&x.id) != slug);
+    let list = cfg.custom_acp_harnesses.clone();
+    let _ = cfg.save();
+    Ok(list)
+}
+
+#[tauri::command]
+fn universal_get_target(app: AppHandle) -> universal::TargetWindowInfo {
+    let cached = app.try_state::<AppShared>().and_then(|s| {
+        s.last_target_window
+            .lock()
+            .ok()
+            .and_then(|g| g.clone())
+    });
+    if let Some(mut info) = cached {
+        info.valid = universal::is_target_hwnd_still_valid(info.hwnd);
+        return info;
+    }
+    universal::TargetWindowInfo::default()
 }
 
 #[tauri::command]
@@ -1741,6 +2049,23 @@ fn start_hook_event_router(app: AppHandle, rx: mpsc::Receiver<HookEvent>) {
                             .try_state::<AppShared>()
                             .and_then(|s| s.state_machine.lock().ok().map(|sm| sm.visibility))
                             == Some(VisibilityState::Summon);
+                        if !was_summon && foreground_hwnd != 0 {
+                            if let Some(info) = universal::capture_target_window(foreground_hwnd) {
+                                if let Some(shared) = app.try_state::<AppShared>() {
+                                    if let Ok(mut slot) = shared.last_target_window.lock() {
+                                        *slot = Some(info.clone());
+                                    }
+                                }
+                                if let Some(bar_win) = app.get_webview_window("bar") {
+                                    if let Ok(json) = serde_json::to_string(&info) {
+                                        let js = format!(
+                                            "(function(){{ if (typeof window.__DSB_TARGET_WINDOW__ === 'function') {{ window.__DSB_TARGET_WINDOW__({json}); }} }})();"
+                                        );
+                                        let _ = bar_win.eval(&js);
+                                    }
+                                }
+                            }
+                        }
                         dispatch_state_event(&app, StateEvent::DoubleCtrlOpen);
                         if !was_summon && foreground_hwnd != 0 {
                             let auto_app = app.clone();
@@ -2235,6 +2560,7 @@ pub fn run() {
         compose_waiters: Mutex::new(HashMap::new()),
         last_outside_hide_at: Mutex::new(None),
         live_sync_enabled,
+        last_target_window: Mutex::new(None),
     };
 
     let startup_dev_state = cli.dev_state;
@@ -2432,7 +2758,7 @@ pub fn run() {
                         "window.__DSB_BRIDGE__ && window.__DSB_BRIDGE__.setMode('{}'); window.__DSB_BRIDGE__ && window.__DSB_BRIDGE__.setVisibility && window.__DSB_BRIDGE__.setVisibility('{}'); window.__DSB_BRIDGE__ && window.__DSB_BRIDGE__.setHarness && window.__DSB_BRIDGE__.setHarness('{}');",
                         mode.as_str(),
                         vis_str,
-                        crate::harness::HarnessKind::parse(&active_harness).as_str()
+                        normalize_harness_route(&active_harness)
                     );
                     let _ = webview.eval(&js);
 
@@ -2504,6 +2830,9 @@ pub fn run() {
             harness_focus_desktop,
             harness_session_stats,
             harness_session_state,
+            harness_upsert_custom_acp,
+            harness_remove_custom_acp,
+            universal_get_target,
             app_get_settings,
             app_update_settings,
             app_settings_action,

@@ -17,6 +17,20 @@ pub enum OutputTarget {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CustomAcpHarness {
+    pub id: String,
+    pub label: String,
+    pub command: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default)]
+    pub accent: String,
+    #[serde(default)]
+    pub default_cwd: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct AppConfig {
     pub preferred_port: u16,
@@ -43,6 +57,9 @@ pub struct AppConfig {
     pub active_harness: String,
     pub search_roots: Vec<String>,
     pub app_source_map: HashMap<String, String>,
+    /// User-registered custom ACP harnesses persisted across restarts.
+    #[serde(default)]
+    pub custom_acp_harnesses: Vec<CustomAcpHarness>,
 }
 
 impl Default for AppConfig {
@@ -66,6 +83,7 @@ impl Default for AppConfig {
             active_harness: "dsh".to_string(),
             search_roots: Vec::new(),
             app_source_map: HashMap::new(),
+            custom_acp_harnesses: Vec::new(),
         }
     }
 }
