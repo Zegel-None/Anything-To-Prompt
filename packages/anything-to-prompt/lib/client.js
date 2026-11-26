@@ -762,6 +762,11 @@ window.__ModuleLoader__.load({
 
     function setActiveHarness(harnessId, persist = true, skipCatalogRefresh = false) {
       const norm = normalizeHarnessId(harnessId);
+      if (dsbRuntime.activeHarness !== norm) {
+        dsbRuntime.unreadCount = 0;
+        dsbRuntime.unreadPreview = '';
+        dsbRuntime.pendingBubbleTarget = null;
+      }
       dsbRuntime.activeHarness = norm;
       applyHarnessThemeAttribute(norm);
       if (persist) {
@@ -780,6 +785,9 @@ window.__ModuleLoader__.load({
     function selectExternalConversation(harnessId, group, conv) {
       const hId = normalizeHarnessId(harnessId);
       if (hId === 'dsh' || !conv) return;
+      dsbRuntime.unreadCount = 0;
+      dsbRuntime.unreadPreview = '';
+      dsbRuntime.pendingBubbleTarget = null;
       dsbRuntime.externalSelection[hId] = {
         workspaceId: group ? group.workspaceId || '' : '',
         workspacePath: (group && group.path) || conv.cwd || '',
@@ -794,6 +802,9 @@ window.__ModuleLoader__.load({
     function startNewExternalConversation(harnessId, group) {
       const hId = normalizeHarnessId(harnessId);
       if (hId === 'dsh') return;
+      dsbRuntime.unreadCount = 0;
+      dsbRuntime.unreadPreview = '';
+      dsbRuntime.pendingBubbleTarget = null;
       const wsId = group ? group.workspaceId || '' : (hId === 'antigravity' ? 'default-cli-project' : '');
       const wsPath = group ? group.path || '' : '';
       const wsLabel = group ? group.label || HARNESS_META[hId].label : HARNESS_META[hId].label;
@@ -1117,8 +1128,11 @@ window.__ModuleLoader__.load({
           (dsbRuntime.liveDraft || '').trim(),
       );
 
+      let activeSessionUpdated = false;
       if (sameSession) {
-        // Bound conversation updated -> refresh its messages in-place (never jumps away)
+        // Bound conversation updated -> refresh its messages in-place (never jumps away).
+        // Unread toast notifications are handled exclusively by CardDock for the currently
+        // selected Harness + Conversation (never cross-harness or cross-conversation).
         dsbRuntime.externalSelection[hId] = {
           workspaceId: resolvedWsId,
           workspacePath: resolvedWsPath,
@@ -1128,23 +1142,7 @@ window.__ModuleLoader__.load({
         if (incomingMsgs.length > 0) {
           dsbRuntime.externalMessages[hId] = incomingMsgs;
         }
-        // Scheme B: if a genuinely new reply arrives on another harness, record it for the
-        // detached floating unread toast above the composer (never pop up the obsolete 56px Lip pill).
-        if (hId !== dsbRuntime.activeHarness && isNewReply && latestReply) {
-          dsbRuntime.pendingBubbleTarget = {
-            harness: hId,
-            workspaceId: resolvedWsId,
-            workspacePath: resolvedWsPath,
-            sessionId: incomingSessionId,
-            title: resolvedTitle,
-            previewText: stripMarkdownForLip(latestReply.text),
-            assistantId: String(latestReply.id || ''),
-          };
-          dsbRuntime.unreadCount = (dsbRuntime.unreadCount || 0) + 1;
-          dsbRuntime.unreadPreview =
-            (resolvedTitle ? '[' + resolvedTitle + '] ' : '') +
-            stripMarkdownForLip(latestReply.text);
-        }
+        activeSessionUpdated = hId === dsbRuntime.activeHarness;
       } else if (!curSel.sessionId && incomingSessionId && barIsHiddenOrLip && !hasDraftOrCapsules) {
         // Brand-new unbound harness bootstrap only when Bar is not actively being used
         dsbRuntime.externalSelection[hId] = {
@@ -1156,22 +1154,7 @@ window.__ModuleLoader__.load({
         if (incomingMsgs.length > 0) {
           dsbRuntime.externalMessages[hId] = incomingMsgs;
         }
-      } else if (incomingSessionId && isNewReply && latestReply) {
-        // Another conversation replied: never auto-switch active selection in the background,
-        // and never pop up the obsolete 56px Lip pill. Surface it in Scheme B's unread toast instead.
-        dsbRuntime.pendingBubbleTarget = {
-          harness: hId,
-          workspaceId: resolvedWsId,
-          workspacePath: resolvedWsPath,
-          sessionId: incomingSessionId,
-          title: resolvedTitle,
-          previewText: stripMarkdownForLip(latestReply.text),
-          assistantId: String(latestReply.id || ''),
-        };
-        dsbRuntime.unreadCount = (dsbRuntime.unreadCount || 0) + 1;
-        dsbRuntime.unreadPreview =
-          (resolvedTitle ? '[' + resolvedTitle + '] ' : '') +
-          stripMarkdownForLip(latestReply.text);
+        activeSessionUpdated = hId === dsbRuntime.activeHarness;
       }
 
       dsbRuntime.liveSyncMeta[hId] = {
@@ -1187,7 +1170,7 @@ window.__ModuleLoader__.load({
       }
 
       notifyBarRuntime();
-      if (typeof dsbRuntime.scheduleLayoutReport === 'function') {
+      if (activeSessionUpdated && typeof dsbRuntime.scheduleLayoutReport === 'function') {
         dsbRuntime.scheduleLayoutReport(220);
       }
     }
@@ -1538,8 +1521,8 @@ window.__ModuleLoader__.load({
         '  z-index: 12 !important;',
         '}',
         '@keyframes dsbUnreadPulse {',
-        '  0%, 100% { box-shadow: 0 0 0 0 rgba(56, 189, 248, 0.55); opacity: 1; }',
-        '  50% { box-shadow: 0 0 0 5px rgba(56, 189, 248, 0); opacity: 0.85; }',
+        '  0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--atp-accent, #4D6BFE) 52%, transparent); opacity: 1; }',
+        '  50% { box-shadow: 0 0 0 5px transparent; opacity: 0.85; }',
         '}',
         '[data-dsb-drag-handle="1"]:hover > span:first-child {',
         '  background: rgba(226, 232, 240, 0.78) !important;',
@@ -3321,7 +3304,7 @@ window.__ModuleLoader__.load({
           userMessageCount,
         ]);
 
-        // Scheme B: track unread replies arriving while Bar is Summoned with History Sheet closed
+        // Track unread replies arriving ONLY on the currently selected Harness & Conversation
         useEffect(() => {
           if (!IS_BAR) return;
           const sKey = activeHarness + ':' + effectiveSessionId;
@@ -3329,6 +3312,15 @@ window.__ModuleLoader__.load({
           const prev = lastKnownAsstRef.current;
           if (prev.sessionKey !== sKey) {
             lastKnownAsstRef.current = { sessionKey: sKey, asstId: curId };
+            if (dsbRuntime.unreadCount || dsbRuntime.unreadPreview || dsbRuntime.pendingBubbleTarget) {
+              dsbRuntime.unreadCount = 0;
+              dsbRuntime.unreadPreview = '';
+              dsbRuntime.pendingBubbleTarget = null;
+              notifyBarRuntime();
+              if (typeof dsbRuntime.scheduleLayoutReport === 'function') {
+                dsbRuntime.scheduleLayoutReport(220);
+              }
+            }
             return;
           }
           if (curId && prev.asstId && curId !== prev.asstId) {
@@ -4331,7 +4323,7 @@ window.__ModuleLoader__.load({
 
         const renderDragHandle = (extraStyle) => {
           if (!IS_BAR || barMode === 'lip') return null;
-          const hasUnread = !isExpanded && (dsbRuntime.unreadCount || 0) > 0;
+          const t = getUnifiedTheme(activeHarness);
           return h(
             'div',
             {
@@ -4354,7 +4346,6 @@ window.__ModuleLoader__.load({
                   display: 'flex',
                   alignItems: 'center',
                   justifyContent: 'center',
-                  gap: '5px',
                   cursor: 'pointer',
                   zIndex: 25,
                   userSelect: 'none',
@@ -4368,25 +4359,15 @@ window.__ModuleLoader__.load({
                 height: '3.5px',
                 borderRadius: '999px',
                 background: isExpanded
-                  ? 'rgba(125, 211, 252, 0.72)'
-                  : 'rgba(165, 172, 186, 0.36)',
+                  ? t.accent
+                  : t.isDark
+                    ? 'rgba(165, 172, 186, 0.36)'
+                    : 'rgba(15, 23, 42, 0.24)',
+                opacity: isExpanded ? 0.85 : 1,
                 pointerEvents: 'none',
                 transition: 'all 0.16s ease',
               },
             }),
-            hasUnread
-              ? h('span', {
-                  style: {
-                    width: '6px',
-                    height: '6px',
-                    borderRadius: '999px',
-                    background: '#38bdf8',
-                    animation: 'dsbUnreadPulse 2s infinite',
-                    pointerEvents: 'none',
-                    flexShrink: 0,
-                  },
-                })
-              : null,
           );
         };
 
@@ -6797,109 +6778,12 @@ window.__ModuleLoader__.load({
               : null,
             )
             : IS_BAR && barMode !== 'lip' && (dsbRuntime.unreadCount || 0) > 0
-              ? h(
-                  'div',
-                  {
-                    'data-dsb-floating-anchor': '1',
-                    style: {
-                      position: 'absolute',
-                      left: 0,
-                      right: 0,
-                      bottom: DETACHED_GAP_PX + 'px',
-                      display: 'flex',
-                      justifyContent: 'center',
-                      pointerEvents: 'none',
-                    },
-                  },
-                  h(
-                    'div',
-                    {
-                      'data-dsb-floating-toast': '1',
-                      onClick: () => {
-                        const bubble = dsbRuntime.pendingBubbleTarget;
-                        dsbRuntime.pendingBubbleTarget = null;
-                        if (bubble && bubble.harness && bubble.sessionId) {
-                          const targetH = normalizeHarnessId(bubble.harness);
-                          if (targetH !== dsbRuntime.activeHarness) {
-                            setActiveHarness(targetH, true);
-                          }
-                          dsbRuntime.externalSelection[targetH] = {
-                            workspaceId: bubble.workspaceId || '',
-                            workspacePath: bubble.workspacePath || '',
-                            sessionId: bubble.sessionId,
-                            title: bubble.title || HARNESS_META[targetH].label,
-                          };
-                          writeStoredExtSelection(targetH, dsbRuntime.externalSelection[targetH]);
-                          loadExternalConversationMessages(targetH, bubble.sessionId);
-                        }
-                        setHistoryOpen(true);
-                        dsbRuntime.unreadCount = 0;
-                        dsbRuntime.unreadPreview = '';
-                        notifyBarRuntime();
-                        scheduleLayoutReport(280);
-                      },
-                      style: {
-                        pointerEvents: 'auto',
-                        display: 'inline-flex',
-                        alignItems: 'center',
-                        gap: '8px',
-                        maxWidth: '94%',
-                        padding: '6px 10px 6px 12px',
-                        borderRadius: '999px',
-                        background: 'rgba(26, 28, 34, 0.94)',
-                        border: '1px solid rgba(56, 189, 248, 0.34)',
-                        boxShadow: '0 10px 28px rgba(0,0,0,0.46)',
-                        color: '#eef2ff',
-                        fontSize: '12px',
-                        cursor: 'pointer',
-                      },
-                    },
-                    h('span', {
-                      style: {
-                        width: '7px',
-                        height: '7px',
-                        borderRadius: '999px',
-                        background: '#38bdf8',
-                        animation: 'dsbUnreadPulse 2s infinite',
-                        flexShrink: 0,
-                      },
-                    }),
-                    h('span', { style: { color: '#7dd3fc', fontWeight: 600, flexShrink: 0 } }, (dsbRuntime.unreadCount || 1) + ' 条新回复'),
-                    h(
-                      'span',
-                      { style: { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', opacity: 0.9 } },
-                      dsbRuntime.unreadPreview || latestSingleLine,
-                    ),
-                    h(
-                      'button',
-                      {
-                        type: 'button',
-                        title: '标为已读并收起提醒',
-                        onClick: (ev) => {
-                          ev.stopPropagation();
-                          dsbRuntime.unreadCount = 0;
-                          dsbRuntime.unreadPreview = '';
-                          dsbRuntime.pendingBubbleTarget = null;
-                          notifyBarRuntime();
-                          scheduleLayoutReport(220);
-                        },
-                        style: {
-                          border: 'none',
-                          background: 'transparent',
-                          color: 'rgba(229,231,235,0.55)',
-                          cursor: 'pointer',
-                          padding: '0 3px',
-                          fontSize: '13px',
-                          lineHeight: 1,
-                          flexShrink: 0,
-                        },
-                      },
-                      '×',
-                    ),
-                  ),
-                )
-              : IS_BAR && barMode !== 'lip' && hoverPeek && latestSingleLine
-                ? h(
+              ? (() => {
+                  const t = getUnifiedTheme(activeHarness);
+                  const toastShadow = t.isDark
+                    ? '0 10px 28px rgba(0, 0, 0, 0.46)'
+                    : '0 6px 20px rgba(15, 23, 42, 0.11)';
+                  return h(
                     'div',
                     {
                       'data-dsb-floating-anchor': '1',
@@ -6908,44 +6792,171 @@ window.__ModuleLoader__.load({
                         left: 0,
                         right: 0,
                         bottom: DETACHED_GAP_PX + 'px',
+                        display: 'flex',
+                        justifyContent: 'center',
                         pointerEvents: 'none',
                       },
                     },
                     h(
                       'div',
                       {
-                        'data-dsb-floating-peek': '1',
+                        'data-dsb-floating-toast': '1',
+                        onClick: () => {
+                          dsbRuntime.pendingBubbleTarget = null;
+                          setHistoryOpen(true);
+                          dsbRuntime.unreadCount = 0;
+                          dsbRuntime.unreadPreview = '';
+                          notifyBarRuntime();
+                          scheduleLayoutReport(280);
+                        },
                         style: {
-                          padding: '9px 14px',
-                          borderRadius: '16px',
-                          background: 'rgba(24, 26, 31, 0.94)',
-                          border: '1px solid rgba(255, 255, 255, 0.12)',
-                          boxShadow: '0 12px 32px rgba(0, 0, 0, 0.48)',
-                          color: '#f3f4f6',
-                          fontSize: '12.5px',
-                          lineHeight: '18px',
+                          pointerEvents: 'auto',
+                          position: 'relative',
+                          overflow: 'hidden',
+                          display: 'inline-flex',
+                          alignItems: 'center',
+                          gap: '8px',
+                          maxWidth: '94%',
+                          padding: '6px 10px 6px 12px',
+                          borderRadius: '999px',
+                          background: t.surface,
+                          border: '1px solid ' + t.accentBorder,
+                          boxShadow: toastShadow,
+                          color: t.fg,
+                          fontSize: '12px',
+                          cursor: 'pointer',
+                          transition: 'background 180ms ease, border-color 180ms ease, color 180ms ease',
+                          fontFamily: '"Segoe UI", "Inter", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif',
+                        },
+                      },
+                      h('span', {
+                        style: {
+                          width: '7px',
+                          height: '7px',
+                          borderRadius: '999px',
+                          background: t.dotStyle,
+                          animation: 'dsbUnreadPulse 2s infinite',
+                          flexShrink: 0,
+                        },
+                      }),
+                      h(
+                        'span',
+                        { style: { color: t.accent, fontWeight: 600, flexShrink: 0 } },
+                        (dsbRuntime.unreadCount || 1) + ' 条新回复',
+                      ),
+                      h(
+                        'span',
+                        {
+                          style: {
+                            overflow: 'hidden',
+                            textOverflow: 'ellipsis',
+                            whiteSpace: 'nowrap',
+                            color: t.fg,
+                            opacity: t.isDark ? 0.9 : 0.86,
+                          },
+                        },
+                        dsbRuntime.unreadPreview || latestSingleLine,
+                      ),
+                      h(
+                        'button',
+                        {
+                          type: 'button',
+                          title: '标为已读并收起提醒',
+                          onClick: (ev) => {
+                            ev.stopPropagation();
+                            dsbRuntime.unreadCount = 0;
+                            dsbRuntime.unreadPreview = '';
+                            dsbRuntime.pendingBubbleTarget = null;
+                            notifyBarRuntime();
+                            scheduleLayoutReport(220);
+                          },
+                          style: {
+                            border: 'none',
+                            background: 'transparent',
+                            color: t.muted,
+                            cursor: 'pointer',
+                            padding: '0 3px',
+                            fontSize: '13px',
+                            lineHeight: 1,
+                            flexShrink: 0,
+                          },
+                        },
+                        '×',
+                      ),
+                    ),
+                  );
+                })()
+              : IS_BAR && barMode !== 'lip' && hoverPeek && latestSingleLine
+                ? (() => {
+                    const t = getUnifiedTheme(activeHarness);
+                    const peekShadow = t.isDark
+                      ? '0 12px 32px rgba(0, 0, 0, 0.48)'
+                      : '0 8px 24px rgba(15, 23, 42, 0.11)';
+                    return h(
+                      'div',
+                      {
+                        'data-dsb-floating-anchor': '1',
+                        style: {
+                          position: 'absolute',
+                          left: 0,
+                          right: 0,
+                          bottom: DETACHED_GAP_PX + 'px',
+                          pointerEvents: 'none',
                         },
                       },
                       h(
                         'div',
-                        { style: { fontSize: '11px', color: '#7dd3fc', marginBottom: '3px', fontWeight: 500 } },
-                        '最新回复轻瞥 · 单击拉环展开完整历史',
-                      ),
-                      h(
-                        'div',
                         {
+                          'data-dsb-floating-peek': '1',
                           style: {
-                            display: '-webkit-box',
-                            WebkitLineClamp: 2,
-                            WebkitBoxOrient: 'vertical',
+                            position: 'relative',
                             overflow: 'hidden',
-                            opacity: 0.9,
+                            padding: '9px 14px',
+                            borderRadius: '16px',
+                            background: t.surface,
+                            border: '1px solid ' + t.border,
+                            boxShadow: peekShadow,
+                            color: t.fg,
+                            fontSize: '12.5px',
+                            lineHeight: '18px',
+                            transition: 'background 180ms ease, border-color 180ms ease, color 180ms ease',
+                            fontFamily: '"Segoe UI", "Inter", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif',
                           },
                         },
-                        latestSingleLine,
+                        h('div', {
+                          style: {
+                            position: 'absolute',
+                            left: 0,
+                            right: 0,
+                            top: 0,
+                            height: '2px',
+                            background: t.topBar,
+                            opacity: 0.9,
+                            pointerEvents: 'none',
+                          },
+                        }),
+                        h(
+                          'div',
+                          { style: { fontSize: '11px', color: t.accent, marginBottom: '3px', fontWeight: 600 } },
+                          '最新回复轻瞥 · 单击拉环展开完整历史',
+                        ),
+                        h(
+                          'div',
+                          {
+                            style: {
+                              display: '-webkit-box',
+                              WebkitLineClamp: 2,
+                              WebkitBoxOrient: 'vertical',
+                              overflow: 'hidden',
+                              color: t.fg,
+                              opacity: t.isDark ? 0.9 : 0.86,
+                            },
+                          },
+                          latestSingleLine,
+                        ),
                       ),
-                    ),
-                  )
+                    );
+                  })()
                 : null,
             IS_BAR && barMode !== 'lip' && activeHarness === 'dsh'
               ? renderDragHandle({ top: 'auto', bottom: '-13px', zIndex: 40, pointerEvents: 'auto' })
