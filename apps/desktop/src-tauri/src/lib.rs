@@ -2143,7 +2143,8 @@ pub fn run() {
     }
 
     log::info!(
-        "Starting Anything-to-Prompt (pid={}, elevated={})",
+        "Starting Anything-to-Prompt v{} (pid={}, elevated={})",
+        env!("CARGO_PKG_VERSION"),
         std::process::id(),
         elevation::is_elevated()
     );

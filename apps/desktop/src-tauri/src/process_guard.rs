@@ -37,6 +37,16 @@ impl CleanupReport {
     }
 }
 
+/// Matches both the canonical binary name (`anything-to-prompt.exe`) and NTFS-renamed
+/// atomic-update backups (`anything-to-prompt.exe.old.<ts>`, `anything-to-prompt.old.<ts>.exe`)
+/// whose live process image name changes on Windows immediately after atomic hot-replace.
+pub fn is_our_exe_name(name: &str) -> bool {
+    let lower = name.trim().to_ascii_lowercase();
+    lower == "anything-to-prompt.exe"
+        || lower.starts_with("anything-to-prompt.exe.old")
+        || (lower.starts_with("anything-to-prompt.old") && lower.ends_with(".exe"))
+}
+
 /// Pure classifier deciding whether another process should be terminated when the user
 /// directly double-clicks `anything-to-prompt.exe` to start a fresh instance.
 ///
@@ -46,8 +56,9 @@ impl CleanupReport {
 ///   so active Antigravity / Claude Code / Codex MCP sessions are not disrupted; kill orphaned
 ///   sidecars whose parent IDE has already exited.
 /// - Preserve transient one-shot CLI relays (`--hook-event`, `--install-plugins`, `--uninstall-plugins`).
-/// - Kill all residual Bar instances and residual `--broker` helpers so stuck/old/trapped instances
-///   release the single-instance mutex, named pipe, and WebView2 profile cleanly.
+/// - Kill all residual Bar instances (including atomic-update `.exe.old.*` instances) and residual
+///   `--broker` helpers so stuck/old/trapped instances release the single-instance mutex, named pipe,
+///   and WebView2 profile cleanly.
 pub fn classify_candidate_process(
     pid: u32,
     self_pid: u32,
@@ -59,7 +70,7 @@ pub fn classify_candidate_process(
     if pid == self_pid || ancestor_pids.contains(&pid) {
         return CleanupAction::KeepSelfOrAncestor;
     }
-    if !exe_name.eq_ignore_ascii_case("anything-to-prompt.exe") {
+    if !is_our_exe_name(exe_name) {
         return CleanupAction::Ignore;
     }
 
@@ -123,11 +134,19 @@ pub fn cleanup_stale_processes_on_direct_launch() -> CleanupReport {
 
     let mut targets: Vec<(Pid, CleanupAction)> = Vec::new();
     for (&pid, proc_) in sys.processes() {
-        let exe_name = proc_
+        let proc_name = proc_.name().to_string_lossy().to_string();
+        let exe_file_name = proc_
             .exe()
             .and_then(|p| p.file_name())
             .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_else(|| proc_.name().to_string_lossy().to_string());
+            .unwrap_or_default();
+        let effective_name = if is_our_exe_name(&proc_name) {
+            proc_name
+        } else if !exe_file_name.is_empty() {
+            exe_file_name
+        } else {
+            proc_name
+        };
 
         let cmd_args: Vec<String> = proc_
             .cmd()
@@ -144,7 +163,7 @@ pub fn cleanup_stale_processes_on_direct_launch() -> CleanupReport {
             pid.as_u32(),
             self_pid_u32,
             &ancestor_pids,
-            &exe_name,
+            &effective_name,
             &cmd_args,
             parent_alive,
         );
@@ -252,6 +271,23 @@ pub fn cleanup_stale_processes_on_direct_launch() -> CleanupReport {
         }
     }
 
+    // Best-effort cleanup of stale atomic-replace `.old.*` binaries now that old processes have exited
+    for dir in [
+        crate::config::AppConfig::local_data_dir(),
+        crate::config::AppConfig::local_data_dir().join("bin"),
+    ] {
+        if let Ok(entries) = std::fs::read_dir(&dir) {
+            for ent in entries.flatten() {
+                let name = ent.file_name().to_string_lossy().to_ascii_lowercase();
+                if name.starts_with("anything-to-prompt.exe.old")
+                    || (name.starts_with("anything-to-prompt.old") && name.ends_with(".exe"))
+                {
+                    let _ = std::fs::remove_file(ent.path());
+                }
+            }
+        }
+    }
+
     report
 }
 
@@ -293,6 +329,30 @@ mod tests {
                 &[90],
                 "Anything-To-Prompt.EXE",
                 &s(&["anything-to-prompt.exe", "--ensure-running", "--launched-by", "antigravity"]),
+                true
+            ),
+            CleanupAction::KillResidualBar
+        );
+
+        // Atomic-update renamed `.exe.old.*` Bar instances MUST also be detected and killed!
+        assert_eq!(
+            classify_candidate_process(
+                304,
+                100,
+                &[90],
+                "anything-to-prompt.exe.old.1795656760682",
+                &s(&["anything-to-prompt.exe"]),
+                true
+            ),
+            CleanupAction::KillResidualBar
+        );
+        assert_eq!(
+            classify_candidate_process(
+                305,
+                100,
+                &[90],
+                "anything-to-prompt.old.1795606382.exe",
+                &s(&["anything-to-prompt.exe"]),
                 true
             ),
             CleanupAction::KillResidualBar
