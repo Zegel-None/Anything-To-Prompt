@@ -25,7 +25,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
     SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOCOPYBITS, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SW_HIDE,
     SW_SHOW,
     SW_SHOWNOACTIVATE, WDA_EXCLUDEFROMCAPTURE, WDA_NONE, WINDOWPOS, WINDOW_DISPLAY_AFFINITY,
-    WM_NCACTIVATE, WM_NCCALCSIZE, WM_NCDESTROY, WM_NCPAINT, WM_STYLECHANGING, WM_SYSCOMMAND,
+    WM_ERASEBKGND, WM_NCACTIVATE, WM_NCCALCSIZE, WM_NCDESTROY, WM_NCPAINT, WM_STYLECHANGING,
+    WM_SYSCOMMAND,
     WM_WINDOWPOSCHANGING, WS_BORDER, WS_CAPTION, WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_DLGFRAME,
     WS_EX_APPWINDOW, WS_EX_CLIENTEDGE, WS_EX_DLGMODALFRAME, WS_EX_NOACTIVATE, WS_EX_STATICEDGE,
     WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_WINDOWEDGE, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_POPUP,
@@ -34,6 +35,10 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 pub const BOTTOM_MARGIN_DIP: i32 = 12;
 pub const DEFAULT_LIP_HEIGHT_DIP: i32 = 56;
+/// Constant backing stage height for Bar mode so opening/closing popups, menus, hover-peek,
+/// unread toasts, and history sheets NEVER calls SetWindowPos / WM_SIZE on WebView2 (zero flash!).
+/// Everything outside the active `SetWindowRgn` rounded-rect shapes is 100% transparent & click-through.
+pub const BAR_STAGE_HEIGHT_DIP: i32 = 680;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ShapeRectDip {
@@ -178,11 +183,11 @@ pub fn step_bar_drag(bar_win: &WebviewWindow) -> bool {
         let w = (sess.start_rect.right - sess.start_rect.left).max(320);
         let h = (sess.start_rect.bottom - sess.start_rect.top).max(40);
         let (ml, mt, mr, mb) = query_monitor_work_bounds_at(cur);
-        // Allow free movement across the monitor while keeping at least 120px & handle reachable
+        // Allow free movement across the monitor while keeping the bottom composer reachable
         let min_x = ml - w + 120.min(w);
         let max_x = mr - 120.min(w);
-        let min_y = mt;
-        let max_y = (mb - 48).max(mt);
+        let min_y = mt - (h - 140).max(0);
+        let max_y = (mb - h).max(min_y);
         let x = (sess.start_rect.left + dx).clamp(min_x, max_x.max(min_x));
         let y = (sess.start_rect.top + dy).clamp(min_y, max_y);
 
@@ -390,6 +395,7 @@ unsafe extern "system" fn bar_borderless_subclass_proc(
     match msg {
         WM_NCCALCSIZE => LRESULT(0),
         WM_NCPAINT => LRESULT(0),
+        WM_ERASEBKGND => LRESULT(1),
         WM_NCACTIVATE => LRESULT(1),
         // Prevent pressing Alt / Ctrl+Alt while Bar is focused from entering Win32's modal menu loop
         WM_SYSCOMMAND if (wparam.0 & 0xFFF0) == (SC_KEYMENU as usize) => LRESULT(0),
@@ -465,12 +471,12 @@ pub fn init_bar_window(bar_win: &WebviewWindow, exclude_from_capture: bool, widt
 
     let default_shape = ShapeRectDip {
         x: 0,
-        y: 0,
+        y: BAR_STAGE_HEIGHT_DIP - 90,
         w: width_dip,
-        h: DEFAULT_LIP_HEIGHT_DIP,
+        h: 90,
         r: 24,
     };
-    apply_bar_layout(bar_win, width_dip, DEFAULT_LIP_HEIGHT_DIP, &[default_shape]);
+    apply_bar_layout(bar_win, width_dip, BAR_STAGE_HEIGHT_DIP, &[default_shape]);
     log_window_diagnostics(bar_win, "init");
 }
 
@@ -523,6 +529,39 @@ pub fn apply_capture_affinity(hwnd: HWND, exclude: bool) {
 
 type ScaledRgnKey = (i32, i32, Vec<(i32, i32, i32, i32, i32)>);
 static LAST_BAR_RGN_KEY: Mutex<Option<ScaledRgnKey>> = Mutex::new(None);
+static LAST_BAR_SHAPES_PHYS: Mutex<Vec<(i32, i32, i32, i32)>> = Mutex::new(Vec::new());
+
+pub fn point_hits_any_phys_rect(rx: i32, ry: i32, rects: &[(i32, i32, i32, i32)]) -> bool {
+    rects
+        .iter()
+        .any(|&(l, t, r, b)| rx >= l && rx <= r && ry >= t && ry <= b)
+}
+
+/// Fast, GDI-free hit-test for `WH_MOUSE_LL`: checks both the HWND bounding rect AND the exact
+/// active `SetWindowRgn` physical shape rects so clicks in the transparent upper stage above the
+/// composer accurately register as outside clicks (and pass through to windows underneath).
+pub fn is_point_inside_bar_shapes(pt: POINT, hwnd: HWND) -> bool {
+    if hwnd.0.is_null() {
+        return false;
+    }
+    unsafe {
+        let mut rc = RECT::default();
+        if GetWindowRect(hwnd, &mut rc).is_err() {
+            return false;
+        }
+        if pt.x < rc.left || pt.x > rc.right || pt.y < rc.top || pt.y > rc.bottom {
+            return false;
+        }
+        let rx = pt.x - rc.left;
+        let ry = pt.y - rc.top;
+        if let Ok(guard) = LAST_BAR_SHAPES_PHYS.try_lock() {
+            if !guard.is_empty() {
+                return point_hits_any_phys_rect(rx, ry, &guard);
+            }
+        }
+        true
+    }
+}
 
 /// Positions Bar anchored to the bottom of the cursor's monitor work area and clips
 /// its Win32 hit-test/paint region to the exact union of `shapes` (24px rounded slab + popups).
@@ -628,6 +667,17 @@ pub fn apply_bar_layout(
             .unwrap_or(true);
 
         if rgn_changed {
+            let phys_boxes: Vec<(i32, i32, i32, i32)> = if scaled_shapes.is_empty() {
+                vec![(0, 0, phys_w, phys_h)]
+            } else {
+                scaled_shapes
+                    .iter()
+                    .map(|&(l, t, r, b, _)| (l, t, r, b))
+                    .collect()
+            };
+            if let Ok(mut slot) = LAST_BAR_SHAPES_PHYS.lock() {
+                *slot = phys_boxes;
+            }
             let master_rgn: HRGN = if scaled_shapes.is_empty() {
                 let diam = (48.0 * scale).round() as i32;
                 CreateRoundRectRgn(0, 0, phys_w + 1, phys_h + 1, diam, diam)
@@ -1047,5 +1097,20 @@ mod tests {
         // Near top edge: clamps cleanly to y=0 without flying off-screen
         let (_x3, y3) = compute_custom_anchored_rect(1200, 300, 760, 490, bounds);
         assert_eq!(y3, 0);
+    }
+
+    #[test]
+    fn shape_hit_test_rejects_transparent_upper_stage_and_accepts_composer_and_popup() {
+        let shapes = vec![
+            (0, 590, 812, 680), // bottom composer inside 680px stage
+            (20, 260, 320, 582), // open popup above composer
+        ];
+        // Transparent click-through area above composer & outside popup -> outside!
+        assert!(!point_hits_any_phys_rect(500, 120, &shapes));
+        assert!(!point_hits_any_phys_rect(500, 400, &shapes));
+        // Inside open popup -> inside!
+        assert!(point_hits_any_phys_rect(150, 400, &shapes));
+        // Inside bottom composer -> inside!
+        assert!(point_hits_any_phys_rect(400, 640, &shapes));
     }
 }

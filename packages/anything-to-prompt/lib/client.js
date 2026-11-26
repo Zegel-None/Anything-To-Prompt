@@ -32,6 +32,7 @@ window.__ModuleLoader__.load({
 
     const CARD_RADIUS_PX = 24;
     const COLLAPSED_LIP_PX = 56;
+    const BAR_STAGE_HEIGHT_DIP = 680;
     const TUCK_OVERLAP_PX = 0;
     const HOVER_EXPAND_DELAY_MS = 300;
     const DEFAULT_EXPANDED_PX = 280;
@@ -3692,6 +3693,13 @@ window.__ModuleLoader__.load({
             dsbRuntime.popupHeightLock = 0;
           }
 
+          // Keep the Bar's Win32 backing stage at a constant height (`BAR_STAGE_HEIGHT_DIP`, 680dip)
+          // so clicking ANY button (+, permissions, models, harness switcher, hover-peek, history)
+          // NEVER triggers Win32 SetWindowPos / WM_SIZE / WebView2 swapchain resize (zero flash!).
+          // Only `SetWindowRgn` updates the exact rounded-rect clip/hit-test shapes in <0.1ms.
+          if (IS_BAR && liveMode !== 'lip') {
+            targetHeight = Math.max(BAR_STAGE_HEIGHT_DIP, targetHeight);
+          }
           targetHeight = Math.max(COLLAPSED_LIP_PX, Math.min(880, Math.ceil(targetHeight)));
           const deltaY = Math.round(targetHeight - window.innerHeight);
           const adjustedShapes =

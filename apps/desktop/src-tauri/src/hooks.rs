@@ -633,13 +633,7 @@ fn is_pt_inside_bar_rect(pt: POINT, bar_raw: u64) -> bool {
         return false;
     }
     let hwnd = HWND(bar_raw as usize as *mut std::ffi::c_void);
-    unsafe {
-        let mut rc = RECT::default();
-        if GetWindowRect(hwnd, &mut rc).is_err() {
-            return false;
-        }
-        pt.x >= rc.left && pt.x <= rc.right && pt.y >= rc.top && pt.y <= rc.bottom
-    }
+    crate::window::is_point_inside_bar_shapes(pt, hwnd)
 }
 
 /// Passive read-only Raw Input keyboard window procedure (`RIDEV_INPUTSINK`).
