@@ -681,6 +681,45 @@ window.__ModuleLoader__.load({
       return null;
     }
 
+    let defaultWorkspacePromise = null;
+    function ensureDefaultWorkspacePath() {
+      if (dsbRuntime.defaultWorkspacePath) {
+        return Promise.resolve(dsbRuntime.defaultWorkspacePath);
+      }
+      if (!defaultWorkspacePromise) {
+        defaultWorkspacePromise = tauriInvoke('app_ensure_default_workspace')
+          .then((p) => {
+            const clean = typeof p === 'string' ? p.trim() : '';
+            if (clean) dsbRuntime.defaultWorkspacePath = clean;
+            return clean;
+          })
+          .catch(() => '')
+          .finally(() => {
+            defaultWorkspacePromise = null;
+          });
+      }
+      return defaultWorkspacePromise;
+    }
+
+    function applyDefaultWorkspaceSelectionIfEmpty(hId) {
+      if (hId === 'dsh') return Promise.resolve(false);
+      return ensureDefaultWorkspacePath().then((defaultPath) => {
+        if (!defaultPath) return false;
+        const cur = dsbRuntime.externalSelection[hId] || {};
+        if (cur.sessionId || cur.workspacePath) return false;
+        const label = workspaceBasename(defaultPath) || '默认工作区';
+        dsbRuntime.externalSelection[hId] = {
+          workspaceId: hId === 'antigravity' ? 'default-cli-project' : defaultPath,
+          workspacePath: defaultPath,
+          sessionId: '',
+          title: label + ' · 新对话',
+        };
+        writeStoredExtSelection(hId, dsbRuntime.externalSelection[hId]);
+        notifyBarRuntime();
+        return true;
+      });
+    }
+
     function refreshExternalCatalog(harnessId, autoSelectIfEmpty = true) {
       const hId = normalizeHarnessId(harnessId);
       if (hId === 'dsh' || !IS_BAR) return Promise.resolve(null);
@@ -748,6 +787,10 @@ window.__ModuleLoader__.load({
                   title: (firstWs.label || HARNESS_META[hId].label) + ' · 新对话',
                 };
               }
+            } else if (catalog.available && groups.length === 0) {
+              // Cold-start with zero existing workspaces/conversations: auto-bind unified default workspace
+              // so the user can send message #1 immediately without manual workspace setup.
+              applyDefaultWorkspaceSelectionIfEmpty(hId);
             }
             notifyBarRuntime();
           }
@@ -8435,7 +8478,44 @@ window.__ModuleLoader__.load({
                       !browsedMeta.useNativeComposer && dsbRuntime.externalLoading[browsedHarness] && groups.length === 0
                         ? h('div', { style: { padding: '12px 10px', fontSize: '12px', opacity: 0.65, textAlign: 'center' } }, '正在读取工作区…')
                         : groups.length === 0
-                          ? h('div', { style: { padding: '12px 10px', fontSize: '12px', opacity: 0.65, textAlign: 'center' } }, '暂无工作区')
+                          ? h(
+                              'div',
+                              {
+                                style: {
+                                  padding: '10px 8px',
+                                  display: 'flex',
+                                  flexDirection: 'column',
+                                  alignItems: 'center',
+                                  gap: '8px',
+                                  textAlign: 'center',
+                                },
+                              },
+                              h('div', { style: { fontSize: '12px', opacity: 0.65 } }, '暂无历史工作区'),
+                              h(
+                                'button',
+                                {
+                                  type: 'button',
+                                  onClick: async () => {
+                                    const defPath = await ensureDefaultWorkspacePath();
+                                    if (defPath) {
+                                      await createWorkspaceAtPath(defPath, browsedHarness);
+                                    }
+                                  },
+                                  style: {
+                                    width: '100%',
+                                    padding: '6px 9px',
+                                    borderRadius: '9px',
+                                    border: '1px solid ' + browsedTheme.accentBorder,
+                                    background: browsedTheme.accentBg,
+                                    color: browsedTheme.accent,
+                                    fontSize: '11.5px',
+                                    fontWeight: 550,
+                                    cursor: 'pointer',
+                                  },
+                                },
+                                '✨ 在默认工作区直接开始对话',
+                              ),
+                            )
                           : groups.map((g) => {
                               const isHover = hoveredGroup && g.workspaceId === hoveredGroup.workspaceId;
                               const isActiveWs = browsedHarness === activeHarness && g.workspaceId === browsedActiveWsId;
@@ -8782,6 +8862,7 @@ window.__ModuleLoader__.load({
           let openInFlight = false;
           let openAttempts = 0;
           let offRestore = null;
+          let defaultBootstrapAttempted = false;
           const attemptedIds = new Set();
           const getArchivedSet = () => {
             try {
@@ -8791,6 +8872,65 @@ window.__ModuleLoader__.load({
               );
             } catch {
               return new Set();
+            }
+          };
+          const pickFirstExistingWorkspaceId = () => {
+            try {
+              const wsSnap = workspaces && workspaces.list ? workspaces.list.getSnapshot() : null;
+              if (!wsSnap || wsSnap.phase === 'pending') return { ready: false, wsId: '' };
+              const items = Array.isArray(wsSnap.items)
+                ? wsSnap.items
+                : wsSnap.byId && typeof wsSnap.byId === 'object'
+                  ? Object.values(wsSnap.byId)
+                  : [];
+              const first = items.find((w) => w && w.workspaceId);
+              return { ready: true, wsId: first ? String(first.workspaceId) : '' };
+            } catch {
+              return { ready: true, wsId: '' };
+            }
+          };
+          const bootstrapDefaultDshSession = async () => {
+            if (defaultBootstrapAttempted || openInFlight) return;
+            const wsInfo = pickFirstExistingWorkspaceId();
+            if (!wsInfo.ready) return;
+            defaultBootstrapAttempted = true;
+            openInFlight = true;
+            try {
+              let wsId = wsInfo.wsId;
+              if (!wsId && workspaces && typeof workspaces.create === 'function') {
+                const defaultPath = await ensureDefaultWorkspacePath();
+                if (defaultPath) {
+                  sendBarReport({
+                    kind: 'diag',
+                    detail: 'Cold-start DSH: creating default workspace at ' + defaultPath,
+                  });
+                  const created = await workspaces.create({ path: defaultPath });
+                  wsId = created && created.workspaceId ? String(created.workspaceId) : '';
+                }
+              }
+              if (wsId) {
+                sendBarReport({
+                  kind: 'diag',
+                  detail: 'Cold-start DSH: auto-starting first session in workspaceId=' + wsId,
+                });
+                if (typeof uiWorkspace.startSession === 'function') {
+                  await uiWorkspace.startSession(wsId);
+                } else if (typeof sessions.create === 'function') {
+                  const newId = await sessions.create({ workspaceId: wsId });
+                  if (newId && typeof uiWorkspace.openSession === 'function') {
+                    uiWorkspace.openSession(newId);
+                  }
+                }
+              }
+            } catch (err) {
+              sendBarReport({
+                kind: 'diag',
+                detail: 'Cold-start DSH bootstrap failed: ' + String(err),
+              });
+            } finally {
+              setTimeout(() => {
+                openInFlight = false;
+              }, 400);
             }
           };
           const isValidCandidate = (snap, archivedSet, id) => {
@@ -8836,7 +8976,13 @@ window.__ModuleLoader__.load({
             const snap = sessions.list.getSnapshot();
             if (!snap || snap.phase === 'pending') return false;
             const targetId = pickBestSessionId(snap);
-            if (!targetId) return false;
+            if (!targetId) {
+              // Zero existing sessions in DSH -> automatically create default workspace + first conversation!
+              if (fromTimer || (workspaces && workspaces.list && workspaces.list.getSnapshot()?.phase !== 'pending')) {
+                bootstrapDefaultDshSession();
+              }
+              return false;
+            }
             if (!fromTimer && openAttempts > 0) return false;
             openInFlight = true;
             openAttempts += 1;

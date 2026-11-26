@@ -188,6 +188,7 @@ fn main() {
             "app_get_settings",
             "app_update_settings",
             "app_settings_action",
+            "app_ensure_default_workspace",
             "app_pick_folder",
             "app_pick_files",
             "app_read_clipboard_files",

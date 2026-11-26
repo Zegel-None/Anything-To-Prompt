@@ -27,6 +27,7 @@
     "allow-app-get-settings",
     "allow-app-update-settings",
     "allow-app-settings-action",
+    "allow-app-ensure-default-workspace",
     "allow-app-pick-folder",
     "allow-app-pick-files",
     "allow-app-read-clipboard-files",

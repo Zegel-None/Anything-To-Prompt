@@ -1562,6 +1562,35 @@ pub(crate) fn clean_windows_path(raw: &str) -> String {
     trimmed.to_string()
 }
 
+/// Returns (and creates if missing) the unified default workspace directory
+/// (`~/Documents/AnythingToPrompt`, falling back to `~/AnythingToPrompt`) so brand-new users
+/// with zero existing workspaces can start chatting in any installed Harness immediately.
+pub fn ensure_default_workspace_dir() -> PathBuf {
+    let base = dirs::document_dir()
+        .or_else(dirs::home_dir)
+        .unwrap_or_else(|| PathBuf::from("."));
+    let dir = base.join("AnythingToPrompt");
+    let _ = fs::create_dir_all(&dir);
+    dir
+}
+
+/// Resolves an explicit workspace directory if it exists on disk, otherwise falls back to
+/// `ensure_default_workspace_dir()`.
+pub fn resolve_effective_workspace_dir(cwd: Option<&str>) -> Option<String> {
+    if let Some(dir) = cwd
+        .map(clean_windows_path)
+        .filter(|p| !p.trim().is_empty() && Path::new(p).is_dir())
+    {
+        return Some(dir);
+    }
+    let fallback = ensure_default_workspace_dir();
+    if fallback.is_dir() {
+        Some(fallback.to_string_lossy().to_string())
+    } else {
+        dirs::home_dir().map(|h| h.to_string_lossy().to_string())
+    }
+}
+
 pub(crate) fn basename_of_path(path: &str) -> String {
     let cleaned = clean_windows_path(path);
     let trimmed = cleaned.trim_end_matches(['\\', '/']);
@@ -3483,11 +3512,8 @@ fn run_antigravity_turn_in_medium(
         }
     }
     cmd.arg(format!("--print={full_prompt}"));
-    if let Some(dir) = cwd.filter(|s| !s.trim().is_empty()) {
-        let cleaned = clean_windows_path(dir);
-        if Path::new(&cleaned).is_dir() {
-            cmd.current_dir(&cleaned);
-        }
+    if let Some(dir) = resolve_effective_workspace_dir(cwd) {
+        cmd.current_dir(&dir);
     }
     cmd.creation_flags(CREATE_NO_WINDOW.0)
         .stdin(Stdio::null())
@@ -3827,10 +3853,7 @@ fn run_codex_app_server_turn_in_medium(
         c
     };
 
-    let cleaned_cwd = cwd
-        .map(clean_windows_path)
-        .filter(|p| !p.trim().is_empty() && Path::new(p).is_dir())
-        .or_else(|| dirs::home_dir().map(|h| h.to_string_lossy().to_string()));
+    let cleaned_cwd = resolve_effective_workspace_dir(cwd);
 
     if let Some(ref dir) = cleaned_cwd {
         cmd.current_dir(dir);
@@ -4489,10 +4512,7 @@ fn run_claude_code_turn_in_medium(
         cmd.args(["--resume", sid.trim()]);
     }
 
-    let cleaned_cwd = cwd
-        .map(clean_windows_path)
-        .filter(|p| !p.trim().is_empty() && Path::new(p).is_dir())
-        .or_else(|| dirs::home_dir().map(|h| h.to_string_lossy().to_string()));
+    let cleaned_cwd = resolve_effective_workspace_dir(cwd);
     if let Some(ref dir) = cleaned_cwd {
         cmd.current_dir(dir);
     }
@@ -4967,5 +4987,21 @@ mod tests {
         assert_eq!(stats.cache_read_tokens, 11000);
         assert_eq!(stats.total_tokens, 13700);
         assert!(stats.summary_markdown.contains("13700"));
+    }
+
+    #[test]
+    fn resolve_effective_workspace_dir_falls_back_to_default_workspace() {
+        let fallback = resolve_effective_workspace_dir(None).expect("default workspace must resolve");
+        assert!(Path::new(&fallback).is_dir());
+        assert!(fallback.ends_with("AnythingToPrompt"));
+
+        let missing = resolve_effective_workspace_dir(Some(r"Z:\definitely_nonexistent_atp_dir_99999"))
+            .expect("missing dir should fall back to default workspace");
+        assert_eq!(missing, fallback);
+
+        let tmp = std::env::temp_dir();
+        let tmp_str = tmp.to_string_lossy().to_string();
+        let explicit = resolve_effective_workspace_dir(Some(&tmp_str)).expect("existing dir should be kept");
+        assert_eq!(explicit, tmp_str);
     }
 }

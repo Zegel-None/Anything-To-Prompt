@@ -1067,6 +1067,13 @@ fn read_clipboard_files_win32() -> Vec<PickedAttachment> {
 }
 
 #[tauri::command]
+fn app_ensure_default_workspace() -> String {
+    harness::ensure_default_workspace_dir()
+        .to_string_lossy()
+        .to_string()
+}
+
+#[tauri::command]
 async fn app_pick_folder(initial_dir: Option<String>) -> Option<String> {
     tauri::async_runtime::spawn_blocking(move || pick_folder_dialog_blocking(initial_dir))
         .await
@@ -2493,6 +2500,7 @@ pub fn run() {
             app_get_settings,
             app_update_settings,
             app_settings_action,
+            app_ensure_default_workspace,
             app_pick_folder,
             app_pick_files,
             app_read_clipboard_files,
@@ -2662,6 +2670,7 @@ mod tests {
             "allow-app-get-settings",
             "allow-app-update-settings",
             "allow-app-settings-action",
+            "allow-app-ensure-default-workspace",
             "allow-app-pick-folder",
             "allow-app-pick-files",
             "allow-app-read-clipboard-files",
