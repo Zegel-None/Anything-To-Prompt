@@ -49,6 +49,8 @@ pub struct AntigravitySidecarRequest {
     pub conversation_id: Option<String>,
     pub prompt: Option<String>,
     pub title: Option<String>,
+    #[serde(default)]
+    pub model: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1383,6 +1385,9 @@ fn execute_agentapi_request(req: &AntigravitySidecarRequest) -> AntigravitySidec
                 };
             }
             cmd.arg("new-conversation");
+            if let Some(model) = req.model.as_deref().filter(|s| !s.trim().is_empty()) {
+                cmd.arg(format!("--model={}", model.trim()));
+            }
             if let Some(title) = req.title.as_deref().filter(|s| !s.trim().is_empty()) {
                 cmd.arg(format!("--title={title}"));
             }

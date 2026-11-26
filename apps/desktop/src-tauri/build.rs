@@ -184,6 +184,7 @@ fn main() {
             "harness_send_message",
             "harness_cancel_turn",
             "harness_focus_desktop",
+            "harness_session_stats",
             "app_get_settings",
             "app_update_settings",
             "app_settings_action",

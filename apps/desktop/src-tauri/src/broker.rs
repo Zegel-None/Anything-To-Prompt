@@ -68,6 +68,16 @@ pub enum BrokerRequest {
         #[serde(default)]
         execution_mode: Option<String>,
         #[serde(default)]
+        fast_speed: Option<bool>,
+        #[serde(default)]
+        plan_mode: Option<bool>,
+        #[serde(default)]
+        sandbox_enabled: Option<bool>,
+        #[serde(default)]
+        chrome_enabled: Option<bool>,
+        #[serde(default)]
+        enabled_plugins: Vec<String>,
+        #[serde(default)]
         attachments: Vec<crate::harness::TurnAttachment>,
         prompt: String,
         out_pipe: String,
@@ -284,6 +294,11 @@ foreach ($w in $sh.Windows()) {{
             effort,
             sandbox_mode,
             execution_mode,
+            fast_speed,
+            plan_mode,
+            sandbox_enabled,
+            chrome_enabled,
+            enabled_plugins,
             attachments,
             prompt,
             out_pipe,
@@ -304,6 +319,11 @@ foreach ($w in $sh.Windows()) {{
                             effort,
                             sandbox_mode,
                             execution_mode,
+                            fast_speed,
+                            plan_mode,
+                            sandbox_enabled,
+                            chrome_enabled,
+                            enabled_plugins,
                             attachments,
                             prompt,
                             out_pipe,

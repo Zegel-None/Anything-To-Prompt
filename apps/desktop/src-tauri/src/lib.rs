@@ -540,6 +540,16 @@ struct HarnessSendPayload {
     #[serde(default)]
     execution_mode: Option<String>,
     #[serde(default)]
+    fast_speed: Option<bool>,
+    #[serde(default)]
+    plan_mode: Option<bool>,
+    #[serde(default)]
+    sandbox_enabled: Option<bool>,
+    #[serde(default)]
+    chrome_enabled: Option<bool>,
+    #[serde(default)]
+    enabled_plugins: Vec<String>,
+    #[serde(default)]
     attachments: Vec<harness::TurnAttachment>,
     prompt: String,
 }
@@ -623,10 +633,21 @@ fn harness_send_message(app: AppHandle, payload: HarnessSendPayload) -> Result<(
             effort: payload.effort,
             sandbox_mode: payload.sandbox_mode,
             execution_mode: payload.execution_mode,
+            fast_speed: payload.fast_speed,
+            plan_mode: payload.plan_mode,
+            sandbox_enabled: payload.sandbox_enabled,
+            chrome_enabled: payload.chrome_enabled,
+            enabled_plugins: payload.enabled_plugins,
             attachments: payload.attachments,
             prompt: payload.prompt,
         },
     )
+}
+
+#[tauri::command]
+fn harness_session_stats(harness: String, session_id: String) -> harness::HarnessSessionStats {
+    let kind = harness::HarnessKind::parse(&harness);
+    harness::load_session_stats(kind, &session_id)
 }
 
 #[tauri::command]
@@ -2425,6 +2446,7 @@ pub fn run() {
             harness_send_message,
             harness_cancel_turn,
             harness_focus_desktop,
+            harness_session_stats,
             app_get_settings,
             app_update_settings,
             app_settings_action,
@@ -2593,6 +2615,7 @@ mod tests {
             "allow-harness-send-message",
             "allow-harness-cancel-turn",
             "allow-harness-focus-desktop",
+            "allow-harness-session-stats",
             "allow-app-get-settings",
             "allow-app-update-settings",
             "allow-app-settings-action",

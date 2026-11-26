@@ -827,6 +827,35 @@ window.__ModuleLoader__.load({
       notifyBarRuntime();
     }
 
+    function showExternalSessionStats(harnessId) {
+      const hId = normalizeHarnessId(harnessId || dsbRuntime.activeHarness);
+      if (hId === 'dsh') return Promise.resolve(null);
+      const sel = dsbRuntime.externalSelection[hId] || {};
+      return tauriInvoke('harness_session_stats', {
+        harness: hId,
+        sessionId: sel.sessionId || '',
+      })
+        .then((stats) => {
+          const md =
+            (stats && stats.summaryMarkdown) ||
+            '暂无该会话的本地用量统计记录。';
+          const prev = Array.isArray(dsbRuntime.externalMessages[hId])
+            ? dsbRuntime.externalMessages[hId]
+            : [];
+          dsbRuntime.externalMessages[hId] = prev.concat([
+            {
+              id: 'ext-stats-' + Date.now(),
+              role: 'assistant',
+              text: md,
+              streaming: false,
+            },
+          ]);
+          notifyBarRuntime();
+          return stats;
+        })
+        .catch(() => null);
+    }
+
     function submitExternalHarnessPrompt(rawText, attachmentsInput) {
       const hId = dsbRuntime.activeHarness;
       if (hId === 'dsh') return false;
@@ -842,9 +871,11 @@ window.__ModuleLoader__.load({
       const sel = dsbRuntime.externalSelection[hId] || {};
       const opts = dsbRuntime.harnessOptions[hId] || {};
       const prefs = dsbRuntime.harnessPrefs[hId] || {};
-      const resolvedModel = prefs.model || opts.defaultModel || null;
-      const resolvedEffort = prefs.effort || opts.defaultEffort || null;
-      const resolvedMode = prefs.mode || opts.defaultMode || null;
+      const adapter = getHarnessAdapter(hId);
+      const def = adapter && typeof adapter.getDefaults === 'function' ? adapter.getDefaults() : {};
+      const resolvedModel = prefs.model || opts.defaultModel || def.defaultModel || null;
+      const resolvedEffort = prefs.effort || opts.defaultEffort || def.defaultEffort || null;
+      const resolvedMode = prefs.mode || opts.defaultMode || def.defaultMode || null;
 
       const attNames = atts.map((a) => (a.kind === 'image' ? '🖼 ' : a.kind === 'folder' ? '📁 ' : '📎 ') + a.name);
       const displayUserText = attNames.length > 0
@@ -873,21 +904,48 @@ window.__ModuleLoader__.load({
       notifyBarRuntime();
       sendBarReport({ kind: 'submitted', sessionId: sel.sessionId || turnId });
 
+      const harnessSpecific =
+        adapter && typeof adapter.buildTurnPayload === 'function'
+          ? adapter.buildTurnPayload({
+              selection: sel,
+              options: opts,
+              prefs,
+              resolvedModel,
+              resolvedEffort,
+              resolvedMode,
+            })
+          : {
+              projectId: hId === 'antigravity' ? (sel.workspaceId || 'default-cli-project') : null,
+              permissionMode: hId === 'claude_code' ? (resolvedMode || dsbRuntime.claudePermissionMode || 'auto') : null,
+              model: resolvedModel,
+              effort: resolvedEffort,
+              sandboxMode: hId === 'codex' ? (resolvedMode || 'danger-full-access') : null,
+              executionMode: hId === 'antigravity' ? (resolvedMode || 'auto') : null,
+            };
+
       tauriInvoke('harness_send_message', {
-        payload: {
-          harness: hId,
-          turnId,
-          cwd: sel.workspacePath || null,
-          projectId: hId === 'antigravity' ? (sel.workspaceId || 'default-cli-project') : null,
-          sessionId: sel.sessionId || null,
-          permissionMode: hId === 'claude_code' ? (resolvedMode || dsbRuntime.claudePermissionMode || 'auto') : null,
-          model: resolvedModel,
-          effort: resolvedEffort,
-          sandboxMode: hId === 'codex' ? (resolvedMode || 'danger-full-access') : null,
-          executionMode: hId === 'antigravity' ? (resolvedMode || 'auto') : null,
-          attachments: atts.map((a) => ({ kind: a.kind || 'file', path: a.path, name: a.name })),
-          prompt,
-        },
+        payload: Object.assign(
+          {
+            harness: hId,
+            turnId,
+            cwd: sel.workspacePath || null,
+            projectId: null,
+            sessionId: sel.sessionId || null,
+            permissionMode: null,
+            model: resolvedModel,
+            effort: resolvedEffort,
+            sandboxMode: null,
+            executionMode: null,
+            fastSpeed: null,
+            planMode: null,
+            sandboxEnabled: null,
+            chromeEnabled: null,
+            enabledPlugins: [],
+            attachments: atts.map((a) => ({ kind: a.kind || 'file', path: a.path, name: a.name })),
+            prompt,
+          },
+          harnessSpecific || {},
+        ),
       }).catch((err) => {
         const msg = err instanceof Error ? err.message : String(err || '发送失败');
         const list = dsbRuntime.externalMessages[hId] || [];
@@ -2815,6 +2873,9 @@ window.__ModuleLoader__.load({
         const [hoverPeek, setHoverPeek] = useState(false);
         const [composerPopover, setComposerPopover] = useState(null);
         const [composerSubView, setComposerSubView] = useState(null);
+        const [mentionQuery, setMentionQuery] = useState('');
+        const [mentionHits, setMentionHits] = useState([]);
+        const mentionSeqRef = useRef(0);
         const sketchCanvasRef = useRef(null);
         const sketchDrawingRef = useRef(false);
         const sketchColorRef = useRef('#38bdf8');
@@ -4391,7 +4452,7 @@ window.__ModuleLoader__.load({
             : countComposerCapsules(liveDraft) > 0;
 
         useEffect(() => {
-          if (!IS_BAR || barMode === 'lip' || dsbRuntime.popupOpen) {
+          if (!IS_BAR || barMode === 'lip' || dsbRuntime.popupOpen || composerPopover) {
             if (quickHitsRef.current.length > 0) {
               setQuickHits([]);
               setQuickSelectedIdx(-1);
@@ -4470,7 +4531,7 @@ window.__ModuleLoader__.load({
               });
           }, 22);
           return () => clearTimeout(timer);
-        }, [effectiveQuickDraft, effectiveQuickHasCapsules, barMode, dsbRuntime.popupOpen]);
+        }, [effectiveQuickDraft, effectiveQuickHasCapsules, barMode, dsbRuntime.popupOpen, composerPopover]);
 
         useEffect(() => {
           if (!IS_BAR || typeof document === 'undefined') return undefined;
@@ -5071,22 +5132,96 @@ window.__ModuleLoader__.load({
           );
         };
 
+        // Query local files/folders when the @ mention picker is open
+        useEffect(() => {
+          if (!IS_BAR || !composerPopover || composerPopover.kind !== 'mention') return undefined;
+          const q = String(mentionQuery || '').trim();
+          const seq = ++mentionSeqRef.current;
+          const effectiveQ = q || (extSel && extSel.workspacePath ? workspaceBasename(extSel.workspacePath) : 'a');
+          const timer = setTimeout(() => {
+            tauriInvoke('quick_search_query', { query: effectiveQ, limit: 8 })
+              .then((hits) => {
+                if (mentionSeqRef.current !== seq) return;
+                setMentionHits(Array.isArray(hits) ? hits : []);
+              })
+              .catch(() => {
+                if (mentionSeqRef.current !== seq) return;
+                setMentionHits([]);
+              });
+          }, 30);
+          return () => clearTimeout(timer);
+        }, [composerPopover, mentionQuery]);
+
+        const buildHarnessActionCtx = (hId) => ({
+          selection: dsbRuntime.externalSelection[hId] || {},
+          options: dsbRuntime.harnessOptions[hId] || null,
+          prefs: dsbRuntime.harnessPrefs[hId] || {},
+          updatePrefs: (patch) => updateHarnessPrefs(hId, patch),
+          insertText: (snippet) => insertTextIntoExtComposer(snippet),
+          pickFiles: (imagesOnly) => pickFilesForExtComposer(imagesOnly),
+          pickFolder: () => pickFolderForExtComposer(),
+          focusComposer: () => focusComposerElement(),
+          openMentionPicker: () => {
+            setMentionQuery('');
+            const compEl = document.querySelector('[data-dsb-external-composer]');
+            openComposerPopover('mention', compEl);
+          },
+          startNewSession: () => {
+            const sel = dsbRuntime.externalSelection[hId] || {};
+            startNewExternalConversation(hId, {
+              workspaceId: sel.workspaceId || '',
+              path: sel.workspacePath || '',
+              label: sel.workspacePath ? workspaceBasename(sel.workspacePath) : getHarnessMeta(hId).label,
+            });
+            focusComposerElement();
+          },
+          showSessionStats: () => {
+            setHistoryOpen(true);
+            showExternalSessionStats(hId).then(() => scheduleLayoutReport(260));
+          },
+          runImmediatePrompt: (cmdText) => {
+            setHistoryOpen(true);
+            submitExternalHarnessPrompt(cmdText, []);
+          },
+        });
+
         const submitExternalComposer = () => {
           if (isExtStreaming) {
             cancelActiveExternalTurn();
             return;
           }
+          const trimmedDraft = extDraft.trim();
+          // Intercept standalone slash commands (e.g. /clear, /cost, /plan) and route through the active Harness module
+          if (
+            trimmedDraft.startsWith('/') &&
+            !trimmedDraft.includes(' ') &&
+            !trimmedDraft.includes('\n') &&
+            extCapsules.length === 0 &&
+            extAttachments.length === 0
+          ) {
+            const adapter = getHarnessAdapter(activeHarness);
+            const uo = getUnifiedOptions(activeHarness, activeHarnessOpts);
+            const known = (uo.actions || []).some((a) => a && a.id === trimmedDraft);
+            if (known && adapter && typeof adapter.handleSlashAction === 'function') {
+              dsbRuntime.extDraftText = '';
+              setComposerPopover(null);
+              notifyBarRuntime();
+              adapter.handleSlashAction(trimmedDraft, buildHarnessActionCtx(activeHarness));
+              return;
+            }
+          }
           const parts = [];
           for (const c of extCapsules) {
             if (c && c.text) parts.push(c.text);
           }
-          if (extDraft.trim()) parts.push(extDraft.trim());
+          if (trimmedDraft) parts.push(trimmedDraft);
           const fullText = parts.join('\n').trim();
           const attsToSend = extAttachments.slice();
           if (!fullText && attsToSend.length === 0) return;
           dsbRuntime.extDraftText = '';
           dsbRuntime.extCapsules = [];
           dsbRuntime.extAttachments = [];
+          setComposerPopover(null);
           sendBarReport({ kind: 'capsules', capsuleCount: 0, afterInsert: false });
           notifyBarRuntime();
           submitExternalHarnessPrompt(fullText, attsToSend);
@@ -5173,102 +5308,31 @@ window.__ModuleLoader__.load({
           );
         };
 
-        const UNIFIED_DEFAULTS = {
-          antigravity: {
-            models: [
-              { id: 'gemini-4-neon-high', label: 'Gemini 4 Neon', tag: 'New' },
-              { id: 'gemini-4-carbon-medium', label: 'Gemini 4 Carbon', tag: 'New' },
-              { id: 'gemini-4-argon-medium', label: 'Gemini 4 Argon', tag: 'Leaving Soon' },
-              { id: 'gemini-4-hydrogen-medium', label: 'Gemini 4 Hydrogen', tag: 'New' },
-              { id: 'gemini-pro-orchestrator-neon', label: 'Orchestrator', tag: 'Opus 5.5' },
-              { id: 'gemini-3.8-flash-medium', label: 'Gemini 3.8 Flash', tag: 'Leaving Soon' },
-              { id: 'claude-opus-5-5-medium', label: 'Claude Opus 5.5', tag: 'New' },
-              { id: 'claude-sonnet-5-5-medium', label: 'Claude Sonnet 5.5', tag: 'New' },
-              { id: 'gpt-oss-120b-medium', label: 'GPT-OSS 120B (Medium)', tag: 'Notice' },
-            ],
-            efforts: [
-              { id: 'low', label: 'Low' },
-              { id: 'medium', label: 'Medium' },
-              { id: 'high', label: 'High' },
-              { id: 'max', label: 'Max' },
-            ],
-            modes: [
-              { id: 'turbo', label: 'Turbo', desc: '--dangerously-skip-permissions · 无限制执行', danger: true },
-              { id: 'auto', label: 'Auto', desc: '--mode auto · 自动评估风险执行', danger: false },
-              { id: 'default', label: 'Default', desc: '--mode accept-edits · 敏感操作前询问', danger: false },
-              { id: 'request-review', label: 'Request Review', desc: '--sandbox --mode plan · 每步审批', danger: false },
-            ],
-            defaultModel: 'gemini-4-neon-high',
-            defaultEffort: 'high',
-            defaultMode: 'turbo',
-          },
-          codex: {
-            models: [
-              { id: 'default', label: '默认', tag: '推荐' },
-              { id: 'gpt-6.2-sol', label: 'GPT-6.2 Sol', tag: '旗舰' },
-              { id: 'gpt-6.2-astra', label: 'GPT-6.2 Astra', tag: '' },
-              { id: 'gpt-6.1-terra', label: 'GPT-6.1 Terra', tag: '' },
-              { id: 'gpt-6.1-sol', label: 'GPT-6.1 Sol', tag: '' },
-              { id: 'gpt-6-astra', label: 'GPT-6 Astra', tag: '' },
-              { id: 'gpt-6-sol', label: 'GPT-6 Sol', tag: '' },
-              { id: 'gpt-6-luna', label: 'GPT-6 Luna', tag: '' },
-              { id: 'gpt-5.6-sol', label: 'GPT-5.6 Sol', tag: '' },
-              { id: 'gpt-5.6-terra', label: 'GPT-5.6 Terra', tag: '' },
-            ],
-            efforts: [
-              { id: 'minimal', label: '极低' },
-              { id: 'low', label: '低' },
-              { id: 'high', label: '高' },
-              { id: 'xhigh', label: '极高' },
-              { id: 'max', label: '最高' },
-            ],
-            modes: [
-              { id: 'danger-full-access', label: '完全访问', desc: 'approvalPolicy=never · dangerFullAccess', danger: true },
-              { id: 'help-approve', label: '帮我批准', desc: 'approvalPolicy=on-failure · workspaceWrite', danger: false },
-              { id: 'request-approval', label: '请求批准', desc: 'approvalPolicy=on-request · workspaceWrite', danger: false },
-            ],
-            defaultModel: 'gpt-6-luna',
-            defaultEffort: 'high',
-            defaultMode: 'danger-full-access',
-          },
-          claude_code: {
-            models: [
-              { id: 'claude-opus-5-5', label: 'Opus 5.5', tag: 'Default' },
-              { id: 'claude-fable-5-2', label: 'Fable 5.2', tag: '最强' },
-              { id: 'claude-sonnet-5-5', label: 'Sonnet 5.5', tag: '均衡' },
-              { id: 'claude-haiku-5-5', label: 'Haiku 5.5', tag: '极速' },
-            ],
-            efforts: [
-              { id: 'low', label: 'Low' },
-              { id: 'medium', label: 'Medium' },
-              { id: 'high', label: 'High' },
-              { id: 'max', label: 'Max' },
-            ],
-            modes: [
-              { id: 'auto', label: 'Auto', desc: '--permission-mode auto · 智能自动执行并拦截高危', danger: true },
-              { id: 'acceptEdits', label: 'Accept Edits', desc: '--permission-mode acceptEdits · 自动写入代码', danger: false },
-              { id: 'plan', label: 'Plan', desc: '--permission-mode plan · 只读分析与规划', danger: false },
-              { id: 'dontAsk', label: 'Manual', desc: '手动确认 / 免询问模式', danger: false },
-            ],
-            defaultModel: 'claude-opus-5-5',
-            defaultEffort: 'medium',
-            defaultMode: 'auto',
-          },
-        };
-
         const getUnifiedOptions = (hId, opts) => {
-          const def = UNIFIED_DEFAULTS[hId] || UNIFIED_DEFAULTS.antigravity;
+          const adapter = getHarnessAdapter(hId);
+          const def =
+            (adapter && typeof adapter.getDefaults === 'function' ? adapter.getDefaults() : null) || {
+              models: [],
+              efforts: [],
+              modes: [],
+              actions: [],
+              defaultModel: '',
+              defaultEffort: '',
+              defaultMode: '',
+            };
           const o = opts || {};
-          const models = Array.isArray(o.models) && o.models.length > 0 ? o.models : def.models;
-          const efforts = Array.isArray(o.efforts) && o.efforts.length > 0 ? o.efforts : def.efforts;
-          const modes = Array.isArray(o.modes) && o.modes.length > 0 ? o.modes : def.modes;
+          const models = Array.isArray(o.models) && o.models.length > 0 ? o.models : def.models || [];
+          const efforts = Array.isArray(o.efforts) && o.efforts.length > 0 ? o.efforts : def.efforts || [];
+          const modes = Array.isArray(o.modes) && o.modes.length > 0 ? o.modes : def.modes || [];
+          const actions = Array.isArray(o.actions) && o.actions.length > 0 ? o.actions : def.actions || [];
           return {
             models,
             efforts,
             modes,
-            defaultModel: o.defaultModel || def.defaultModel,
-            defaultEffort: o.defaultEffort || def.defaultEffort,
-            defaultMode: o.defaultMode || def.defaultMode,
+            actions,
+            defaultModel: o.defaultModel || def.defaultModel || '',
+            defaultEffort: o.defaultEffort || def.defaultEffort || '',
+            defaultMode: o.defaultMode || def.defaultMode || '',
           };
         };
 
@@ -5294,22 +5358,52 @@ window.__ModuleLoader__.load({
         };
 
         const handleExtInputChange = (ev) => {
-          dsbRuntime.extDraftText = ev.target.value;
+          const val = ev.target.value;
+          dsbRuntime.extDraftText = val;
           notifyBarRuntime();
           try {
             ev.target.style.height = 'auto';
             ev.target.style.height = Math.min(140, Math.max(24, ev.target.scrollHeight)) + 'px';
           } catch {}
+          // Auto-trigger real inline `/` slash command menu or `@` file mention picker per Harness
+          const compEl = document.querySelector('[data-dsb-external-composer]');
+          const slashMatch = val.match(/^\/([a-zA-Z0-9_-]*)$/);
+          const mentionMatch = val.match(/(?:^|\s)@([^\s@]{0,40})$/);
+          if (slashMatch) {
+            if (!composerPopover || composerPopover.kind !== 'slash') {
+              const cr = compEl ? compEl.getBoundingClientRect() : null;
+              setComposerPopover({
+                kind: 'slash',
+                left: 12,
+                bottom: cr && cr.height > 10 ? Math.max(88, Math.round(window.innerHeight - cr.top + 8)) : 112,
+                fullWidth: false,
+              });
+            }
+          } else if (mentionMatch) {
+            setMentionQuery(mentionMatch[1] || '');
+            if (!composerPopover || composerPopover.kind !== 'mention') {
+              const cr = compEl ? compEl.getBoundingClientRect() : null;
+              setComposerPopover({
+                kind: 'mention',
+                left: 12,
+                bottom: cr && cr.height > 10 ? Math.max(88, Math.round(window.innerHeight - cr.top + 8)) : 112,
+                fullWidth: false,
+              });
+            }
+          } else if (composerPopover && (composerPopover.kind === 'slash' || composerPopover.kind === 'mention')) {
+            setComposerPopover(null);
+          }
           if (typeof dsbRuntime.scheduleLayoutReport === 'function') {
             dsbRuntime.scheduleLayoutReport(200);
           }
         };
 
-        // v0.6.0 Unified DSH-Native Dual-Theme Composer (One Skeleton, Four Official-Logo Palettes, Dark + Light)
+        // v0.7.0 Unified DSH-Native Dual-Theme Composer (One Skeleton, Dedicated Per-Harness Modules)
         const renderUnifiedDshComposer = (ctx) => {
           const m = ctx.manifest;
           const t = getUnifiedTheme(m.id);
           const uo = getUnifiedOptions(m.id, ctx.options);
+          const adapter = getHarnessAdapter(m.id);
           const prefs = ctx.prefs || {};
           const curModelId = prefs.model || uo.defaultModel;
           const curEffortId = prefs.effort || uo.defaultEffort;
@@ -5318,10 +5412,19 @@ window.__ModuleLoader__.load({
           const curEffort = uo.efforts.find((x) => x.id === curEffortId) || uo.efforts[Math.min(2, uo.efforts.length - 1)] || uo.efforts[0];
           const curMode = uo.modes.find((x) => x.id === curModeId) || uo.modes[0];
           const isDangerMode = Boolean(
-            curMode && (curMode.danger || curMode.id === 'turbo' || curMode.id === 'danger-full-access' || curMode.id === 'auto'),
+            curMode &&
+              (curMode.danger ||
+                curMode.id === 'turbo' ||
+                curMode.id === 'danger-full-access' ||
+                curMode.id === 'bypassPermissions' ||
+                curMode.id === 'auto'),
           );
           const modeLabel =
             curMode && curMode.id === 'danger-full-access' ? '完全访问' : (curMode && curMode.label) || '默认';
+          const activeFeatureChips =
+            adapter && typeof adapter.getActiveChips === 'function'
+              ? adapter.getActiveChips(buildHarnessActionCtx(m.id))
+              : [];
           const wsLabel =
             (ctx.selection && ctx.selection.workspacePath
               ? ctx.workspaceBasename(ctx.selection.workspacePath)
@@ -5379,6 +5482,64 @@ window.__ModuleLoader__.load({
             ctx.renderDragHandle && ctx.renderDragHandle(),
             ctx.renderAttachmentsRow && ctx.renderAttachmentsRow(),
             ctx.renderCapsulesRow(),
+            activeFeatureChips.length > 0
+              ? h(
+                  'div',
+                  {
+                    'data-dsb-feature-chips': '1',
+                    style: {
+                      display: 'flex',
+                      flexWrap: 'wrap',
+                      alignItems: 'center',
+                      gap: '5px',
+                      marginBottom: '6px',
+                    },
+                  },
+                  activeFeatureChips.map((chip) =>
+                    h(
+                      'span',
+                      {
+                        key: chip.id,
+                        title: chip.title || chip.label,
+                        style: {
+                          display: 'inline-flex',
+                          alignItems: 'center',
+                          gap: '4px',
+                          padding: '1px 7px',
+                          borderRadius: '999px',
+                          fontSize: '11px',
+                          fontWeight: 550,
+                          background: t.accentBg,
+                          border: '1px solid ' + t.accentBorder,
+                          color: t.accent,
+                        },
+                      },
+                      h('span', null, chip.label),
+                      h(
+                        'button',
+                        {
+                          type: 'button',
+                          onClick: (ev) => {
+                            ev.stopPropagation();
+                            if (typeof chip.onRemove === 'function') chip.onRemove();
+                          },
+                          style: {
+                            border: 'none',
+                            background: 'transparent',
+                            color: 'inherit',
+                            opacity: 0.72,
+                            cursor: 'pointer',
+                            padding: '0 1px',
+                            fontSize: '11.5px',
+                            lineHeight: 1,
+                          },
+                        },
+                        '×',
+                      ),
+                    ),
+                  ),
+                )
+              : null,
             h('textarea', {
               'data-dsb-ext-input': '1',
               rows: 1,
@@ -5719,107 +5880,140 @@ window.__ModuleLoader__.load({
               rightNode || (active ? ICONS.check(t.accent) : null),
             );
 
-          let panelWidth = 304;
+          let panelWidth = 312;
           let content = [];
+          const adapter = getHarnessAdapter(activeHarness);
+          const harnessPopCtx = Object.assign(buildHarnessActionCtx(activeHarness), {
+            t,
+            icons: ICONS,
+            opts,
+            prefs,
+            subView: composerSubView,
+            setSubView: (sv) => {
+              setComposerSubView(sv);
+              scheduleLayoutReport(220);
+            },
+            closePopover: () => {
+              setComposerSubView(null);
+              setComposerPopover(null);
+            },
+            sectionHdr,
+            popRow,
+          });
 
           if (composerPopover.kind === 'plus') {
-            panelWidth = 312;
-            if (activeHarness === 'antigravity') {
-              const actions =
-                Array.isArray(opts.actions) && opts.actions.length > 0
-                  ? opts.actions
-                  : [
-                      { id: '/plan', label: '/plan', desc: '先出步骤规划再执行' },
-                      { id: '/goal', label: '/goal', desc: '长期目标自主推进模式' },
-                      { id: '/grill-me', label: '/grill-me', desc: '交互式需求对齐访谈' },
-                      { id: '/boost', label: '/boost', desc: '深度推理与多维验证' },
-                      { id: '/compact', label: '/compact', desc: '压缩上下文释放窗口' },
-                      { id: '/learn', label: '/learn', desc: '沉淀规则到长期记忆' },
-                    ];
-              if (composerSubView === 'ag-actions') {
-                content = [
-                  h(
-                    'div',
-                    { key: 'ag-act-hdr', style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '3px 10px 6px' } },
-                    h('button', { type: 'button', onClick: (ev) => { ev.stopPropagation(); setComposerSubView(null); }, style: { border: 'none', background: 'transparent', color: t.muted, fontSize: '11.5px', cursor: 'pointer', padding: 0 } }, '← Add Context'),
-                    h('span', { style: { fontSize: '11px', color: t.muted } }, 'Actions'),
-                  ),
-                  ...actions.map((a) =>
-                    popRow('act-' + a.id, ICONS.slash(t.accent), a.label, a.desc, false, () => {
-                      setComposerSubView(null);
-                      setComposerPopover(null);
-                      insertTextIntoExtComposer(a.id + ' ');
-                    }),
-                  ),
-                ];
-              } else {
-                content = [
-                  sectionHdr('ag-hdr', 'Antigravity · Add Context', false),
-                  popRow('ag-files', ICONS.clip(t.muted), 'Files', '选择本地文件附加给 agy.exe', false, () => { setComposerPopover(null); pickFilesForExtComposer(false); }),
-                  popRow('ag-folder', ICONS.folder(t.muted), 'Folder', '以 --add-dir 授权工作目录', false, () => { setComposerPopover(null); pickFolderForExtComposer(); }),
-                  popRow('ag-at', ICONS.at(t.muted), 'Mentions (@)', '在输入框插入 @ 引用文件或符号', false, () => { setComposerPopover(null); insertTextIntoExtComposer('@'); }),
-                  popRow('ag-act', ICONS.actions(t.muted), 'Actions (/)', '展开 /plan /goal /grill-me /boost', false, () => { setComposerSubView('ag-actions'); scheduleLayoutReport(220); }),
-                  popRow('ag-browser', ICONS.chrome(t.muted), 'Browser', '插入 /browser 调用内置浏览器', false, () => { setComposerPopover(null); insertTextIntoExtComposer('/browser '); }),
-                ];
-              }
-            } else if (activeHarness === 'codex') {
-              const builtinPlugins = [
-                { id: 'documents', label: 'Documents', desc: 'Create and edit documents' },
-                { id: 'pdf', label: 'PDF', desc: 'Read, create, and verify PDFs' },
-                { id: 'spreadsheets', label: 'Spreadsheets', desc: 'Create and edit spreadsheets' },
-                { id: 'presentations', label: 'Presentations', desc: 'Create and edit presentations' },
-              ];
-              const seen = new Set(builtinPlugins.map((x) => x.label.toLowerCase()));
-              const mergedPlugins = builtinPlugins.concat(
-                (Array.isArray(opts.plugins) ? opts.plugins : []).filter((x) => x && x.label && !seen.has(String(x.label).toLowerCase())),
-              );
-              content = [
-                sectionHdr('cx-add', 'Codex · 添加上下文', false),
-                popRow('cx-files', ICONS.clip(t.muted), '文件和文件夹', '作为 localImage / 路径传入 turn/start', false, () => { setComposerPopover(null); pickFilesForExtComposer(false); }),
-                popRow('cx-folder', ICONS.folder(t.muted), '选择整个文件夹', '附加目录路径作为工作上下文', false, () => { setComposerPopover(null); pickFolderForExtComposer(); }),
-                popRow('cx-goal', ICONS.slash(t.accent), '目标 (/goal)', '设置要持续追求的目标', false, () => { setComposerPopover(null); insertTextIntoExtComposer('/goal '); }),
-                popRow('cx-plan', ICONS.slash(t.accent), '计划模式 (/plan)', '开启 Codex 计划模式', false, () => { setComposerPopover(null); insertTextIntoExtComposer('/plan '); }),
-                sectionHdr('cx-plg', '插件', true),
-                ...mergedPlugins.slice(0, 6).map((plg) =>
-                  popRow('plg-' + plg.id, ICONS.pluginBadge(plg.id || plg.label), plg.label, plg.desc || '', false, () => {
-                    setComposerPopover(null);
-                    insertTextIntoExtComposer('使用 ' + plg.label + ' 插件：');
-                  }),
-                ),
-              ];
-            } else {
-              const actions =
-                Array.isArray(opts.actions) && opts.actions.length > 0
-                  ? opts.actions
-                  : [
-                      { id: '/plan', label: '/plan', desc: '进入只读规划模式' },
-                      { id: '/review', label: '/review', desc: '代码审查当前改动' },
-                      { id: '/compact', label: '/compact', desc: '压缩当前上下文' },
-                      { id: '/cost', label: '/cost', desc: '查看本次会话 Token 用量' },
-                      { id: '/clear', label: '/clear', desc: '清空会话重新开始' },
-                    ];
-              content = [
-                sectionHdr('cc-add', 'Claude Code · 添加上下文', false),
-                popRow('cc-files', ICONS.clip(t.muted), '添加文件', '随 prompt 传入 claude.exe', false, () => { setComposerPopover(null); pickFilesForExtComposer(false); }),
-                popRow('cc-img', ICONS.image(t.muted), '添加图片', '选择本地截图或设计稿', false, () => { setComposerPopover(null); pickFilesForExtComposer(true); }),
-                popRow('cc-dir', ICONS.folder(t.muted), '添加工作目录', '以 --add-dir 授权给 Claude', false, () => { setComposerPopover(null); pickFolderForExtComposer(); }),
-                sectionHdr('cc-act', '斜杠指令', true),
-                ...actions.map((a) =>
-                  popRow('cc-act-' + a.id, ICONS.slash(t.accent), a.label, a.desc, false, () => {
-                    setComposerPopover(null);
-                    insertTextIntoExtComposer(a.id + ' ');
-                  }),
-                ),
-              ];
-            }
-          } else if (composerPopover.kind === 'mode') {
             panelWidth = 316;
+            if (adapter && typeof adapter.buildPlusMenu === 'function') {
+              content = adapter.buildPlusMenu(harnessPopCtx) || [];
+            }
+          } else if (composerPopover.kind === 'mention') {
+            panelWidth = 336;
+            content = [
+              sectionHdr('at-hdr', meta.label + ' · 引用文件或文件夹 (@)', false),
+              h('input', {
+                key: 'at-input',
+                type: 'text',
+                autoFocus: true,
+                placeholder: '输入文件名或目录关键词筛选…',
+                value: mentionQuery,
+                onChange: (ev) => setMentionQuery(ev.target.value),
+                onKeyDown: (ev) => {
+                  if (ev.key === 'Escape') {
+                    ev.stopPropagation();
+                    setComposerPopover(null);
+                    focusComposerElement();
+                  } else if (ev.key === 'Enter' && mentionHits.length > 0) {
+                    ev.preventDefault();
+                    ev.stopPropagation();
+                    const first = mentionHits[0];
+                    if (first && first.path) {
+                      tauriInvoke('app_describe_paths', { paths: [first.path] })
+                        .then((list) => {
+                          if (Array.isArray(list) && list.length > 0) addExtAttachments(list);
+                        })
+                        .catch(() => {});
+                      dsbRuntime.extDraftText = (dsbRuntime.extDraftText || '').replace(/(?:^|\s)@[^\s@]{0,40}$/, '').trim();
+                      setComposerPopover(null);
+                      notifyBarRuntime();
+                      focusComposerElement();
+                    }
+                  }
+                },
+                style: {
+                  width: '100%',
+                  boxSizing: 'border-box',
+                  padding: '6px 9px',
+                  marginBottom: '6px',
+                  borderRadius: '8px',
+                  fontSize: '12px',
+                  background: t.isDark ? 'rgba(255,255,255,0.06)' : 'rgba(15,23,42,0.05)',
+                  border: '1px solid ' + t.accentBorder,
+                  color: t.fg,
+                  outline: 'none',
+                },
+              }),
+              ...(mentionHits.length === 0
+                ? [
+                    h(
+                      'div',
+                      { key: 'at-empty', style: { padding: '10px', fontSize: '12px', color: t.muted, textAlign: 'center' } },
+                      '未找到匹配文件，可继续输入关键词或点「+」手动选择',
+                    ),
+                  ]
+                : mentionHits.map((hit) =>
+                    popRow(
+                      'at-' + hit.path,
+                      hit.kind === 'dir' ? ICONS.folder(t.accent) : ICONS.clip(t.muted),
+                      hit.name || hit.path,
+                      hit.parentDisplay || hit.path,
+                      false,
+                      () => {
+                        tauriInvoke('app_describe_paths', { paths: [hit.path] })
+                          .then((list) => {
+                            if (Array.isArray(list) && list.length > 0) addExtAttachments(list);
+                          })
+                          .catch(() => {});
+                        dsbRuntime.extDraftText = (dsbRuntime.extDraftText || '').replace(/(?:^|\s)@[^\s@]{0,40}$/, '').trim();
+                        setComposerPopover(null);
+                        notifyBarRuntime();
+                        focusComposerElement();
+                      },
+                    ),
+                  )),
+            ];
+          } else if (composerPopover.kind === 'slash') {
+            panelWidth = 312;
+            const q = String(extDraft || '').trim().toLowerCase();
+            const actions = (uo.actions || []).filter(
+              (a) => a && (!q || String(a.id || '').toLowerCase().includes(q) || String(a.desc || '').toLowerCase().includes(q)),
+            );
+            content = [
+              sectionHdr('sl-hdr', meta.label + ' · 斜杠指令（回车或点击执行）', false),
+              ...(actions.length === 0
+                ? [h('div', { key: 'sl-none', style: { padding: '10px', fontSize: '12px', color: t.muted, textAlign: 'center' } }, '无匹配指令')]
+                : actions.map((a) =>
+                    popRow('sl-' + a.id, ICONS.slash(t.accent), a.label || a.id, a.desc || '', false, () => {
+                      dsbRuntime.extDraftText = '';
+                      setComposerPopover(null);
+                      notifyBarRuntime();
+                      if (adapter && typeof adapter.handleSlashAction === 'function') {
+                        adapter.handleSlashAction(a.id, buildHarnessActionCtx(activeHarness));
+                      } else {
+                        insertTextIntoExtComposer(a.id + ' ');
+                      }
+                    }),
+                  )),
+            ];
+          } else if (composerPopover.kind === 'mode') {
+            panelWidth = 324;
             const curMode = prefs.mode || uo.defaultMode;
             content = [
               sectionHdr('m-hdr', meta.label + ' · 权限模式（Shift+Tab 循环）', false),
               ...uo.modes.map((md) => {
                 const isSel = md.id === curMode;
-                const isDanger = Boolean(md.danger || md.id === 'turbo' || md.id === 'danger-full-access' || md.id === 'auto');
+                const isDanger = Boolean(
+                  md.danger || md.id === 'turbo' || md.id === 'danger-full-access' || md.id === 'bypassPermissions' || md.id === 'auto',
+                );
                 return popRow(
                   'md-' + md.id,
                   HARNESS_SDK_ICONS.shield(isDanger ? t.permDanger : t.muted),
@@ -5836,33 +6030,16 @@ window.__ModuleLoader__.load({
               }),
             ];
           } else if (composerPopover.kind === 'model') {
-            panelWidth = 304;
+            panelWidth = 312;
             const curModel = prefs.model || uo.defaultModel;
             const curEffort = prefs.effort || uo.defaultEffort;
-            const fastOn = Boolean(prefs.fastSpeed);
             content = [
               h(
                 'div',
                 { key: 'mdl-hdr', style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '3px 10px 5px' } },
                 h('span', { style: { fontSize: '11px', fontWeight: 500, color: t.muted } }, meta.label + ' · 选择模型'),
-                activeHarness === 'codex'
-                  ? h(
-                      'button',
-                      {
-                        type: 'button',
-                        onClick: (ev) => { ev.stopPropagation(); updateHarnessPrefs('codex', { fastSpeed: !fastOn }); },
-                        style: {
-                          border: '1px solid ' + (fastOn ? t.accentBorder : t.subtleBorder),
-                          background: fastOn ? t.accentBg : 'transparent',
-                          color: fastOn ? t.accent : t.muted,
-                          borderRadius: '999px',
-                          padding: '1px 8px',
-                          fontSize: '10.5px',
-                          cursor: 'pointer',
-                        },
-                      },
-                      '⚡ 1.5x ' + (fastOn ? '开' : '关'),
-                    )
+                adapter && typeof adapter.renderModelHeaderExtra === 'function'
+                  ? adapter.renderModelHeaderExtra(harnessPopCtx)
                   : null,
               ),
               ...uo.models.map((m) => {
@@ -7668,6 +7845,13 @@ window.__ModuleLoader__.load({
                   cfg.preferAdmin !== false,
                   (v) => updateAppSettings({ preferAdmin: v }),
                 ),
+                renderToggleRow(
+                  'autostart',
+                  'Windows 开机自动启动',
+                  '登录系统后自动在后台静默就绪，随时双击 Ctrl 唤出',
+                  Boolean(cfg.autostart),
+                  (v) => updateAppSettings({ autostart: v }),
+                ),
               ),
               h(
                 'div',
@@ -7701,8 +7885,8 @@ window.__ModuleLoader__.load({
                           padding: '4px 8px',
                           borderRadius: '7px',
                           border: '1px solid ' + panelBorder,
-                          background: 'rgba(255,255,255,0.04)',
-                          color: 'rgba(229,231,235,0.88)',
+                          background: panelRowBg,
+                          color: panelFg,
                           cursor: 'pointer',
                         },
                       },
@@ -7931,9 +8115,9 @@ window.__ModuleLoader__.load({
                                   background: isBrowsedH
                                     ? meta.accentBg
                                     : isActiveH
-                                      ? 'rgba(255,255,255,0.05)'
+                                      ? panelRowBg
                                       : 'transparent',
-                                  color: isBrowsedH || isActiveH ? '#ffffff' : 'rgba(229, 231, 235, 0.80)',
+                                  color: isBrowsedH || isActiveH ? panelFg : panelMuted,
                                   fontSize: '12px',
                                   fontWeight: isActiveH ? 650 : isBrowsedH ? 550 : 450,
                                   cursor: 'pointer',
@@ -7993,8 +8177,8 @@ window.__ModuleLoader__.load({
                           padding: '5px 9px',
                           borderRadius: '9px',
                           border: 'none',
-                          background: 'rgba(255,255,255,0.03)',
-                          color: 'rgba(229,231,235,0.78)',
+                          background: panelRowBg,
+                          color: panelFg,
                           fontSize: '11.5px',
                           cursor: 'pointer',
                           display: 'flex',
@@ -8142,8 +8326,8 @@ window.__ModuleLoader__.load({
                                     height: '28px',
                                     borderRadius: '9px',
                                     border: 'none',
-                                    background: 'rgba(255,255,255,0.06)',
-                                    color: 'rgba(229,231,235,0.85)',
+                                    background: panelRowBg,
+                                    color: panelFg,
                                     fontSize: '13px',
                                     cursor: 'pointer',
                                     flexShrink: 0,
