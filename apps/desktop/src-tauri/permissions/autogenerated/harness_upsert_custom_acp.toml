@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-harness-upsert-custom-acp"
+description = "Enables the harness_upsert_custom_acp command without any pre-configured scope."
+commands.allow = ["harness_upsert_custom_acp"]
+
+[[permission]]
+identifier = "deny-harness-upsert-custom-acp"
+description = "Denies the harness_upsert_custom_acp command without any pre-configured scope."
+commands.deny = ["harness_upsert_custom_acp"]

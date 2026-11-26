@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-bar-dock-expand"
+description = "Enables the bar_dock_expand command without any pre-configured scope."
+commands.allow = ["bar_dock_expand"]
+
+[[permission]]
+identifier = "deny-bar-dock-expand"
+description = "Denies the bar_dock_expand command without any pre-configured scope."
+commands.deny = ["bar_dock_expand"]

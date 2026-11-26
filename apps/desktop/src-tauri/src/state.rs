@@ -1,3 +1,4 @@
+use crate::config::DockEdge;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -5,6 +6,7 @@ use serde::{Deserialize, Serialize};
 pub enum VisibilityState {
     Hidden,
     Lip,
+    DockedCollapsed,
     Summon,
 }
 
@@ -12,7 +14,7 @@ impl VisibilityState {
     pub fn tier_u8(self) -> u8 {
         match self {
             VisibilityState::Hidden => 0,
-            VisibilityState::Lip => 1,
+            VisibilityState::Lip | VisibilityState::DockedCollapsed => 1,
             VisibilityState::Summon => 2,
         }
     }
@@ -40,6 +42,9 @@ pub enum WindowAction {
     Hide,
     ShowNoActivate,
     ActivateAndFocus,
+    DockCollapse,
+    DockExpandNoActivate,
+    DockExpandAndFocus,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -92,6 +97,16 @@ pub enum StateEvent {
     PickInserted,
     TrayToggle,
     DevForceState(DevTargetState),
+    SetDockEdge {
+        edge: DockEdge,
+        start_collapsed: bool,
+    },
+    DockEdgePeekEnter,
+    DockEdgeClickExpand,
+    DockAutoCollapseIfUnlocked,
+    FullscreenChanged {
+        active: bool,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -123,6 +138,9 @@ pub struct BarStateMachine {
     pub modal: bool,
     pub composer_focused: bool,
     pub pen_active: bool,
+    pub dock_edge: DockEdge,
+    pub dock_locked_open: bool,
+    pub fullscreen_suppressed: bool,
     last_session_id: Option<String>,
     last_assistant_id: String,
     last_streaming: bool,
@@ -143,6 +161,9 @@ impl BarStateMachine {
             modal: false,
             composer_focused: false,
             pen_active: false,
+            dock_edge: DockEdge::None,
+            dock_locked_open: false,
+            fullscreen_suppressed: false,
             last_session_id: None,
             last_assistant_id: String::new(),
             last_streaming: false,
@@ -151,6 +172,39 @@ impl BarStateMachine {
 
     pub fn is_visible(&self) -> bool {
         !matches!(self.visibility, VisibilityState::Hidden)
+    }
+
+    fn collapse_or_hide(&mut self) -> TransitionEffects {
+        self.pinned = false;
+        self.popup_open = false;
+        self.composer_focused = false;
+        self.dock_locked_open = false;
+        if self.dock_edge.is_docked() {
+            if self.fullscreen_suppressed {
+                self.visibility = VisibilityState::Hidden;
+                return TransitionEffects {
+                    window_action: Some(WindowAction::Hide),
+                    bridge_mode: None,
+                    reset_pick_counter: false,
+                    record_sent_message: false,
+                };
+            }
+            self.visibility = VisibilityState::DockedCollapsed;
+            TransitionEffects {
+                window_action: Some(WindowAction::DockCollapse),
+                bridge_mode: None,
+                reset_pick_counter: false,
+                record_sent_message: false,
+            }
+        } else {
+            self.visibility = VisibilityState::Hidden;
+            TransitionEffects {
+                window_action: Some(WindowAction::Hide),
+                bridge_mode: None,
+                reset_pick_counter: false,
+                record_sent_message: false,
+            }
+        }
     }
 
     pub fn apply(&mut self, event: StateEvent) -> TransitionEffects {
@@ -163,22 +217,18 @@ impl BarStateMachine {
                 {
                     return TransitionEffects::none();
                 }
-                self.visibility = VisibilityState::Hidden;
-                self.pinned = false;
-                self.popup_open = false;
-                self.composer_focused = false;
-                TransitionEffects {
-                    window_action: Some(WindowAction::Hide),
-                    bridge_mode: None,
-                    reset_pick_counter: false,
-                    record_sent_message: false,
-                }
+                self.collapse_or_hide()
             }
 
             StateEvent::DoubleCtrlOpen => {
                 self.visibility = VisibilityState::Summon;
+                self.dock_locked_open = true;
                 TransitionEffects {
-                    window_action: Some(WindowAction::ActivateAndFocus),
+                    window_action: Some(if self.dock_edge.is_docked() {
+                        WindowAction::DockExpandAndFocus
+                    } else {
+                        WindowAction::ActivateAndFocus
+                    }),
                     bridge_mode: Some(BridgeMode::Summon),
                     reset_pick_counter: false,
                     record_sent_message: false,
@@ -187,8 +237,13 @@ impl BarStateMachine {
 
             StateEvent::SummonFromLip => {
                 self.visibility = VisibilityState::Summon;
+                self.dock_locked_open = true;
                 TransitionEffects {
-                    window_action: Some(WindowAction::ActivateAndFocus),
+                    window_action: Some(if self.dock_edge.is_docked() {
+                        WindowAction::DockExpandAndFocus
+                    } else {
+                        WindowAction::ActivateAndFocus
+                    }),
                     bridge_mode: Some(BridgeMode::Summon),
                     reset_pick_counter: false,
                     record_sent_message: false,
@@ -200,42 +255,29 @@ impl BarStateMachine {
                     || self.modal
                     || self.pinned
                     || self.visibility == VisibilityState::Hidden
+                    || self.visibility == VisibilityState::DockedCollapsed
                 {
                     return TransitionEffects::none();
                 }
-                self.visibility = VisibilityState::Hidden;
-                self.pinned = false;
-                self.popup_open = false;
-                self.composer_focused = false;
-                TransitionEffects {
-                    window_action: Some(WindowAction::Hide),
-                    bridge_mode: None,
-                    reset_pick_counter: false,
-                    record_sent_message: false,
-                }
+                self.collapse_or_hide()
             }
 
             StateEvent::TrayToggle => match self.visibility {
-                VisibilityState::Hidden => {
+                VisibilityState::Hidden | VisibilityState::DockedCollapsed => {
                     self.visibility = VisibilityState::Summon;
+                    self.dock_locked_open = true;
                     TransitionEffects {
-                        window_action: Some(WindowAction::ActivateAndFocus),
+                        window_action: Some(if self.dock_edge.is_docked() {
+                            WindowAction::DockExpandAndFocus
+                        } else {
+                            WindowAction::ActivateAndFocus
+                        }),
                         bridge_mode: Some(BridgeMode::Summon),
                         reset_pick_counter: false,
                         record_sent_message: false,
                     }
                 }
-                _ => {
-                    self.visibility = VisibilityState::Hidden;
-                    self.pinned = false;
-                    self.popup_open = false;
-                    TransitionEffects {
-                        window_action: Some(WindowAction::Hide),
-                        bridge_mode: None,
-                        reset_pick_counter: false,
-                        record_sent_message: false,
-                    }
-                }
+                _ => self.collapse_or_hide(),
             },
 
             StateEvent::StepDown => {
@@ -243,19 +285,10 @@ impl BarStateMachine {
                     return TransitionEffects::none();
                 }
                 match self.visibility {
-                    VisibilityState::Hidden => TransitionEffects::none(),
-                    VisibilityState::Summon | VisibilityState::Lip => {
-                        self.visibility = VisibilityState::Hidden;
-                        self.pinned = false;
-                        self.popup_open = false;
-                        self.composer_focused = false;
-                        TransitionEffects {
-                            window_action: Some(WindowAction::Hide),
-                            bridge_mode: None,
-                            reset_pick_counter: false,
-                            record_sent_message: false,
-                        }
+                    VisibilityState::Hidden | VisibilityState::DockedCollapsed => {
+                        TransitionEffects::none()
                     }
+                    VisibilityState::Summon | VisibilityState::Lip => self.collapse_or_hide(),
                 }
             }
 
@@ -267,11 +300,9 @@ impl BarStateMachine {
                     record_sent_message: true,
                 };
                 if self.visibility == VisibilityState::Summon && !self.pinned {
-                    self.visibility = VisibilityState::Hidden;
-                    self.popup_open = false;
-                    self.composer_focused = false;
-                    fx.window_action = Some(WindowAction::Hide);
-                    fx.bridge_mode = None;
+                    let sub = self.collapse_or_hide();
+                    fx.window_action = sub.window_action;
+                    fx.bridge_mode = sub.bridge_mode;
                 }
                 fx
             }
@@ -308,14 +339,24 @@ impl BarStateMachine {
                 self.popup_open = popup_open;
                 self.modal = modal;
                 self.composer_focused = composer_focused;
+                if composer_focused || popup_open || pinned {
+                    self.dock_locked_open = true;
+                }
                 TransitionEffects::none()
             }
 
             StateEvent::ComposerPointerDown => {
-                if self.visibility == VisibilityState::Lip {
+                self.dock_locked_open = true;
+                if self.visibility == VisibilityState::Lip
+                    || self.visibility == VisibilityState::DockedCollapsed
+                {
                     self.visibility = VisibilityState::Summon;
                     return TransitionEffects {
-                        window_action: Some(WindowAction::ActivateAndFocus),
+                        window_action: Some(if self.dock_edge.is_docked() {
+                            WindowAction::DockExpandAndFocus
+                        } else {
+                            WindowAction::ActivateAndFocus
+                        }),
                         bridge_mode: Some(BridgeMode::Summon),
                         reset_pick_counter: false,
                         record_sent_message: false,
@@ -328,8 +369,13 @@ impl BarStateMachine {
                 // Double-tap Ctrl & hold: wake Bar to Summon, focus composer cursor, and enter selection mode
                 self.visibility = VisibilityState::Summon;
                 self.pen_active = true;
+                self.dock_locked_open = true;
                 TransitionEffects {
-                    window_action: Some(WindowAction::ActivateAndFocus),
+                    window_action: Some(if self.dock_edge.is_docked() {
+                        WindowAction::DockExpandAndFocus
+                    } else {
+                        WindowAction::ActivateAndFocus
+                    }),
                     bridge_mode: Some(BridgeMode::Summon),
                     reset_pick_counter: false,
                     record_sent_message: false,
@@ -427,6 +473,129 @@ impl BarStateMachine {
                     }
                 }
             },
+
+            StateEvent::SetDockEdge {
+                edge,
+                start_collapsed,
+            } => {
+                self.dock_edge = edge;
+                if !edge.is_docked() {
+                    self.dock_locked_open = false;
+                    if self.visibility == VisibilityState::DockedCollapsed {
+                        self.visibility = VisibilityState::Summon;
+                        return TransitionEffects {
+                            window_action: Some(WindowAction::ActivateAndFocus),
+                            bridge_mode: Some(BridgeMode::Summon),
+                            reset_pick_counter: false,
+                            record_sent_message: false,
+                        };
+                    }
+                    return TransitionEffects::none();
+                }
+                if start_collapsed {
+                    self.dock_locked_open = false;
+                    if self.fullscreen_suppressed {
+                        self.visibility = VisibilityState::Hidden;
+                        return TransitionEffects {
+                            window_action: Some(WindowAction::Hide),
+                            bridge_mode: Some(BridgeMode::Summon),
+                            reset_pick_counter: false,
+                            record_sent_message: false,
+                        };
+                    }
+                    self.visibility = VisibilityState::DockedCollapsed;
+                    TransitionEffects {
+                        window_action: Some(WindowAction::DockCollapse),
+                        bridge_mode: Some(BridgeMode::Summon),
+                        reset_pick_counter: false,
+                        record_sent_message: false,
+                    }
+                } else {
+                    self.visibility = VisibilityState::Summon;
+                    self.dock_locked_open = true;
+                    TransitionEffects {
+                        window_action: Some(WindowAction::DockExpandAndFocus),
+                        bridge_mode: Some(BridgeMode::Summon),
+                        reset_pick_counter: false,
+                        record_sent_message: false,
+                    }
+                }
+            }
+
+            StateEvent::DockEdgePeekEnter => {
+                if !self.dock_edge.is_docked()
+                    || self.visibility != VisibilityState::DockedCollapsed
+                    || self.fullscreen_suppressed
+                {
+                    return TransitionEffects::none();
+                }
+                self.visibility = VisibilityState::Summon;
+                self.dock_locked_open = false;
+                TransitionEffects {
+                    window_action: Some(WindowAction::DockExpandNoActivate),
+                    bridge_mode: Some(BridgeMode::Summon),
+                    reset_pick_counter: false,
+                    record_sent_message: false,
+                }
+            }
+
+            StateEvent::DockEdgeClickExpand => {
+                if !self.dock_edge.is_docked() {
+                    return TransitionEffects::none();
+                }
+                self.visibility = VisibilityState::Summon;
+                self.dock_locked_open = true;
+                TransitionEffects {
+                    window_action: Some(WindowAction::DockExpandAndFocus),
+                    bridge_mode: Some(BridgeMode::Summon),
+                    reset_pick_counter: false,
+                    record_sent_message: false,
+                }
+            }
+
+            StateEvent::DockAutoCollapseIfUnlocked => {
+                if !self.dock_edge.is_docked()
+                    || self.visibility != VisibilityState::Summon
+                    || self.dock_locked_open
+                    || self.pinned
+                    || self.popup_open
+                    || self.modal
+                    || self.composer_focused
+                    || self.pen_active
+                {
+                    return TransitionEffects::none();
+                }
+                self.collapse_or_hide()
+            }
+
+            StateEvent::FullscreenChanged { active } => {
+                if self.fullscreen_suppressed == active {
+                    return TransitionEffects::none();
+                }
+                self.fullscreen_suppressed = active;
+                if !self.dock_edge.is_docked() {
+                    return TransitionEffects::none();
+                }
+                if active && self.visibility == VisibilityState::DockedCollapsed {
+                    self.visibility = VisibilityState::Hidden;
+                    return TransitionEffects {
+                        window_action: Some(WindowAction::Hide),
+                        bridge_mode: None,
+                        reset_pick_counter: false,
+                        record_sent_message: false,
+                    };
+                }
+                if !active && self.visibility == VisibilityState::Hidden {
+                    self.visibility = VisibilityState::DockedCollapsed;
+                    return TransitionEffects {
+                        window_action: Some(WindowAction::DockCollapse),
+                        bridge_mode: None,
+                        reset_pick_counter: false,
+                        record_sent_message: false,
+                    };
+                }
+                TransitionEffects::none()
+            }
         }
     }
 }
@@ -634,5 +803,90 @@ mod tests {
         let fx3 = sm.apply(StateEvent::IncomingBubbleNotice);
         assert_eq!(sm.visibility, VisibilityState::Summon);
         assert!(fx3.window_action.is_none());
+    }
+
+    #[test]
+    fn docked_bar_collapses_to_edge_on_outside_click_esc_ctrl_and_submit() {
+        let mut sm = BarStateMachine::new();
+        let fx = sm.apply(StateEvent::SetDockEdge {
+            edge: DockEdge::Right,
+            start_collapsed: false,
+        });
+        assert_eq!(sm.dock_edge, DockEdge::Right);
+        assert_eq!(sm.visibility, VisibilityState::Summon);
+        assert!(sm.dock_locked_open);
+        assert_eq!(fx.window_action, Some(WindowAction::DockExpandAndFocus));
+
+        // Outside click collapses into DockedCollapsed (never Hidden!)
+        let fx_out = sm.apply(StateEvent::OutsideClickHide);
+        assert_eq!(sm.visibility, VisibilityState::DockedCollapsed);
+        assert_eq!(fx_out.window_action, Some(WindowAction::DockCollapse));
+
+        // Double-Ctrl expands & locks open
+        let fx_open = sm.apply(StateEvent::DoubleCtrlOpen);
+        assert_eq!(sm.visibility, VisibilityState::Summon);
+        assert!(sm.dock_locked_open);
+        assert_eq!(fx_open.window_action, Some(WindowAction::DockExpandAndFocus));
+
+        // Esc (StepDown) collapses to DockedCollapsed
+        let fx_esc = sm.apply(StateEvent::StepDown);
+        assert_eq!(sm.visibility, VisibilityState::DockedCollapsed);
+        assert_eq!(fx_esc.window_action, Some(WindowAction::DockCollapse));
+
+        // Single-Ctrl while Summon collapses to DockedCollapsed
+        sm.apply(StateEvent::DockEdgeClickExpand);
+        let fx_ctrl = sm.apply(StateEvent::SingleCtrlClose);
+        assert_eq!(sm.visibility, VisibilityState::DockedCollapsed);
+        assert_eq!(fx_ctrl.window_action, Some(WindowAction::DockCollapse));
+
+        // Submitted while Summon collapses to DockedCollapsed
+        sm.apply(StateEvent::DockEdgeClickExpand);
+        let fx_sub = sm.apply(StateEvent::Submitted);
+        assert_eq!(sm.visibility, VisibilityState::DockedCollapsed);
+        assert_eq!(fx_sub.window_action, Some(WindowAction::DockCollapse));
+        assert!(fx_sub.reset_pick_counter);
+        assert!(fx_sub.record_sent_message);
+    }
+
+    #[test]
+    fn docked_hover_peek_auto_collapses_until_locked_by_click_or_focus() {
+        let mut sm = BarStateMachine::new();
+        sm.apply(StateEvent::SetDockEdge {
+            edge: DockEdge::Bottom,
+            start_collapsed: true,
+        });
+        assert_eq!(sm.visibility, VisibilityState::DockedCollapsed);
+
+        // Hover edge -> slides out unlocked without stealing focus
+        let fx_peek = sm.apply(StateEvent::DockEdgePeekEnter);
+        assert_eq!(sm.visibility, VisibilityState::Summon);
+        assert!(!sm.dock_locked_open);
+        assert_eq!(fx_peek.window_action, Some(WindowAction::DockExpandNoActivate));
+
+        // Mouse leaves while unlocked -> auto-collapses back into 10px edge
+        let fx_auto = sm.apply(StateEvent::DockAutoCollapseIfUnlocked);
+        assert_eq!(sm.visibility, VisibilityState::DockedCollapsed);
+        assert_eq!(fx_auto.window_action, Some(WindowAction::DockCollapse));
+
+        // Hover edge again, then user clicks composer -> locks open
+        sm.apply(StateEvent::DockEdgePeekEnter);
+        sm.apply(StateEvent::ComposerPointerDown);
+        assert!(sm.dock_locked_open);
+
+        // Now mouse leaving must NOT auto-collapse
+        let fx_stay = sm.apply(StateEvent::DockAutoCollapseIfUnlocked);
+        assert_eq!(sm.visibility, VisibilityState::Summon);
+        assert!(fx_stay.window_action.is_none());
+
+        // Fullscreen app covers dock monitor while collapsed -> hides 10px strip, then restores on exit
+        sm.apply(StateEvent::OutsideClickHide);
+        assert_eq!(sm.visibility, VisibilityState::DockedCollapsed);
+        let fx_fs_on = sm.apply(StateEvent::FullscreenChanged { active: true });
+        assert_eq!(sm.visibility, VisibilityState::Hidden);
+        assert_eq!(fx_fs_on.window_action, Some(WindowAction::Hide));
+
+        let fx_fs_off = sm.apply(StateEvent::FullscreenChanged { active: false });
+        assert_eq!(sm.visibility, VisibilityState::DockedCollapsed);
+        assert_eq!(fx_fs_off.window_action, Some(WindowAction::DockCollapse));
     }
 }

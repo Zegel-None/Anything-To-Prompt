@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-app-ensure-default-workspace"
+description = "Enables the app_ensure_default_workspace command without any pre-configured scope."
+commands.allow = ["app_ensure_default_workspace"]
+
+[[permission]]
+identifier = "deny-app-ensure-default-workspace"
+description = "Denies the app_ensure_default_workspace command without any pre-configured scope."
+commands.deny = ["app_ensure_default_workspace"]

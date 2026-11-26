@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-harness-session-stats"
+description = "Enables the harness_session_stats command without any pre-configured scope."
+commands.allow = ["harness_session_stats"]
+
+[[permission]]
+identifier = "deny-harness-session-stats"
+description = "Denies the harness_session_stats command without any pre-configured scope."
+commands.deny = ["harness_session_stats"]

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-bar-get-dock-state"
+description = "Enables the bar_get_dock_state command without any pre-configured scope."
+commands.allow = ["bar_get_dock_state"]
+
+[[permission]]
+identifier = "deny-bar-get-dock-state"
+description = "Denies the bar_get_dock_state command without any pre-configured scope."
+commands.deny = ["bar_get_dock_state"]

@@ -386,6 +386,11 @@ fn bar_report(app: AppHandle, payload: BarReportPayload) {
                 );
             }
 
+            if let Some(first_shape) = payload.shapes.first() {
+                if first_shape.h >= 60 && first_shape.h <= 280 {
+                    window::update_dock_composer_height_dip(first_shape.h);
+                }
+            }
             if let Some(bar_win) = app.get_webview_window("bar") {
                 apply_bar_layout(&bar_win, width, height, &payload.shapes);
             }
@@ -494,6 +499,55 @@ fn bar_reconnect(app: AppHandle) {
     trigger_dsh_reconnect(app);
 }
 
+fn push_dock_state_to_bar(app: &AppHandle, edge: config::DockEdge, collapsed: bool) {
+    if let Some(bar_win) = app.get_webview_window("bar") {
+        let js = format!(
+            "(function(){{ if (typeof window.__DSB_DOCK_STATE__ === 'function') {{ window.__DSB_DOCK_STATE__({{\"edge\":\"{}\",\"collapsed\":{}}}); }} }})();",
+            edge.as_str(),
+            if collapsed { "true" } else { "false" }
+        );
+        let _ = bar_win.eval(&js);
+    }
+}
+
+pub fn apply_dock_edge(app: &AppHandle, edge: config::DockEdge, start_collapsed: bool) {
+    let Some(shared) = app.try_state::<AppShared>() else {
+        return;
+    };
+    let bar_width = if let Ok(mut cfg) = shared.config.lock() {
+        if cfg.dock_edge != edge {
+            cfg.dock_edge = edge;
+            let _ = cfg.save();
+        }
+        cfg.bar_width
+    } else {
+        760
+    };
+    window::set_active_dock_state(edge, start_collapsed, None);
+    dispatch_state_event(
+        app,
+        StateEvent::SetDockEdge {
+            edge,
+            start_collapsed,
+        },
+    );
+    push_dock_state_to_bar(app, edge, start_collapsed);
+    if !edge.is_docked() {
+        let cached = shared
+            .last_layout
+            .lock()
+            .map(|c| c.clone())
+            .unwrap_or_else(|_| CachedLayout {
+                width_dip: bar_width,
+                height_dip: window::BAR_STAGE_HEIGHT_DIP,
+                shapes: Vec::new(),
+            });
+        if let Some(bar_win) = app.get_webview_window("bar") {
+            apply_bar_layout(&bar_win, cached.width_dip, window::BAR_STAGE_HEIGHT_DIP, &cached.shapes);
+        }
+    }
+}
+
 #[tauri::command]
 fn bar_drag_begin(app: AppHandle) -> bool {
     app.get_webview_window("bar")
@@ -502,15 +556,25 @@ fn bar_drag_begin(app: AppHandle) -> bool {
 }
 
 #[tauri::command]
-fn bar_drag_step(app: AppHandle) -> bool {
+fn bar_drag_step(app: AppHandle) -> window::DragStepResult {
     app.get_webview_window("bar")
         .map(|w| window::step_bar_drag(&w))
-        .unwrap_or(false)
+        .unwrap_or(window::DragStepResult {
+            moved: false,
+            snap_preview: config::DockEdge::None,
+            undocked: false,
+        })
 }
 
 #[tauri::command]
-fn bar_drag_end() {
-    window::end_bar_drag();
+fn bar_drag_end(app: AppHandle) -> window::DragEndResult {
+    let res = window::end_bar_drag();
+    if res.snapped_edge.is_docked() {
+        apply_dock_edge(&app, res.snapped_edge, false);
+    } else if res.undocked {
+        apply_dock_edge(&app, config::DockEdge::None, false);
+    }
+    res
 }
 
 #[tauri::command]
@@ -518,18 +582,36 @@ fn bar_drag_reset(app: AppHandle) {
     let Some(shared) = app.try_state::<AppShared>() else {
         return;
     };
+    apply_dock_edge(&app, config::DockEdge::None, false);
     let cached = shared
         .last_layout
         .lock()
         .map(|c| c.clone())
         .unwrap_or_else(|_| CachedLayout {
             width_dip: 760,
-            height_dip: DEFAULT_LIP_HEIGHT_DIP,
+            height_dip: window::BAR_STAGE_HEIGHT_DIP,
             shapes: Vec::new(),
         });
     if let Some(bar_win) = app.get_webview_window("bar") {
         window::reset_bar_anchor(&bar_win, cached.width_dip, cached.height_dip, &cached.shapes);
     }
+}
+
+#[tauri::command]
+fn bar_get_dock_state() -> window::DockStateSnapshot {
+    window::get_dock_runtime_snapshot()
+}
+
+#[tauri::command]
+fn bar_set_dock_edge(app: AppHandle, edge: String, start_collapsed: Option<bool>) -> window::DockStateSnapshot {
+    let parsed = config::DockEdge::parse(&edge);
+    apply_dock_edge(&app, parsed, start_collapsed.unwrap_or(false));
+    window::get_dock_runtime_snapshot()
+}
+
+#[tauri::command]
+fn bar_dock_expand(app: AppHandle) {
+    dispatch_state_event(&app, StateEvent::DockEdgeClickExpand);
 }
 
 #[tauri::command]
@@ -1696,12 +1778,12 @@ pub fn dispatch_state_event(app: &AppHandle, event: StateEvent) {
         return;
     };
 
-    let (fx, vis_snapshot) = {
+    let (fx, vis_snapshot, dock_edge_snapshot) = {
         let Ok(mut sm) = shared.state_machine.lock() else {
             return;
         };
         let fx = sm.apply(event);
-        (fx, sm.visibility)
+        (fx, sm.visibility, sm.dock_edge)
     };
 
     shared
@@ -1761,6 +1843,7 @@ pub fn dispatch_state_event(app: &AppHandle, event: StateEvent) {
     let vis_js_str = match vis_snapshot {
         VisibilityState::Hidden => "hidden",
         VisibilityState::Lip => "lip",
+        VisibilityState::DockedCollapsed => "docked_collapsed",
         VisibilityState::Summon => "summon",
     };
 
@@ -1771,9 +1854,15 @@ pub fn dispatch_state_event(app: &AppHandle, event: StateEvent) {
             );
             let _ = bar_win.eval(&js);
         }
+        push_dock_state_to_bar(
+            app,
+            dock_edge_snapshot,
+            vis_snapshot == VisibilityState::DockedCollapsed,
+        );
     }
 
     if let Some(win_act) = fx.window_action {
+        let bar_width = shared.config.lock().map(|c| c.bar_width).unwrap_or(760);
         if let Some(bar_win) = app.get_webview_window("bar") {
             match win_act {
                 WindowAction::Hide => {
@@ -1785,9 +1874,23 @@ pub fn dispatch_state_event(app: &AppHandle, event: StateEvent) {
                 WindowAction::ActivateAndFocus => {
                     activate_and_focus_bar(&bar_win);
                 }
+                WindowAction::DockCollapse => {
+                    window::slide_docked_bar(&bar_win, dock_edge_snapshot, true, bar_width, false);
+                }
+                WindowAction::DockExpandNoActivate => {
+                    window::slide_docked_bar(&bar_win, dock_edge_snapshot, false, bar_width, false);
+                }
+                WindowAction::DockExpandAndFocus => {
+                    window::slide_docked_bar(&bar_win, dock_edge_snapshot, false, bar_width, true);
+                }
             }
         }
-        log::info!("Bar visibility -> {:?} ({:?})", vis_snapshot, win_act);
+        log::info!(
+            "Bar visibility -> {:?} (dock={:?}, act={:?})",
+            vis_snapshot,
+            dock_edge_snapshot,
+            win_act
+        );
     }
 }
 
@@ -2356,6 +2459,85 @@ fn start_hook_event_router(app: AppHandle, rx: mpsc::Receiver<HookEvent>) {
         .expect("failed to start hook event router");
 }
 
+fn start_dock_watcher(app: AppHandle) {
+    let _ = std::thread::Builder::new()
+        .name("atp-dock-watcher".to_string())
+        .spawn(move || {
+            let mut hover_enter_at: Option<std::time::Instant> = None;
+            let mut leave_start_at: Option<std::time::Instant> = None;
+            let mut fs_check_tick: u8 = 0;
+
+            loop {
+                let state_snap = app.try_state::<AppShared>().and_then(|s| {
+                    s.state_machine
+                        .lock()
+                        .ok()
+                        .map(|sm| (sm.dock_edge, sm.visibility, sm.dock_locked_open, sm.pinned, sm.popup_open, sm.modal, sm.composer_focused, sm.pen_active))
+                });
+                let Some((dock_edge, vis, locked_open, pinned, popup_open, modal, composer_focused, pen_active)) = state_snap else {
+                    std::thread::sleep(Duration::from_millis(250));
+                    continue;
+                };
+
+                if !dock_edge.is_docked() {
+                    hover_enter_at = None;
+                    leave_start_at = None;
+                    std::thread::sleep(Duration::from_millis(260));
+                    continue;
+                }
+
+                let Some(bar_win) = app.get_webview_window("bar") else {
+                    std::thread::sleep(Duration::from_millis(200));
+                    continue;
+                };
+
+                // Periodic fullscreen detection (~400ms cadence) to auto-hide 10px edge strip over videos/games
+                fs_check_tick = fs_check_tick.wrapping_add(1);
+                if fs_check_tick % 8 == 0 {
+                    let is_fs = window::is_fullscreen_on_dock_monitor(hwnd_of(&bar_win));
+                    dispatch_state_event(&app, StateEvent::FullscreenChanged { active: is_fs });
+                }
+
+                match vis {
+                    VisibilityState::DockedCollapsed => {
+                        leave_start_at = None;
+                        if window::is_cursor_in_dock_peek_zone(&bar_win) {
+                            let started = *hover_enter_at.get_or_insert_with(std::time::Instant::now);
+                            if started.elapsed() >= Duration::from_millis(120) {
+                                hover_enter_at = None;
+                                dispatch_state_event(&app, StateEvent::DockEdgePeekEnter);
+                            }
+                        } else {
+                            hover_enter_at = None;
+                        }
+                    }
+                    VisibilityState::Summon => {
+                        hover_enter_at = None;
+                        if !locked_open && !pinned && !popup_open && !modal && !composer_focused && !pen_active {
+                            if window::is_cursor_inside_bar_now(&bar_win) {
+                                leave_start_at = None;
+                            } else {
+                                let left = *leave_start_at.get_or_insert_with(std::time::Instant::now);
+                                if left.elapsed() >= Duration::from_millis(400) {
+                                    leave_start_at = None;
+                                    dispatch_state_event(&app, StateEvent::DockAutoCollapseIfUnlocked);
+                                }
+                            }
+                        } else {
+                            leave_start_at = None;
+                        }
+                    }
+                    _ => {
+                        hover_enter_at = None;
+                        leave_start_at = None;
+                    }
+                }
+
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        });
+}
+
 fn start_dsh_health_monitor(app: AppHandle) {
     std::thread::Builder::new()
         .name("dsb-dsh-health".to_string())
@@ -2744,21 +2926,24 @@ pub fn run() {
                         .lock()
                         .map(|c| c.active_harness.clone())
                         .unwrap_or_else(|_| "dsh".to_string());
-                    let vis = shared
+                    let (vis, dock_edge) = shared
                         .state_machine
                         .lock()
-                        .map(|sm| sm.visibility)
-                        .unwrap_or(VisibilityState::Hidden);
+                        .map(|sm| (sm.visibility, sm.dock_edge))
+                        .unwrap_or((VisibilityState::Hidden, config::DockEdge::None));
                     let vis_str = match vis {
                         VisibilityState::Hidden => "hidden",
                         VisibilityState::Lip => "lip",
+                        VisibilityState::DockedCollapsed => "docked_collapsed",
                         VisibilityState::Summon => "summon",
                     };
                     let js = format!(
-                        "window.__DSB_BRIDGE__ && window.__DSB_BRIDGE__.setMode('{}'); window.__DSB_BRIDGE__ && window.__DSB_BRIDGE__.setVisibility && window.__DSB_BRIDGE__.setVisibility('{}'); window.__DSB_BRIDGE__ && window.__DSB_BRIDGE__.setHarness && window.__DSB_BRIDGE__.setHarness('{}');",
+                        "window.__DSB_BRIDGE__ && window.__DSB_BRIDGE__.setMode('{}'); window.__DSB_BRIDGE__ && window.__DSB_BRIDGE__.setVisibility && window.__DSB_BRIDGE__.setVisibility('{}'); window.__DSB_BRIDGE__ && window.__DSB_BRIDGE__.setHarness && window.__DSB_BRIDGE__.setHarness('{}'); window.__DSB_DOCK_STATE__ && window.__DSB_DOCK_STATE__({{\"edge\":\"{}\",\"collapsed\":{}}});",
                         mode.as_str(),
                         vis_str,
-                        normalize_harness_route(&active_harness)
+                        normalize_harness_route(&active_harness),
+                        dock_edge.as_str(),
+                        if vis == VisibilityState::DockedCollapsed { "true" } else { "false" }
                     );
                     let _ = webview.eval(&js);
 
@@ -2818,6 +3003,9 @@ pub fn run() {
             bar_drag_step,
             bar_drag_end,
             bar_drag_reset,
+            bar_get_dock_state,
+            bar_set_dock_edge,
+            bar_dock_expand,
             overlay_compose_done,
             harness_get_active,
             harness_set_active,
@@ -2924,13 +3112,27 @@ pub fn run() {
             start_input_hooks(hook_shared.clone(), hook_tx);
             start_hook_event_router(app_handle.clone(), hook_rx);
             start_dsh_health_monitor(app_handle.clone());
+            start_dock_watcher(app_handle.clone());
             search_engine_for_setup.spawn_background_indexer();
 
+            let initial_dock = app_handle
+                .try_state::<AppShared>()
+                .and_then(|s| s.config.lock().ok().map(|c| c.dock_edge))
+                .unwrap_or(config::DockEdge::None);
             if let Some(target) = startup_dev_state {
                 dispatch_state_event(&app_handle, StateEvent::DevForceState(target));
-            } else if startup_breath_pulse && !startup_dev_dump {
-                // Subtle breathing-light cursor pulse once hooks & tray are armed
-                cursor::play_ready_breath_pulse();
+            } else {
+                if initial_dock.is_docked() {
+                    let dock_app = app_handle.clone();
+                    std::thread::spawn(move || {
+                        std::thread::sleep(Duration::from_millis(650));
+                        apply_dock_edge(&dock_app, initial_dock, true);
+                    });
+                }
+                if startup_breath_pulse && !startup_dev_dump {
+                    // Subtle breathing-light cursor pulse once hooks & tray are armed
+                    cursor::play_ready_breath_pulse();
+                }
             }
             if startup_dev_dump {
                 let dump_app = app_handle.clone();

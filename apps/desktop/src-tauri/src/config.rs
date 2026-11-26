@@ -6,6 +6,47 @@ use std::path::PathBuf;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+pub enum DockEdge {
+    #[default]
+    None,
+    Top,
+    Bottom,
+    Left,
+    Right,
+}
+
+impl DockEdge {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            DockEdge::None => "none",
+            DockEdge::Top => "top",
+            DockEdge::Bottom => "bottom",
+            DockEdge::Left => "left",
+            DockEdge::Right => "right",
+        }
+    }
+
+    pub fn parse(raw: &str) -> Self {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "top" => DockEdge::Top,
+            "bottom" => DockEdge::Bottom,
+            "left" => DockEdge::Left,
+            "right" => DockEdge::Right,
+            _ => DockEdge::None,
+        }
+    }
+
+    pub fn is_docked(self) -> bool {
+        !matches!(self, DockEdge::None)
+    }
+
+    pub fn is_side(self) -> bool {
+        matches!(self, DockEdge::Left | DockEdge::Right)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum OutputTarget {
     /// Inject capsule into Anything-to-Prompt / DSH floating composer (default)
     #[default]
@@ -60,6 +101,9 @@ pub struct AppConfig {
     /// User-registered custom ACP harnesses persisted across restarts.
     #[serde(default)]
     pub custom_acp_harnesses: Vec<CustomAcpHarness>,
+    /// Persisted QQ-style screen edge dock (`none` | `top` | `bottom` | `left` | `right`).
+    #[serde(default)]
+    pub dock_edge: DockEdge,
 }
 
 impl Default for AppConfig {
@@ -84,6 +128,7 @@ impl Default for AppConfig {
             search_roots: Vec::new(),
             app_source_map: HashMap::new(),
             custom_acp_harnesses: Vec::new(),
+            dock_edge: DockEdge::None,
         }
     }
 }

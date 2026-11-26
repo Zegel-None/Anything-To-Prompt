@@ -643,6 +643,9 @@ window.__ModuleLoader__.load({
       universalTarget: null,
       unreadCount: 0,
       unreadPreview: '',
+      dockEdge: 'none',
+      dockCollapsed: false,
+      dragSnapEdge: 'none',
       toggleHarnessMenu: null,
       openSettingsMenu: null,
     };
@@ -1470,7 +1473,42 @@ window.__ModuleLoader__.load({
       }
     }
 
+    function normalizeDockEdge(raw) {
+      const s = String(raw || '').trim().toLowerCase();
+      if (s === 'top' || s === 'bottom' || s === 'left' || s === 'right') return s;
+      return 'none';
+    }
+
+    function applyDockState(edge, collapsed) {
+      const norm = normalizeDockEdge(edge);
+      const isCollapsed = norm !== 'none' && Boolean(collapsed);
+      const prevEdge = dsbRuntime.dockEdge;
+      const prevCollapsed = dsbRuntime.dockCollapsed;
+      dsbRuntime.dockEdge = norm;
+      dsbRuntime.dockCollapsed = isCollapsed;
+      if (typeof document !== 'undefined' && document.documentElement) {
+        document.documentElement.setAttribute('data-dsb-dock', norm);
+        document.documentElement.setAttribute('data-dsb-dock-collapsed', isCollapsed ? '1' : '0');
+      }
+      // Opening a docked side panel shows the full history stream immediately -> clear unread pulse
+      if ((norm === 'left' || norm === 'right') && !isCollapsed && dsbRuntime.unreadCount > 0) {
+        dsbRuntime.unreadCount = 0;
+        dsbRuntime.unreadPreview = '';
+      }
+      if (prevEdge !== norm || prevCollapsed !== isCollapsed) {
+        dsbRuntime.lastReportKeys.delete('layout');
+        notifyBarRuntime();
+        if (typeof dsbRuntime.scheduleLayoutReport === 'function') {
+          dsbRuntime.scheduleLayoutReport(340);
+        }
+      }
+    }
+
     function notifyBarRuntime() {
+      if (typeof document !== 'undefined' && document.documentElement) {
+        const hasUnread = (dsbRuntime.unreadCount || 0) > 0;
+        document.documentElement.setAttribute('data-dsb-dock-unread', hasUnread ? '1' : '0');
+      }
       for (const fn of dsbRuntime.listeners) {
         try {
           fn();
@@ -1598,6 +1636,30 @@ window.__ModuleLoader__.load({
       applyHarnessThemeAttribute(dsbRuntime.activeHarness);
       window.__DSB_HARNESS_EVENT__ = handleIncomingHarnessEvent;
       window.__DSB_HARNESS_SYNC__ = handleIncomingHarnessSync;
+      window.__DSB_DOCK_STATE__ = (st) => {
+        if (st && typeof st === 'object') {
+          applyDockState(st.edge, st.collapsed);
+        }
+      };
+      tauriInvoke('bar_get_dock_state')
+        .then((st) => {
+          if (st && typeof st === 'object') {
+            applyDockState(st.edge, st.collapsed);
+          }
+        })
+        .catch(() => {});
+      if (!window.__DSB_DOCK_CLICK_INSTALLED__) {
+        window.__DSB_DOCK_CLICK_INSTALLED__ = true;
+        document.addEventListener(
+          'pointerdown',
+          (ev) => {
+            if (dsbRuntime.dockEdge !== 'none' && dsbRuntime.dockCollapsed && ev.button === 0) {
+              tauriInvoke('bar_dock_expand').catch(() => {});
+            }
+          },
+          true,
+        );
+      }
       window.__DSB_TARGET_WINDOW__ = (info) => {
         if (info && typeof info === 'object') {
           dsbRuntime.universalTarget = info;
@@ -1963,6 +2025,53 @@ window.__ModuleLoader__.load({
         '}',
         'html[data-dsh-bar-clone="1"][data-dsb-mode="lip"] [data-composer-card],',
         'html[data-dsh-bar-clone="1"][data-dsb-mode="lip"] [data-queue-dock] {',
+        '  display: none !important;',
+        '}',
+        // =====================================================================
+        // v0.9.0 4-Edge Magnetic Docking + QQ-Style Auto-Collapse + Side Panel
+        // =====================================================================
+        '@keyframes dsbEdgePulse {',
+        '  0%, 100% {',
+        '    box-shadow: 0 0 0 2px color-mix(in srgb, var(--atp-accent, #4D6BFE) 88%, transparent) inset,',
+        '                0 0 14px color-mix(in srgb, var(--atp-accent, #4D6BFE) 55%, transparent) !important;',
+        '  }',
+        '  50% {',
+        '    box-shadow: 0 0 0 1px color-mix(in srgb, var(--atp-accent, #4D6BFE) 25%, transparent) inset,',
+        '                0 0 4px transparent !important;',
+        '  }',
+        '}',
+        'html[data-dsh-bar-clone="1"][data-dsb-dock-collapsed="1"] [data-composer-card],',
+        'html[data-dsh-bar-clone="1"][data-dsb-dock-collapsed="1"] [data-dsb-external-composer],',
+        'html[data-dsh-bar-clone="1"][data-dsb-dock-collapsed="1"] [data-dsb-card] {',
+        '  cursor: pointer !important;',
+        '}',
+        'html[data-dsh-bar-clone="1"][data-dsb-dock-collapsed="1"][data-dsb-dock-unread="1"] [data-composer-card],',
+        'html[data-dsh-bar-clone="1"][data-dsb-dock-collapsed="1"][data-dsb-dock-unread="1"] [data-dsb-external-composer],',
+        'html[data-dsh-bar-clone="1"][data-dsb-dock-collapsed="1"][data-dsb-dock-unread="1"] [data-dsb-card] {',
+        '  animation: dsbEdgePulse 1.9s ease-in-out infinite !important;',
+        '}',
+        // Top-Edge Dock: pin composer to top: 0 and expand history/popups downward
+        'html[data-dsh-bar-clone="1"][data-dsb-dock="top"] [data-conversation-scroll] {',
+        '  justify-content: flex-start !important;',
+        '}',
+        'html[data-dsh-bar-clone="1"][data-dsb-dock="top"] [data-composer-seat] {',
+        '  top: 0 !important;',
+        '  bottom: auto !important;',
+        '}',
+        // Left / Right Edge Dock: 420px Edge/Arc-style floating rounded vertical side panel
+        'html[data-dsh-bar-clone="1"][data-dsb-dock="left"] [data-composer-card],',
+        'html[data-dsh-bar-clone="1"][data-dsb-dock="right"] [data-composer-card] {',
+        '  border-radius: 14px 14px 18px 18px !important;',
+        '}',
+        'html[data-dsh-bar-clone="1"][data-dsb-dock="left"] [data-composer-card] [class*="toolbar"],',
+        'html[data-dsh-bar-clone="1"][data-dsb-dock="right"] [data-composer-card] [class*="toolbar"],',
+        'html[data-dsh-bar-clone="1"][data-dsb-dock="left"] [data-composer-card] > div:last-child,',
+        'html[data-dsh-bar-clone="1"][data-dsb-dock="right"] [data-composer-card] > div:last-child {',
+        '  flex-wrap: wrap !important;',
+        '  row-gap: 4px !important;',
+        '}',
+        'html[data-dsh-bar-clone="1"][data-dsb-dock="left"] [data-dsb-width-resize="1"],',
+        'html[data-dsh-bar-clone="1"][data-dsb-dock="right"] [data-dsb-width-resize="1"] {',
         '  display: none !important;',
         '}',
         'html[data-dsh-bar-clone="1"] [data-dsb-menu-scroll]::-webkit-scrollbar { width: 4px; }',
@@ -3178,6 +3287,9 @@ window.__ModuleLoader__.load({
         const [hoverPeek, setHoverPeek] = useState(false);
         const [composerPopover, setComposerPopover] = useState(null);
         const [composerSubView, setComposerSubView] = useState(null);
+        const [dockMenu, setDockMenu] = useState(null);
+        const [dragSnapEdge, setDragSnapEdge] = useState('none');
+        const [sideComposerHeight, setSideComposerHeight] = useState(112);
         const [mentionQuery, setMentionQuery] = useState('');
         const [mentionHits, setMentionHits] = useState([]);
         const mentionSeqRef = useRef(0);
@@ -3352,6 +3464,8 @@ window.__ModuleLoader__.load({
           const resetTransientUi = () => {
             dismissNativeTriggerMenu();
             setComposerPopover(null);
+            setDockMenu(null);
+            setDragSnapEdge('none');
             setHoverPeek(false);
             setHovered(false);
             setHistoryOpen(false);
@@ -3472,9 +3586,39 @@ window.__ModuleLoader__.load({
           return count;
         }, [entries]);
 
+        const dockEdge = IS_BAR ? (dsbRuntime.dockEdge || 'none') : 'none';
+        const dockCollapsed = IS_BAR ? Boolean(dsbRuntime.dockCollapsed) : false;
+        const isTopDock = dockEdge === 'top';
+        const isSideDock = dockEdge === 'left' || dockEdge === 'right';
+
         const isExpanded = IS_BAR
-          ? !dsbRuntime.popupOpen && (pinned || historyOpen || previewExpanded)
+          ? isSideDock
+            ? true
+            : !dsbRuntime.popupOpen && (pinned || historyOpen || previewExpanded)
           : !dsbRuntime.popupOpen && (pinned || hovered || previewExpanded);
+
+        // Close right-click quick dock menu on outside click or Esc
+        useEffect(() => {
+          if (!dockMenu || typeof document === 'undefined') return undefined;
+          const onDown = (e) => {
+            const target = e.target;
+            if (target instanceof Element && target.closest('[data-dsb-dock-menu="1"]')) return;
+            setDockMenu(null);
+          };
+          const onKey = (e) => {
+            if (e.key === 'Escape') {
+              e.preventDefault();
+              e.stopPropagation();
+              setDockMenu(null);
+            }
+          };
+          document.addEventListener('mousedown', onDown, true);
+          document.addEventListener('keydown', onKey, true);
+          return () => {
+            document.removeEventListener('mousedown', onDown, true);
+            document.removeEventListener('keydown', onKey, true);
+          };
+        }, [dockMenu]);
 
         // Load real composer options (models, efforts, modes, Codex plugins, slash actions) per Harness
         useEffect(() => {
@@ -3648,7 +3792,7 @@ window.__ModuleLoader__.load({
           }
           if (curId && prev.asstId && curId !== prev.asstId) {
             lastKnownAsstRef.current = { sessionKey: sKey, asstId: curId };
-            if (barMode !== 'lip' && !isExpanded) {
+            if (barMode !== 'lip' && (!isExpanded || dsbRuntime.dockCollapsed)) {
               dsbRuntime.unreadCount = (dsbRuntime.unreadCount || 0) + 1;
               dsbRuntime.unreadPreview = stripMarkdownForLip(latestAssistant.text || '');
               notifyBarRuntime();
@@ -3659,7 +3803,7 @@ window.__ModuleLoader__.load({
           } else if (curId && !prev.asstId) {
             lastKnownAsstRef.current = { sessionKey: sKey, asstId: curId };
           }
-        }, [activeHarness, effectiveSessionId, latestAssistantHasText ? String(latestAssistant.id) : '', barMode, isExpanded]);
+        }, [activeHarness, effectiveSessionId, latestAssistantHasText ? String(latestAssistant.id) : '', barMode, isExpanded, dockCollapsed]);
 
         // Also detect queued message submission while streaming in Bar mode
         useEffect(() => {
@@ -3704,7 +3848,7 @@ window.__ModuleLoader__.load({
               kind: 'ui',
               hovered,
               pinned,
-              popupOpen: dsbRuntime.popupOpen || dsbRuntime.quickSearchOpen,
+              popupOpen: dsbRuntime.popupOpen || dsbRuntime.quickSearchOpen || Boolean(dockMenu) || Boolean(composerPopover),
               modal: dsbRuntime.modalOpen,
               composerFocused: Boolean(composerEl && activeEl && composerEl.contains(activeEl)),
             });
@@ -3718,7 +3862,7 @@ window.__ModuleLoader__.load({
             document.removeEventListener('focusin', reportUi);
             document.removeEventListener('focusout', reportUi);
           };
-        }, [hovered, pinned]);
+        }, [hovered, pinned, dockMenu, composerPopover]);
 
         // Esc keydown capture, native + trigger-menu toggle/dismiss, & composer pointerdown in Bar mode
         useEffect(() => {
@@ -3972,11 +4116,18 @@ window.__ModuleLoader__.load({
           // so clicking ANY button (+, permissions, models, harness switcher, hover-peek, history)
           // NEVER triggers Win32 SetWindowPos / WM_SIZE / WebView2 swapchain resize (zero flash!).
           // Only `SetWindowRgn` updates the exact rounded-rect clip/hit-test shapes in <0.1ms.
-          if (IS_BAR && liveMode !== 'lip') {
-            targetHeight = Math.max(BAR_STAGE_HEIGHT_DIP, targetHeight);
+          const liveDock = dsbRuntime.dockEdge || 'none';
+          const liveSideDock = liveDock === 'left' || liveDock === 'right';
+          const liveTopDock = liveDock === 'top';
+          if (liveSideDock) {
+            targetHeight = Math.max(420, Math.round(window.innerHeight || BAR_STAGE_HEIGHT_DIP));
+          } else {
+            if (IS_BAR && liveMode !== 'lip') {
+              targetHeight = Math.max(BAR_STAGE_HEIGHT_DIP, targetHeight);
+            }
+            targetHeight = Math.max(COLLAPSED_LIP_PX, Math.min(880, Math.ceil(targetHeight)));
           }
-          targetHeight = Math.max(COLLAPSED_LIP_PX, Math.min(880, Math.ceil(targetHeight)));
-          const deltaY = Math.round(targetHeight - window.innerHeight);
+          const deltaY = liveSideDock || liveTopDock ? 0 : Math.round(targetHeight - window.innerHeight);
           const adjustedShapes =
             deltaY !== 0
               ? shapes.map((s) => ({
@@ -3990,10 +4141,10 @@ window.__ModuleLoader__.load({
           sendBarReport({
             kind: 'layout',
             targetHeight,
-            width: Math.round(barWidth),
+            width: liveSideDock ? 420 : Math.round(barWidth),
             shapes: adjustedShapes,
           });
-        }, [barMode, barWidth, isExpanded, expandedHeight, activeHarness, hoverPeek, composerPopover]);
+        }, [barMode, barWidth, isExpanded, expandedHeight, activeHarness, hoverPeek, composerPopover, dockEdge, dockCollapsed, dockMenu, dragSnapEdge]);
 
         const scheduleLayoutReport = useCallback(
           (durationMs = 280) => {
@@ -4142,15 +4293,37 @@ window.__ModuleLoader__.load({
                   applyDividerTheme(cardEl, cs.backgroundColor);
                 }
               }
+              if (composerCard) {
+                const rect = composerCard.getBoundingClientRect();
+                if (rect.height > 20) {
+                  const roundedH = Math.round(rect.height);
+                  setSideComposerHeight((prev) => (Math.abs(prev - roundedH) > 1 ? roundedH : prev));
+                }
+              }
               if (composerCard && floatAnchorEl) {
-                if (barMode !== 'lip') {
+                const liveDock = dsbRuntime.dockEdge || 'none';
+                const liveSide = liveDock === 'left' || liveDock === 'right';
+                const liveTop = liveDock === 'top';
+                if (liveSide) {
+                  // Side-panel card uses position: fixed; top: 0; bottom: sideComposerHeight + 6px directly
+                  floatAnchorEl.style.top = '';
+                  floatAnchorEl.style.bottom = '';
+                } else if (barMode !== 'lip') {
                   const rect = composerCard.getBoundingClientRect();
                   const qr = readQueueDockRect();
-                  const anchorTop = qr ? Math.min(rect.top, qr.top) : rect.top;
                   const wr = wrap.getBoundingClientRect();
-                  const gap = Math.round((anchorTop - wr.bottom) * 100) / 100;
-                  floatAnchorEl.style.bottom = (-gap + DETACHED_GAP_PX) + 'px';
+                  if (liveTop) {
+                    const gapTop = Math.round((rect.bottom - wr.top + DETACHED_GAP_PX) * 100) / 100;
+                    floatAnchorEl.style.bottom = 'auto';
+                    floatAnchorEl.style.top = gapTop + 'px';
+                  } else {
+                    const anchorTop = qr ? Math.min(rect.top, qr.top) : rect.top;
+                    const gap = Math.round((anchorTop - wr.bottom) * 100) / 100;
+                    floatAnchorEl.style.top = 'auto';
+                    floatAnchorEl.style.bottom = (-gap + DETACHED_GAP_PX) + 'px';
+                  }
                 } else {
+                  floatAnchorEl.style.top = 'auto';
                   floatAnchorEl.style.bottom = '0px';
                 }
               }
@@ -4205,7 +4378,7 @@ window.__ModuleLoader__.load({
             ro.disconnect();
             window.removeEventListener('resize', syncWidth);
           };
-        }, [barMode, barWidth, activeHarness]);
+        }, [barMode, barWidth, activeHarness, dockEdge, dockCollapsed]);
 
         useEffect(() => {
           if (isExpanded && scrollRef.current) {
@@ -4585,6 +4758,7 @@ window.__ModuleLoader__.load({
               clearTimeout(hoverPeekTimerRef.current);
               hoverPeekTimerRef.current = null;
             }
+            setDockMenu(null);
             const startX = e.screenX;
             const startY = e.screenY;
             let dragged = false;
@@ -4594,7 +4768,13 @@ window.__ModuleLoader__.load({
             const step = () => {
               rafId = 0;
               if (!active || !dragStarted) return;
-              tauriInvoke('bar_drag_step').catch(() => {});
+              tauriInvoke('bar_drag_step')
+                .then((res) => {
+                  if (!active) return;
+                  const nextSnap = res && typeof res.snapEdge === 'string' ? res.snapEdge : 'none';
+                  setDragSnapEdge((prev) => (prev === nextSnap ? prev : nextSnap));
+                })
+                .catch(() => {});
             };
             const onMove = (mv) => {
               if (!active) return;
@@ -4611,9 +4791,10 @@ window.__ModuleLoader__.load({
             const onUp = () => {
               active = false;
               if (rafId) cancelAnimationFrame(rafId);
+              setDragSnapEdge('none');
               if (dragStarted) {
                 tauriInvoke('bar_drag_end').catch(() => {});
-              } else {
+              } else if (!(dsbRuntime.dockEdge === 'left' || dsbRuntime.dockEdge === 'right')) {
                 toggleHistorySheet();
               }
               window.removeEventListener('mousemove', onMove);
@@ -4624,6 +4805,171 @@ window.__ModuleLoader__.load({
           },
           [toggleHistorySheet],
         );
+
+        const handleOpenDockMenu = useCallback(
+          (e) => {
+            if (!IS_BAR) return;
+            e.preventDefault();
+            e.stopPropagation();
+            setComposerPopover(null);
+            setHoverPeek(false);
+            const rect = e.currentTarget && typeof e.currentTarget.getBoundingClientRect === 'function'
+              ? e.currentTarget.getBoundingClientRect()
+              : null;
+            const x = rect ? Math.round(rect.left + rect.width / 2) : Math.round(e.clientX || 120);
+            const y = rect ? Math.round(rect.top) : Math.round(e.clientY || 120);
+            setDockMenu({ x, y });
+            scheduleLayoutReport(240);
+          },
+          [scheduleLayoutReport],
+        );
+
+        const renderDockQuickMenu = () => {
+          if (!IS_BAR || !dockMenu) return null;
+          const t = getUnifiedTheme(activeHarness);
+          const winW = typeof window !== 'undefined' ? window.innerWidth || 760 : 760;
+          const winH = typeof window !== 'undefined' ? window.innerHeight || BAR_STAGE_HEIGHT_DIP : BAR_STAGE_HEIGHT_DIP;
+          const menuW = 228;
+          const menuH = 196;
+          const left = Math.max(8, Math.min(winW - menuW - 8, dockMenu.x - Math.round(menuW / 2)));
+          const openDown = isTopDock || dockMenu.y < menuH + 16;
+          const top = openDown
+            ? Math.max(8, Math.min(winH - menuH - 8, dockMenu.y + 18))
+            : Math.max(8, dockMenu.y - menuH - 8);
+          const items = [
+            { edge: 'top', icon: '⬆️', label: '停靠到屏幕顶部' },
+            { edge: 'bottom', icon: '⬇️', label: '停靠到屏幕底部（任务栏上方）' },
+            { edge: 'left', icon: '⬅️', label: '停靠到左侧（竖向侧栏）' },
+            { edge: 'right', icon: '➡️', label: '停靠到右侧（竖向侧栏）' },
+            { edge: 'none', icon: '🪟', label: '取消停靠并复位居中' },
+          ];
+          const node = h(
+            'div',
+            {
+              'data-dsb-popup': '1',
+              'data-dsb-dock-menu': '1',
+              style: {
+                position: 'fixed',
+                left: left + 'px',
+                top: top + 'px',
+                width: menuW + 'px',
+                borderRadius: '13px',
+                padding: '6px',
+                background: t.popover,
+                color: t.fg,
+                border: '1px solid ' + t.border,
+                boxShadow: t.isDark ? '0 14px 36px rgba(0,0,0,0.56)' : '0 10px 28px rgba(15,23,42,0.16)',
+                zIndex: 10000,
+                display: 'flex',
+                flexDirection: 'column',
+                gap: '2px',
+                boxSizing: 'border-box',
+                fontFamily: '"Segoe UI", "Inter", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif',
+              },
+            },
+            h(
+              'div',
+              {
+                style: {
+                  fontSize: '10.5px',
+                  fontWeight: 600,
+                  color: t.muted,
+                  padding: '2px 8px 4px',
+                  borderBottom: '1px solid ' + t.subtleBorder,
+                  marginBottom: '2px',
+                },
+              },
+              '吸附停靠位置（贴边自动收起）',
+            ),
+            items.map((it) => {
+              const active = dockEdge === it.edge;
+              return h(
+                'button',
+                {
+                  key: it.edge,
+                  type: 'button',
+                  'data-dsb-pop-row': '1',
+                  onClick: (ev) => {
+                    ev.stopPropagation();
+                    setDockMenu(null);
+                    tauriInvoke('bar_set_dock_edge', { edge: it.edge, collapsed: false }).catch(() => {});
+                  },
+                  style: {
+                    width: '100%',
+                    border: 'none',
+                    borderRadius: '8px',
+                    padding: '6px 8px',
+                    background: active ? t.accentBg : 'transparent',
+                    color: active ? t.accent : t.fg,
+                    fontSize: '12px',
+                    fontWeight: active ? 600 : 450,
+                    cursor: 'pointer',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    gap: '6px',
+                    textAlign: 'left',
+                  },
+                },
+                h(
+                  'span',
+                  { style: { display: 'inline-flex', alignItems: 'center', gap: '6px', minWidth: 0 } },
+                  h('span', { style: { fontSize: '12px', flexShrink: 0 } }, it.icon),
+                  h('span', { style: { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, it.label),
+                ),
+                active ? h('span', { style: { fontSize: '11px', flexShrink: 0 } }, '✓') : null,
+              );
+            }),
+          );
+          if (ReactDOM && typeof ReactDOM.createPortal === 'function' && typeof document !== 'undefined' && document.body) {
+            return ReactDOM.createPortal(node, document.body);
+          }
+          return node;
+        };
+
+        const renderSnapPreviewBanner = () => {
+          if (!IS_BAR || !dragSnapEdge || dragSnapEdge === 'none') return null;
+          const t = getUnifiedTheme(activeHarness);
+          const labels = {
+            left: '🧲 松手停靠至屏幕左侧 · 切换竖向侧栏',
+            right: '🧲 松手停靠至屏幕右侧 · 切换竖向侧栏',
+            top: '🧲 松手停靠至屏幕顶部 · 悬停自动滑出',
+            bottom: '🧲 松手停靠至屏幕底部 · 贴齐任务栏收起',
+          };
+          const text = labels[dragSnapEdge];
+          if (!text) return null;
+          const node = h(
+            'div',
+            {
+              'data-dsb-popup': '1',
+              'data-dsb-snap-preview': '1',
+              style: {
+                position: 'fixed',
+                left: '50%',
+                transform: 'translateX(-50%)',
+                top: isTopDock ? '118px' : 'auto',
+                bottom: isTopDock ? 'auto' : Math.max(118, sideComposerHeight + 12) + 'px',
+                padding: '6px 14px',
+                borderRadius: '999px',
+                background: t.popover,
+                color: t.accent,
+                border: '1px solid ' + t.accentBorder,
+                boxShadow: '0 8px 24px rgba(0,0,0,0.42)',
+                fontSize: '12px',
+                fontWeight: 600,
+                whiteSpace: 'nowrap',
+                zIndex: 10001,
+                pointerEvents: 'none',
+                fontFamily: '"Segoe UI", "Inter", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif',
+              },
+            },
+            text,
+          );
+          if (ReactDOM && typeof ReactDOM.createPortal === 'function' && typeof document !== 'undefined' && document.body) {
+            return ReactDOM.createPortal(node, document.body);
+          }
+          return node;
+        };
 
         const handleResetWindowPos = useCallback((e) => {
           if (!IS_BAR) return;
@@ -4679,21 +5025,27 @@ window.__ModuleLoader__.load({
         const renderDragHandle = (extraStyle) => {
           if (!IS_BAR || barMode === 'lip') return null;
           const t = getUnifiedTheme(activeHarness);
+          const dockHint =
+            dockEdge !== 'none'
+              ? '按住向屏幕内侧拖出可取消停靠 · 右键停靠菜单 · 双击复位居中'
+              : isExpanded
+                ? '单击收起聊天记录 · 拖至屏幕四边自动吸附停靠 · 右键停靠菜单 · 双击复位'
+                : '单击展开聊天记录 · 悬停轻瞥回复 · 拖至屏幕四边吸附停靠 · 右键菜单';
           return h(
             'div',
             {
               'data-dsb-drag-handle': '1',
-              title: isExpanded
-                ? '单击收起聊天记录 · 按住拖动窗口 · 双击复位居中'
-                : '单击展开聊天记录 · 悬停轻瞥最新回复 · 按住拖动窗口 · 双击复位',
+              title: dockHint,
               onMouseDown: handleStartDragOrToggle,
               onDoubleClick: handleResetWindowPos,
+              onContextMenu: handleOpenDockMenu,
               onMouseEnter: handleHandleMouseEnter,
               onMouseLeave: handleHandleMouseLeave,
               style: Object.assign(
                 {
                   position: 'absolute',
-                  top: '1px',
+                  top: isTopDock ? 'auto' : '1px',
+                  bottom: isTopDock ? '1px' : 'auto',
                   left: '50%',
                   transform: 'translateX(-50%)',
                   width: '72px',
@@ -4713,12 +5065,13 @@ window.__ModuleLoader__.load({
                 width: '36px',
                 height: '3.5px',
                 borderRadius: '999px',
-                background: isExpanded
-                  ? t.accent
-                  : t.isDark
-                    ? 'rgba(165, 172, 186, 0.36)'
-                    : 'rgba(15, 23, 42, 0.24)',
-                opacity: isExpanded ? 0.85 : 1,
+                background:
+                  dockEdge !== 'none' || isExpanded
+                    ? t.accent
+                    : t.isDark
+                      ? 'rgba(165, 172, 186, 0.36)'
+                      : 'rgba(15, 23, 42, 0.24)',
+                opacity: dockEdge !== 'none' || isExpanded ? 0.88 : 1,
                 pointerEvents: 'none',
                 transition: 'all 0.16s ease',
               },
@@ -5049,6 +5402,8 @@ window.__ModuleLoader__.load({
                 ? Math.round(cr.height)
                 : 152;
           const bottomPx = Math.max(96, Math.min(360, slabSpan + 6));
+          const isTopDockQs = dsbRuntime.dockEdge === 'top';
+          const topPx = validComp ? Math.round(ir.bottom + 6) : 112;
           const theme = HARNESS_META[activeHarness] || HARNESS_META.dsh;
 
           const badgeMetaForHit = (hit) => {
@@ -5065,14 +5420,15 @@ window.__ModuleLoader__.load({
             'div',
             {
               'data-dsb-popup': '1',
-              'data-dsb-popup-bottom': String(bottomPx),
+              'data-dsb-popup-bottom': isTopDockQs ? undefined : String(bottomPx),
               'data-dsb-quick-search': '1',
               onMouseDown: (ev) => ev.preventDefault(),
               style: {
                 position: 'fixed',
                 left: '2px',
                 right: '2px',
-                bottom: bottomPx + 'px',
+                top: isTopDockQs ? topPx + 'px' : 'auto',
+                bottom: isTopDockQs ? 'auto' : bottomPx + 'px',
                 borderRadius: '16px',
                 padding: '6px',
                 background: theme.surface,
@@ -5415,20 +5771,23 @@ window.__ModuleLoader__.load({
             if (prev && prev.kind === kind) return null;
             let left = 12;
             let bottom = 92;
+            let top = 112;
             let fullWidth = false;
             if (kind === 'plus' && dsbRuntime.activeHarness === 'codex') {
               const compEl = document.querySelector('[data-dsb-external-composer="codex"]');
               const cr = compEl ? compEl.getBoundingClientRect() : null;
               left = 0;
               bottom = cr && cr.height > 10 ? Math.max(88, Math.round(window.innerHeight - cr.top + 6)) : 126;
+              top = cr && cr.height > 10 ? Math.round(cr.bottom + 6) : 112;
               fullWidth = true;
             } else if (anchorEl && typeof anchorEl.getBoundingClientRect === 'function') {
               const r = anchorEl.getBoundingClientRect();
               left = Math.max(8, Math.round(r.left));
               bottom = Math.max(48, Math.round(window.innerHeight - r.top + 10));
+              top = Math.max(48, Math.round(r.bottom + 8));
             }
             scheduleLayoutReport(260);
-            return { kind, left, bottom, fullWidth };
+            return { kind, left, bottom, top, fullWidth };
           });
         };
 
@@ -6001,15 +6360,17 @@ window.__ModuleLoader__.load({
                   display: 'flex',
                   alignItems: 'center',
                   justifyContent: 'space-between',
+                  flexWrap: isSideDock ? 'wrap' : 'nowrap',
                   marginTop: '11px',
-                  height: '30px',
-                  gap: '8px',
+                  minHeight: '30px',
+                  height: isSideDock ? 'auto' : '30px',
+                  gap: isSideDock ? '6px' : '8px',
                 },
               },
               // Unified Left Toolbar: (+) + Permission + Brand Harness·Workspace Pill
               h(
                 'div',
-                { style: { display: 'flex', alignItems: 'center', gap: '7px', minWidth: 0 } },
+                { style: { display: 'flex', alignItems: 'center', gap: isSideDock ? '5px' : '7px', minWidth: 0, flexWrap: isSideDock ? 'wrap' : 'nowrap' } },
                 h(
                   'button',
                   {
@@ -6087,7 +6448,7 @@ window.__ModuleLoader__.load({
                       display: 'inline-flex',
                       alignItems: 'center',
                       gap: '5px',
-                      maxWidth: '210px',
+                      maxWidth: isSideDock ? '156px' : '210px',
                       minWidth: 0,
                     },
                   },
@@ -6625,18 +6986,21 @@ window.__ModuleLoader__.load({
             ];
           }
 
-          const clampedLeft = Math.max(8, Math.min(window.innerWidth - panelWidth - 8, composerPopover.left));
+          const isTopDockPop = dsbRuntime.dockEdge === 'top';
+          const effectivePanelW = Math.min(panelWidth, Math.max(220, (window.innerWidth || 760) - 16));
+          const clampedLeft = Math.max(8, Math.min(window.innerWidth - effectivePanelW - 8, composerPopover.left));
           const pop = h(
             'div',
             {
               'data-dsb-popup': '1',
               'data-dsb-composer-popover': '1',
-              'data-dsb-popup-bottom': String(composerPopover.bottom),
+              'data-dsb-popup-bottom': isTopDockPop ? undefined : String(composerPopover.bottom),
               style: {
                 position: 'fixed',
                 left: clampedLeft + 'px',
-                bottom: composerPopover.bottom + 'px',
-                width: panelWidth + 'px',
+                top: isTopDockPop ? (composerPopover.top || 112) + 'px' : 'auto',
+                bottom: isTopDockPop ? 'auto' : composerPopover.bottom + 'px',
+                width: effectivePanelW + 'px',
                 maxHeight: '360px',
                 overflowY: 'auto',
                 background: t.popover,
@@ -6750,6 +7114,7 @@ window.__ModuleLoader__.load({
             ? [
                 h('div', {
                   key: 'resize-w-left',
+                  'data-dsb-width-resize': '1',
                   onMouseDown: handleStartResizeWidth('left'),
                   title: '左右拖动调节窗口宽度',
                   style: {
@@ -6765,6 +7130,7 @@ window.__ModuleLoader__.load({
                 }),
                 h('div', {
                   key: 'resize-w-right',
+                  'data-dsb-width-resize': '1',
                   onMouseDown: handleStartResizeWidth('right'),
                   title: '左右拖动调节窗口宽度',
                   style: {
@@ -6789,13 +7155,24 @@ window.__ModuleLoader__.load({
                   'data-dsb-card': '',
                   'data-dsb-floating-anchor': '1',
                   style: {
-                    position: 'absolute',
+                    position: IS_BAR && isSideDock ? 'fixed' : 'absolute',
                     left: 0,
                     right: 0,
-                    bottom: IS_BAR ? (barMode === 'lip' ? '0px' : DETACHED_GAP_PX + 'px') : -TUCK_OVERLAP_PX + 'px',
-                    height: (isExpanded ? expandedHeight : COLLAPSED_LIP_PX) + (IS_BAR ? 0 : TUCK_OVERLAP_PX) + 'px',
+                    top: IS_BAR && isSideDock ? '0px' : 'auto',
+                    bottom:
+                      IS_BAR && isSideDock
+                        ? Math.max(84, sideComposerHeight + 6) + 'px'
+                        : IS_BAR
+                          ? barMode === 'lip'
+                            ? '0px'
+                            : DETACHED_GAP_PX + 'px'
+                          : -TUCK_OVERLAP_PX + 'px',
+                    height:
+                      IS_BAR && isSideDock
+                        ? 'auto'
+                        : (isExpanded ? expandedHeight : COLLAPSED_LIP_PX) + (IS_BAR ? 0 : TUCK_OVERLAP_PX) + 'px',
                     paddingBottom: IS_BAR ? '0px' : TUCK_OVERLAP_PX + 'px',
-                    borderRadius: cardBorderRadius,
+                    borderRadius: IS_BAR && isSideDock ? '18px 18px 14px 14px' : cardBorderRadius,
                     borderBottom: 'none',
                     background: 'var(--dsw-alias-bg-layer-2, #2c2c2e)',
                     boxShadow: IS_BAR
@@ -6809,7 +7186,7 @@ window.__ModuleLoader__.load({
                     overflow: 'hidden',
                     boxSizing: 'border-box',
                     pointerEvents: 'auto',
-                    animation: IS_BAR && isExpanded && !isResizingHeightRef.current
+                    animation: IS_BAR && isExpanded && !isSideDock && !isResizingHeightRef.current
                       ? 'dsbFloatReveal 170ms cubic-bezier(0.22, 1, 0.36, 1) both'
                       : 'none',
                     willChange: IS_BAR && isExpanded ? 'transform, opacity' : 'auto',
@@ -6824,8 +7201,12 @@ window.__ModuleLoader__.load({
                     'div',
                     {
                       key: 'grip-header',
-                      onMouseDown: handleStartResizeHeight,
-                      title: '上下拖拽调节消息抽屉高度',
+                      onMouseDown: isSideDock ? handleStartDragOrToggle : handleStartResizeHeight,
+                      onDoubleClick: isSideDock ? handleResetWindowPos : undefined,
+                      onContextMenu: isSideDock ? handleOpenDockMenu : undefined,
+                      title: isSideDock
+                        ? '按住向内侧拖出可取消停靠 · 右键停靠菜单 · 双击复位居中'
+                        : '上下拖拽调节消息抽屉高度',
                       style: {
                         position: 'relative',
                         height: '36px',
@@ -6834,7 +7215,7 @@ window.__ModuleLoader__.load({
                         alignItems: 'center',
                         justifyContent: 'space-between',
                         padding: '0 8px 0 18px',
-                        cursor: 'ns-resize',
+                        cursor: isSideDock ? 'grab' : 'ns-resize',
                         borderBottom: '1px solid rgba(128,128,128,0.14)',
                         userSelect: 'none',
                       },
@@ -7427,12 +7808,26 @@ window.__ModuleLoader__.load({
                   })()
                 : null,
             IS_BAR && barMode !== 'lip' && activeHarness === 'dsh'
-              ? renderDragHandle({ top: 'auto', bottom: '-13px', zIndex: 40, pointerEvents: 'auto' })
+              ? renderDragHandle(
+                  isTopDock
+                    ? {
+                        position: 'fixed',
+                        top: Math.max(12, sideComposerHeight - 13) + 'px',
+                        bottom: 'auto',
+                        left: '50%',
+                        transform: 'translateX(-50%)',
+                        zIndex: 40,
+                        pointerEvents: 'auto',
+                      }
+                    : { top: 'auto', bottom: '-13px', zIndex: 40, pointerEvents: 'auto' },
+                )
               : null,
           ),
           renderExternalNativeComposer(),
           renderComposerPopover(),
           renderQuickSearchPopup(),
+          renderDockQuickMenu(),
+          renderSnapPreviewBanner(),
         );
       };
     }
@@ -8055,18 +8450,23 @@ window.__ModuleLoader__.load({
           }
 
           // Responsive 3-column widths so Harness -> Workspace -> Conversation fits comfortably
-          // inside both standard 760px Bar and narrow dragged Bars (>= 480px).
+          // inside standard 760px Bar, narrow dragged Bars (>= 480px), and 420px vertical side panels.
+          const isTopDockMenu = dsbRuntime.dockEdge === 'top';
+          const isSideDockMenu = dsbRuntime.dockEdge === 'left' || dsbRuntime.dockEdge === 'right';
+          const menuTopPx = isValidRect(ir) ? Math.round(ir.bottom + 8) : 112;
           const winW = typeof window !== 'undefined' ? window.innerWidth || 760 : 760;
-          const compact3Col = winW < 640;
-          const col1W = compact3Col ? 138 : 166;
-          const col2W = compact3Col ? 156 : 188;
-          const col3W = compact3Col ? 176 : 236;
+          const ultraCompact = isSideDockMenu || winW < 470;
+          const compact3Col = !ultraCompact && winW < 640;
+          const colGap = ultraCompact ? 4 : 6;
+          const col1W = ultraCompact ? 112 : compact3Col ? 138 : 166;
+          const col2W = ultraCompact ? 132 : compact3Col ? 156 : 188;
+          const col3W = ultraCompact ? 152 : compact3Col ? 176 : 236;
           const totalCascadeW = settingsView
-            ? Math.min(468, Math.max(360, winW - 16))
-            : col1W + 6 + col2W + 6 + col3W;
+            ? Math.min(468, Math.max(340, winW - 16))
+            : col1W + colGap + col2W + colGap + col3W;
           const leftPx = chipRect
-            ? Math.max(8, Math.min(Math.round(chipRect.left), Math.max(8, winW - totalCascadeW - 8)))
-            : 12;
+            ? Math.max(6, Math.min(Math.round(chipRect.left), Math.max(6, winW - totalCascadeW - 6)))
+            : 8;
 
           const unifiedPanelTheme = getUnifiedTheme(activeHarness);
           const panelBg = unifiedPanelTheme.popover;
@@ -8665,16 +9065,17 @@ window.__ModuleLoader__.load({
             {
               ref: menuRef,
               'data-dsb-popup': '1',
-              'data-dsb-popup-bottom': String(bottomPx),
+              'data-dsb-popup-bottom': isTopDockMenu ? undefined : String(bottomPx),
               'data-dsb-popup-min-height': String(settingsView ? 438 : 308),
               style: {
                 position: 'fixed',
-                bottom: bottomPx + 'px',
+                top: isTopDockMenu ? menuTopPx + 'px' : 'auto',
+                bottom: isTopDockMenu ? 'auto' : bottomPx + 'px',
                 left: leftPx + 'px',
                 display: 'flex',
                 flexDirection: 'row',
-                alignItems: 'flex-end',
-                gap: '6px',
+                alignItems: isTopDockMenu ? 'flex-start' : 'flex-end',
+                gap: colGap + 'px',
                 zIndex: 9999,
                 pointerEvents: 'auto',
                 color: 'var(--dsw-alias-label-primary, #f3f4f6)',

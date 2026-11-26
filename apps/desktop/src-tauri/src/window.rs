@@ -1,3 +1,4 @@
+use crate::config::DockEdge;
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
@@ -8,8 +9,8 @@ use windows::Win32::Graphics::Dwm::{
     DwmSetWindowAttribute, DWMNCRP_DISABLED, DWMWA_NCRENDERING_POLICY,
 };
 use windows::Win32::Graphics::Gdi::{
-    CombineRgn, CreateRoundRectRgn, DeleteObject, GetMonitorInfoW, MonitorFromPoint,
-    MonitorFromWindow, SetWindowRgn, HRGN, MONITORINFO, MONITOR_DEFAULTTONEAREST, RGN_OR,
+    CombineRgn, CreateRectRgn, CreateRoundRectRgn, DeleteObject, GetMonitorInfoW, MonitorFromPoint,
+    MonitorFromWindow, SetWindowRgn, HRGN, MONITORINFO, MONITOR_DEFAULTTONEAREST, RGN_AND, RGN_OR,
 };
 use windows::Win32::System::Threading::{
     AttachThreadInput, GetCurrentThreadId, OpenProcess, QueryFullProcessImageNameW,
@@ -39,6 +40,41 @@ pub const DEFAULT_LIP_HEIGHT_DIP: i32 = 56;
 /// unread toasts, and history sheets NEVER calls SetWindowPos / WM_SIZE on WebView2 (zero flash!).
 /// Everything outside the active `SetWindowRgn` rounded-rect shapes is 100% transparent & click-through.
 pub const BAR_STAGE_HEIGHT_DIP: i32 = 680;
+/// QQ-style collapsed edge peek thickness in DIP (~10px edge strip visible on screen).
+pub const DOCK_PEEK_DIP: i32 = 10;
+/// Width of the floating rounded Edge/Arc vertical side panel when docked Left or Right.
+pub const SIDE_DOCK_WIDTH_DIP: i32 = 420;
+/// Height ratio of the floating rounded vertical side panel relative to monitor work area height.
+pub const SIDE_DOCK_HEIGHT_RATIO: f64 = 0.84;
+/// Edge proximity threshold (physical px) for magnetic snap during handle drag.
+pub const EDGE_SNAP_THRESHOLD_PX: i32 = 28;
+/// Inward pull distance (physical px) from a docked edge to release dock back to free floating.
+pub const UNDOCK_PULL_THRESHOLD_PX: i32 = 50;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DockStateSnapshot {
+    pub edge: DockEdge,
+    pub collapsed: bool,
+    pub snap_preview: DockEdge,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ActiveDockRuntime {
+    edge: DockEdge,
+    collapsed: bool,
+    work_bounds: (i32, i32, i32, i32), // (left, top, right, bottom) phys px of docked monitor
+    composer_height_dip: i32,
+}
+
+static ACTIVE_DOCK: Mutex<ActiveDockRuntime> = Mutex::new(ActiveDockRuntime {
+    edge: DockEdge::None,
+    collapsed: false,
+    work_bounds: (0, 0, 1920, 1032),
+    composer_height_dip: 92,
+});
+static SLIDE_ANIM_GEN: AtomicU64 = AtomicU64::new(0);
+static LAST_SCALED_SHAPES: Mutex<Vec<(i32, i32, i32, i32, i32)>> = Mutex::new(Vec::new());
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ShapeRectDip {
@@ -109,10 +145,303 @@ struct CustomBarAnchor {
 struct BarDragSession {
     start_cursor: POINT,
     start_rect: RECT,
+    started_edge: DockEdge,
+    snap_preview: DockEdge,
+    undocked_in_drag: bool,
+    moved_enough: bool,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DragStepResult {
+    pub moved: bool,
+    pub snap_preview: DockEdge,
+    pub undocked: bool,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DragEndResult {
+    pub snapped_edge: DockEdge,
+    pub undocked: bool,
 }
 
 static CUSTOM_BAR_ANCHOR: Mutex<Option<CustomBarAnchor>> = Mutex::new(None);
 static BAR_DRAG_SESSION: Mutex<Option<BarDragSession>> = Mutex::new(None);
+
+pub fn get_dock_runtime_snapshot() -> DockStateSnapshot {
+    let (edge, collapsed) = ACTIVE_DOCK
+        .lock()
+        .map(|d| (d.edge, d.collapsed))
+        .unwrap_or((DockEdge::None, false));
+    let snap_preview = BAR_DRAG_SESSION
+        .lock()
+        .ok()
+        .and_then(|g| g.map(|s| s.snap_preview))
+        .unwrap_or(DockEdge::None);
+    DockStateSnapshot {
+        edge,
+        collapsed,
+        snap_preview,
+    }
+}
+
+pub fn set_active_dock_state(edge: DockEdge, collapsed: bool, monitor_pt: Option<POINT>) {
+    let bounds = monitor_pt
+        .map(query_monitor_work_bounds_at)
+        .unwrap_or_else(|| {
+            let mut pt = POINT::default();
+            unsafe {
+                let _ = GetCursorPos(&mut pt);
+            }
+            query_monitor_work_bounds_at(pt)
+        });
+    if let Ok(mut guard) = ACTIVE_DOCK.lock() {
+        guard.edge = edge;
+        guard.collapsed = collapsed;
+        if edge.is_docked() {
+            guard.work_bounds = bounds;
+        }
+    }
+    if edge.is_docked() {
+        if let Ok(mut anchor) = CUSTOM_BAR_ANCHOR.lock() {
+            *anchor = None;
+        }
+    }
+}
+
+pub fn update_dock_composer_height_dip(composer_h_dip: i32) {
+    if composer_h_dip > 30 {
+        if let Ok(mut guard) = ACTIVE_DOCK.lock() {
+            guard.composer_height_dip = composer_h_dip.clamp(64, 280);
+        }
+    }
+}
+
+pub fn compute_docked_bar_rect(
+    edge: DockEdge,
+    collapsed: bool,
+    work_bounds: (i32, i32, i32, i32),
+    bar_width_dip: i32,
+    composer_h_dip: i32,
+    scale: f64,
+) -> (i32, i32, i32, i32) {
+    let (wl, wt, wr, wb) = work_bounds;
+    let avail_w = (wr - wl).max(320);
+    let avail_h = (wb - wt).max(200);
+    let peek = ((DOCK_PEEK_DIP as f64) * scale).round().max(8.0) as i32;
+    let comp_h = ((composer_h_dip.clamp(68, 260) as f64) * scale).round() as i32;
+
+    match edge {
+        DockEdge::Bottom => {
+            let phys_w = (((bar_width_dip as f64) * scale).round() as i32).clamp(320, avail_w);
+            let phys_h = (((BAR_STAGE_HEIGHT_DIP as f64) * scale).round() as i32).clamp(120, avail_h);
+            let x = wl + (avail_w - phys_w) / 2;
+            let y_expanded = wb - phys_h;
+            let y = if collapsed {
+                y_expanded + (comp_h - peek).max(0)
+            } else {
+                y_expanded
+            };
+            (x, y, phys_w, phys_h)
+        }
+        DockEdge::Top => {
+            let phys_w = (((bar_width_dip as f64) * scale).round() as i32).clamp(320, avail_w);
+            let phys_h = (((BAR_STAGE_HEIGHT_DIP as f64) * scale).round() as i32).clamp(120, avail_h);
+            let x = wl + (avail_w - phys_w) / 2;
+            let y = if collapsed {
+                wt - (comp_h - peek).max(0)
+            } else {
+                wt
+            };
+            (x, y, phys_w, phys_h)
+        }
+        DockEdge::Left => {
+            let phys_w = (((SIDE_DOCK_WIDTH_DIP as f64) * scale).round() as i32)
+                .clamp(340, (avail_w - 40).max(340));
+            let phys_h = (((avail_h as f64) * SIDE_DOCK_HEIGHT_RATIO).round() as i32)
+                .clamp(420, avail_h);
+            let y = wt + (avail_h - phys_h) / 2;
+            let x = if collapsed {
+                wl - (phys_w - peek).max(0)
+            } else {
+                wl
+            };
+            (x, y, phys_w, phys_h)
+        }
+        DockEdge::Right => {
+            let phys_w = (((SIDE_DOCK_WIDTH_DIP as f64) * scale).round() as i32)
+                .clamp(340, (avail_w - 40).max(340));
+            let phys_h = (((avail_h as f64) * SIDE_DOCK_HEIGHT_RATIO).round() as i32)
+                .clamp(420, avail_h);
+            let y = wt + (avail_h - phys_h) / 2;
+            let x = if collapsed {
+                wr - peek
+            } else {
+                wr - phys_w
+            };
+            (x, y, phys_w, phys_h)
+        }
+        DockEdge::None => compute_bottom_anchored_rect(
+            work_bounds,
+            bar_width_dip,
+            BAR_STAGE_HEIGHT_DIP,
+            BOTTOM_MARGIN_DIP,
+            scale,
+        ),
+    }
+}
+
+pub fn detect_snap_edge_for_cursor(
+    cur: POINT,
+    work_bounds: (i32, i32, i32, i32),
+    moved_enough: bool,
+) -> DockEdge {
+    if !moved_enough {
+        return DockEdge::None;
+    }
+    let (wl, wt, wr, wb) = work_bounds;
+    let d_left = (cur.x - wl).abs();
+    let d_right = (wr - cur.x).abs();
+    let d_top = (cur.y - wt).abs();
+    let d_bottom = (wb - cur.y).abs();
+
+    // Pick closest edge within magnetic snap zone (Bottom requires explicit pull to taskbar seam)
+    let mut best = (DockEdge::None, i32::MAX);
+    if cur.x <= wl + EDGE_SNAP_THRESHOLD_PX && d_left < best.1 {
+        best = (DockEdge::Left, d_left);
+    }
+    if cur.x >= wr - EDGE_SNAP_THRESHOLD_PX && d_right < best.1 {
+        best = (DockEdge::Right, d_right);
+    }
+    if cur.y <= wt + EDGE_SNAP_THRESHOLD_PX && d_top < best.1 {
+        best = (DockEdge::Top, d_top);
+    }
+    if cur.y >= wb - (EDGE_SNAP_THRESHOLD_PX - 4) && d_bottom < best.1 {
+        best = (DockEdge::Bottom, d_bottom);
+    }
+    best.0
+}
+
+pub fn should_undock_on_inward_pull(
+    started_edge: DockEdge,
+    start_cursor: POINT,
+    cur: POINT,
+) -> bool {
+    match started_edge {
+        DockEdge::Left => cur.x - start_cursor.x >= UNDOCK_PULL_THRESHOLD_PX,
+        DockEdge::Right => start_cursor.x - cur.x >= UNDOCK_PULL_THRESHOLD_PX,
+        DockEdge::Top => cur.y - start_cursor.y >= UNDOCK_PULL_THRESHOLD_PX,
+        DockEdge::Bottom => start_cursor.y - cur.y >= UNDOCK_PULL_THRESHOLD_PX,
+        DockEdge::None => false,
+    }
+}
+
+/// Checks if the physical cursor point lies inside the ~10px peeking edge strip of a collapsed dock.
+pub fn is_cursor_in_dock_peek_zone(bar_win: &WebviewWindow) -> bool {
+    let Some(hwnd) = hwnd_of(bar_win) else {
+        return false;
+    };
+    let dock = ACTIVE_DOCK.lock().ok().map(|d| *d);
+    let Some(dock) = dock else {
+        return false;
+    };
+    if !dock.edge.is_docked() || !dock.collapsed {
+        return false;
+    }
+    let scale = dpi_scale_for_hwnd(hwnd);
+    let peek = (((DOCK_PEEK_DIP + 4) as f64) * scale).round() as i32;
+    unsafe {
+        let mut pt = POINT::default();
+        let mut rc = RECT::default();
+        if GetCursorPos(&mut pt).is_err() || GetWindowRect(hwnd, &mut rc).is_err() {
+            return false;
+        }
+        let (wl, wt, wr, wb) = dock.work_bounds;
+        match dock.edge {
+            DockEdge::Bottom => {
+                pt.x >= rc.left && pt.x <= rc.right && pt.y >= wb - peek && pt.y <= wb + 2
+            }
+            DockEdge::Top => {
+                pt.x >= rc.left && pt.x <= rc.right && pt.y >= wt - 2 && pt.y <= wt + peek
+            }
+            DockEdge::Left => {
+                pt.y >= rc.top && pt.y <= rc.bottom && pt.x >= wl - 2 && pt.x <= wl + peek
+            }
+            DockEdge::Right => {
+                pt.y >= rc.top && pt.y <= rc.bottom && pt.x >= wr - peek && pt.x <= wr + 2
+            }
+            DockEdge::None => false,
+        }
+    }
+}
+
+/// Checks if the cursor is currently inside the visible interactive shapes of the expanded Bar.
+pub fn is_cursor_inside_bar_now(bar_win: &WebviewWindow) -> bool {
+    let Some(hwnd) = hwnd_of(bar_win) else {
+        return false;
+    };
+    unsafe {
+        let mut pt = POINT::default();
+        if GetCursorPos(&mut pt).is_err() {
+            return false;
+        }
+        is_point_inside_bar_shapes(pt, hwnd)
+    }
+}
+
+/// Returns `true` if a non-desktop, non-ATP foreground window currently covers the full monitor
+/// where the docked Bar lives (used to auto-hide the 10px edge strip during fullscreen video/games).
+pub fn is_fullscreen_on_dock_monitor(own_bar_hwnd: Option<HWND>) -> bool {
+    let dock = ACTIVE_DOCK.lock().ok().map(|d| *d);
+    let Some(dock) = dock else {
+        return false;
+    };
+    if !dock.edge.is_docked() {
+        return false;
+    }
+    let (wl, wt, wr, wb) = dock.work_bounds;
+    let center = POINT {
+        x: (wl + wr) / 2,
+        y: (wt + wb) / 2,
+    };
+    unsafe {
+        let fg = GetForegroundWindow();
+        if fg.0.is_null() || Some(fg) == own_bar_hwnd {
+            return false;
+        }
+        let mut fg_pid = 0u32;
+        GetWindowThreadProcessId(fg, Some(&mut fg_pid));
+        if fg_pid == std::process::id() {
+            return false;
+        }
+        let dock_mon = MonitorFromPoint(center, MONITOR_DEFAULTTONEAREST);
+        let fg_mon = MonitorFromWindow(fg, MONITOR_DEFAULTTONEAREST);
+        if fg_mon != dock_mon {
+            return false;
+        }
+        let mut mi = MONITORINFO {
+            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+            ..Default::default()
+        };
+        if !GetMonitorInfoW(dock_mon, &mut mi).as_bool() {
+            return false;
+        }
+        let mut fg_rc = RECT::default();
+        if GetWindowRect(fg, &mut fg_rc).is_err() {
+            return false;
+        }
+        let covers = fg_rc.left <= mi.rcMonitor.left
+            && fg_rc.top <= mi.rcMonitor.top
+            && fg_rc.right >= mi.rcMonitor.right
+            && fg_rc.bottom >= mi.rcMonitor.bottom;
+        if !covers {
+            return false;
+        }
+        let cls = get_hwnd_class_name(fg);
+        cls != "Progman" && cls != "WorkerW"
+    }
+}
 
 pub fn compute_custom_anchored_rect(
     center_x: i32,
@@ -150,6 +479,10 @@ pub fn begin_bar_drag(bar_win: &WebviewWindow) -> bool {
     let Some(hwnd) = hwnd_of(bar_win) else {
         return false;
     };
+    let started_edge = ACTIVE_DOCK
+        .lock()
+        .map(|d| d.edge)
+        .unwrap_or(DockEdge::None);
     unsafe {
         let mut pt = POINT::default();
         let mut rc = RECT::default();
@@ -160,30 +493,51 @@ pub fn begin_bar_drag(bar_win: &WebviewWindow) -> bool {
             *guard = Some(BarDragSession {
                 start_cursor: pt,
                 start_rect: rc,
+                started_edge,
+                snap_preview: DockEdge::None,
+                undocked_in_drag: false,
+                moved_enough: false,
             });
         }
         true
     }
 }
 
-pub fn step_bar_drag(bar_win: &WebviewWindow) -> bool {
-    let Some(hwnd) = hwnd_of(bar_win) else {
-        return false;
+pub fn step_bar_drag(bar_win: &WebviewWindow) -> DragStepResult {
+    let empty = DragStepResult {
+        moved: false,
+        snap_preview: DockEdge::None,
+        undocked: false,
     };
-    let Some(sess) = BAR_DRAG_SESSION.lock().ok().and_then(|g| *g) else {
-        return false;
+    let Some(hwnd) = hwnd_of(bar_win) else {
+        return empty;
+    };
+    let Some(mut sess) = BAR_DRAG_SESSION.lock().ok().and_then(|g| *g) else {
+        return empty;
     };
     unsafe {
         let mut cur = POINT::default();
         if GetCursorPos(&mut cur).is_err() {
-            return false;
+            return empty;
         }
         let dx = cur.x - sess.start_cursor.x;
         let dy = cur.y - sess.start_cursor.y;
+        if dx.abs() >= 14 || dy.abs() >= 14 {
+            sess.moved_enough = true;
+        }
+        if sess.started_edge.is_docked()
+            && should_undock_on_inward_pull(sess.started_edge, sess.start_cursor, cur)
+        {
+            sess.undocked_in_drag = true;
+        }
         let w = (sess.start_rect.right - sess.start_rect.left).max(320);
         let h = (sess.start_rect.bottom - sess.start_rect.top).max(40);
-        let (ml, mt, mr, mb) = query_monitor_work_bounds_at(cur);
-        // Allow free movement across the monitor while keeping the bottom composer reachable
+        let work_bounds = query_monitor_work_bounds_at(cur);
+        let (ml, mt, mr, mb) = work_bounds;
+        let snap_preview = detect_snap_edge_for_cursor(cur, work_bounds, sess.moved_enough);
+        sess.snap_preview = snap_preview;
+
+        // Allow free movement across the monitor while keeping the composer reachable
         let min_x = ml - w + 120.min(w);
         let max_x = mr - 120.min(w);
         let min_y = mt - (h - 140).max(0);
@@ -206,13 +560,31 @@ pub fn step_bar_drag(bar_win: &WebviewWindow) -> bool {
                 bottom_y: y + h,
             });
         }
-        true
+        if let Ok(mut guard) = BAR_DRAG_SESSION.lock() {
+            *guard = Some(sess);
+        }
+        DragStepResult {
+            moved: true,
+            snap_preview,
+            undocked: sess.undocked_in_drag && !snap_preview.is_docked(),
+        }
     }
 }
 
-pub fn end_bar_drag() {
-    if let Ok(mut guard) = BAR_DRAG_SESSION.lock() {
-        *guard = None;
+pub fn end_bar_drag() -> DragEndResult {
+    let sess = BAR_DRAG_SESSION
+        .lock()
+        .ok()
+        .and_then(|mut g| g.take());
+    let Some(s) = sess else {
+        return DragEndResult {
+            snapped_edge: DockEdge::None,
+            undocked: false,
+        };
+    };
+    DragEndResult {
+        snapped_edge: s.snap_preview,
+        undocked: s.undocked_in_drag && !s.snap_preview.is_docked(),
     }
 }
 
@@ -225,7 +597,8 @@ pub fn reset_bar_anchor(
     if let Ok(mut anchor) = CUSTOM_BAR_ANCHOR.lock() {
         *anchor = None;
     }
-    end_bar_drag();
+    set_active_dock_state(DockEdge::None, false, None);
+    let _ = end_bar_drag();
     apply_bar_layout(bar_win, width_dip, height_dip, shapes);
 }
 
@@ -527,9 +900,246 @@ pub fn apply_capture_affinity(hwnd: HWND, exclude: bool) {
     }
 }
 
-type ScaledRgnKey = (i32, i32, Vec<(i32, i32, i32, i32, i32)>);
+type ScaledRgnKey = (i32, i32, Option<(i32, i32, i32, i32)>, Vec<(i32, i32, i32, i32, i32)>);
 static LAST_BAR_RGN_KEY: Mutex<Option<ScaledRgnKey>> = Mutex::new(None);
 static LAST_BAR_SHAPES_PHYS: Mutex<Vec<(i32, i32, i32, i32)>> = Mutex::new(Vec::new());
+
+unsafe fn apply_shapes_region_clipped(
+    hwnd: HWND,
+    phys_w: i32,
+    phys_h: i32,
+    scale: f64,
+    scaled_shapes: &[(i32, i32, i32, i32, i32)],
+    work_clip_local: Option<(i32, i32, i32, i32)>,
+    b_redraw: bool,
+) {
+    let rgn_key: ScaledRgnKey = (phys_w, phys_h, work_clip_local, scaled_shapes.to_vec());
+    let rgn_changed = LAST_BAR_RGN_KEY
+        .lock()
+        .map(|mut slot| {
+            if slot.as_ref() == Some(&rgn_key) {
+                false
+            } else {
+                *slot = Some(rgn_key);
+                true
+            }
+        })
+        .unwrap_or(true);
+    if !rgn_changed {
+        return;
+    }
+
+    let mut phys_boxes: Vec<(i32, i32, i32, i32)> = if scaled_shapes.is_empty() {
+        vec![(0, 0, phys_w, phys_h)]
+    } else {
+        scaled_shapes
+            .iter()
+            .map(|&(l, t, r, b, _)| (l, t, r, b))
+            .collect()
+    };
+    if let Some((cl, ct, cr, cb)) = work_clip_local {
+        phys_boxes = phys_boxes
+            .into_iter()
+            .filter_map(|(l, t, r, b)| {
+                let nl = l.max(cl);
+                let nt = t.max(ct);
+                let nr = r.min(cr);
+                let nb = b.min(cb);
+                if nr > nl && nb > nt {
+                    Some((nl, nt, nr, nb))
+                } else {
+                    None
+                }
+            })
+            .collect();
+    }
+    if let Ok(mut slot) = LAST_BAR_SHAPES_PHYS.lock() {
+        *slot = phys_boxes;
+    }
+
+    let master_rgn: HRGN = if scaled_shapes.is_empty() {
+        let diam = (48.0 * scale).round() as i32;
+        CreateRoundRectRgn(0, 0, phys_w + 1, phys_h + 1, diam, diam)
+    } else {
+        let mut acc: Option<HRGN> = None;
+        for &(l, t, r, b, diam) in scaled_shapes {
+            let part = CreateRoundRectRgn(l, t, r + 1, b + 1, diam, diam);
+            if let Some(existing) = acc {
+                let _ = CombineRgn(Some(existing), Some(existing), Some(part), RGN_OR);
+                let _ = DeleteObject(part.into());
+            } else {
+                acc = Some(part);
+            }
+        }
+        acc.unwrap_or_else(|| {
+            let diam = (48.0 * scale).round() as i32;
+            CreateRoundRectRgn(0, 0, phys_w + 1, phys_h + 1, diam, diam)
+        })
+    };
+
+    if let Some((cl, ct, cr, cb)) = work_clip_local {
+        let clip_rgn = CreateRectRgn(cl, ct, cr, cb);
+        let _ = CombineRgn(Some(master_rgn), Some(master_rgn), Some(clip_rgn), RGN_AND);
+        let _ = DeleteObject(clip_rgn.into());
+    }
+
+    let _ = SetWindowRgn(hwnd, Some(master_rgn), b_redraw);
+}
+
+/// Smoothly slides the docked Bar between its expanded and ~10px collapsed positions
+/// with work-area seam clipping so zero pixels ever bleed over the taskbar or adjacent monitors.
+pub fn slide_docked_bar(
+    bar_win: &WebviewWindow,
+    edge: DockEdge,
+    collapsed: bool,
+    bar_width_dip: i32,
+    activate_and_focus: bool,
+) {
+    if !edge.is_docked() {
+        return;
+    }
+    let Some(hwnd) = hwnd_of(bar_win) else {
+        return;
+    };
+    let scale = dpi_scale_for_hwnd(hwnd);
+    let (work_bounds, composer_h_dip) = {
+        let Ok(mut guard) = ACTIVE_DOCK.lock() else {
+            return;
+        };
+        guard.edge = edge;
+        guard.collapsed = collapsed;
+        (guard.work_bounds, guard.composer_height_dip)
+    };
+    let (target_x, target_y, phys_w, phys_h) = compute_docked_bar_rect(
+        edge,
+        collapsed,
+        work_bounds,
+        bar_width_dip,
+        composer_h_dip,
+        scale,
+    );
+    let (wl, wt, wr, wb) = work_bounds;
+    let scaled_shapes = LAST_SCALED_SHAPES
+        .lock()
+        .map(|g| g.clone())
+        .unwrap_or_default();
+
+    let mut start_rc = RECT::default();
+    let was_visible = unsafe {
+        IsWindowVisible(hwnd).as_bool() && GetWindowRect(hwnd, &mut start_rc).is_ok()
+    };
+    let same_size = was_visible
+        && (start_rc.right - start_rc.left) == phys_w
+        && (start_rc.bottom - start_rc.top) == phys_h;
+
+    let anim_gen = SLIDE_ANIM_GEN.fetch_add(1, Ordering::AcqRel) + 1;
+
+    if !same_size {
+        // First time entering/switching dock edge (e.g. horizontal <-> 420px side panel): snap size + pos immediately
+        let clip = Some((wl - target_x, wt - target_y, wr - target_x, wb - target_y));
+        unsafe {
+            let _ = enforce_borderless_popup_style(hwnd, !activate_and_focus);
+            let insert_after = bar_z_insert_after();
+            let _ = SetWindowPos(
+                hwnd,
+                Some(insert_after),
+                target_x,
+                target_y,
+                phys_w,
+                phys_h,
+                SWP_NOACTIVATE | SWP_NOCOPYBITS,
+            );
+            apply_shapes_region_clipped(hwnd, phys_w, phys_h, scale, &scaled_shapes, clip, false);
+            if activate_and_focus {
+                let _ = ShowWindow(hwnd, SW_SHOW);
+            } else {
+                let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+            }
+        }
+        if activate_and_focus {
+            focus_hwnd_without_sendinput(hwnd);
+            let _ = bar_win.set_focus();
+            raise_overlay_topmost_if_visible();
+            let _ = bar_win.eval(
+                "if (window.__DSB_BRIDGE__) { window.__DSB_BRIDGE__.focusComposer(); setTimeout(() => window.__DSB_BRIDGE__ && window.__DSB_BRIDGE__.focusComposer(), 60); }",
+            );
+        }
+        return;
+    }
+
+    // Ensure window is visible before animating
+    unsafe {
+        let _ = enforce_borderless_popup_style(hwnd, !activate_and_focus);
+        if !IsWindowVisible(hwnd).as_bool() {
+            let _ = ShowWindow(
+                hwnd,
+                if activate_and_focus {
+                    SW_SHOW
+                } else {
+                    SW_SHOWNOACTIVATE
+                },
+            );
+        }
+    }
+
+    let start_x = start_rc.left;
+    let start_y = start_rc.top;
+    if start_x == target_x && start_y == target_y {
+        let clip = Some((wl - target_x, wt - target_y, wr - target_x, wb - target_y));
+        unsafe {
+            apply_shapes_region_clipped(hwnd, phys_w, phys_h, scale, &scaled_shapes, clip, true);
+        }
+        if activate_and_focus {
+            focus_hwnd_without_sendinput(hwnd);
+            let _ = bar_win.set_focus();
+            let _ = bar_win.eval(
+                "if (window.__DSB_BRIDGE__) { window.__DSB_BRIDGE__.focusComposer(); }",
+            );
+        }
+        return;
+    }
+
+    // Silky 126ms cubic ease-out slide (9 steps × 14ms) on a tiny worker thread so UI never blocks
+    let win_clone = bar_win.clone();
+    let hwnd_raw = hwnd.0 as isize;
+    std::thread::spawn(move || {
+        let hwnd = HWND(hwnd_raw as *mut std::ffi::c_void);
+        let steps = 9i32;
+        for step in 1..=steps {
+            if SLIDE_ANIM_GEN.load(Ordering::Acquire) != anim_gen {
+                return;
+            }
+            let t = (step as f64) / (steps as f64);
+            let ease = 1.0 - (1.0 - t).powi(3);
+            let cx = start_x + (((target_x - start_x) as f64) * ease).round() as i32;
+            let cy = start_y + (((target_y - start_y) as f64) * ease).round() as i32;
+            let clip = Some((wl - cx, wt - cy, wr - cx, wb - cy));
+            unsafe {
+                let _ = SetWindowPos(
+                    hwnd,
+                    None,
+                    cx,
+                    cy,
+                    0,
+                    0,
+                    SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+                );
+                apply_shapes_region_clipped(hwnd, phys_w, phys_h, scale, &scaled_shapes, clip, true);
+            }
+            if step < steps {
+                std::thread::sleep(std::time::Duration::from_millis(14));
+            }
+        }
+        if activate_and_focus && SLIDE_ANIM_GEN.load(Ordering::Acquire) == anim_gen {
+            focus_hwnd_without_sendinput(hwnd);
+            let _ = win_clone.set_focus();
+            raise_overlay_topmost_if_visible();
+            let _ = win_clone.eval(
+                "if (window.__DSB_BRIDGE__) { window.__DSB_BRIDGE__.focusComposer(); }",
+            );
+        }
+    });
+}
 
 pub fn point_hits_any_phys_rect(rx: i32, ry: i32, rects: &[(i32, i32, i32, i32)]) -> bool {
     rects
@@ -574,34 +1184,53 @@ pub fn apply_bar_layout(
     let Some(hwnd) = hwnd_of(bar_win) else {
         return;
     };
+    // Never fight an active handle drag!
+    if BAR_DRAG_SESSION.lock().ok().and_then(|g| *g).is_some() {
+        return;
+    }
     let scale = dpi_scale_for_hwnd(hwnd);
-    let custom_anchor = CUSTOM_BAR_ANCHOR.lock().ok().and_then(|g| *g);
-    let (x, y, phys_w, phys_h) = if let Some(anchor) = custom_anchor {
-        let bounds = query_monitor_work_bounds_at(POINT {
-            x: anchor.center_x,
-            y: anchor.bottom_y - 24,
-        });
-        let avail_w = (bounds.2 - bounds.0).max(320);
-        let avail_h = (bounds.3 - bounds.1).max(120);
-        let clamped_w = (((width_dip as f64) * scale).round() as i32).clamp(320, avail_w);
-        let clamped_h = (((height_dip as f64) * scale).round() as i32).clamp(40, avail_h);
-        let (cx, cy) =
-            compute_custom_anchored_rect(anchor.center_x, anchor.bottom_y, clamped_w, clamped_h, bounds);
-        (cx, cy, clamped_w, clamped_h)
-    } else {
-        let mon = query_cursor_monitor_geometry(Some(hwnd));
-        compute_bottom_anchored_rect(
-            (
-                mon.anchor_left,
-                mon.anchor_top,
-                mon.anchor_right,
-                mon.anchor_bottom,
-            ),
+    let dock_rt = ACTIVE_DOCK.lock().ok().map(|d| *d);
+    let (x, y, phys_w, phys_h, work_clip_local) = if let Some(d) = dock_rt.filter(|d| d.edge.is_docked()) {
+        let (dx, dy, dw, dh) = compute_docked_bar_rect(
+            d.edge,
+            d.collapsed,
+            d.work_bounds,
             width_dip,
-            height_dip,
-            BOTTOM_MARGIN_DIP,
+            d.composer_height_dip,
             scale,
-        )
+        );
+        let (wl, wt, wr, wb) = d.work_bounds;
+        (dx, dy, dw, dh, Some((wl - dx, wt - dy, wr - dx, wb - dy)))
+    } else {
+        let custom_anchor = CUSTOM_BAR_ANCHOR.lock().ok().and_then(|g| *g);
+        if let Some(anchor) = custom_anchor {
+            let bounds = query_monitor_work_bounds_at(POINT {
+                x: anchor.center_x,
+                y: anchor.bottom_y - 24,
+            });
+            let avail_w = (bounds.2 - bounds.0).max(320);
+            let avail_h = (bounds.3 - bounds.1).max(120);
+            let clamped_w = (((width_dip as f64) * scale).round() as i32).clamp(320, avail_w);
+            let clamped_h = (((height_dip as f64) * scale).round() as i32).clamp(40, avail_h);
+            let (cx, cy) =
+                compute_custom_anchored_rect(anchor.center_x, anchor.bottom_y, clamped_w, clamped_h, bounds);
+            (cx, cy, clamped_w, clamped_h, None)
+        } else {
+            let mon = query_cursor_monitor_geometry(Some(hwnd));
+            let (bx, by, bw, bh) = compute_bottom_anchored_rect(
+                (
+                    mon.anchor_left,
+                    mon.anchor_top,
+                    mon.anchor_right,
+                    mon.anchor_bottom,
+                ),
+                width_dip,
+                height_dip,
+                BOTTOM_MARGIN_DIP,
+                scale,
+            );
+            (bx, by, bw, bh, None)
+        }
     };
 
     let scaled_shapes: Vec<(i32, i32, i32, i32, i32)> = shapes
@@ -609,7 +1238,9 @@ pub fn apply_bar_layout(
         .filter(|s| s.w > 2 && s.h > 2)
         .map(|s| scale_shape_to_phys(s, scale))
         .collect();
-    let rgn_key: ScaledRgnKey = (phys_w, phys_h, scaled_shapes.clone());
+    if let Ok(mut slot) = LAST_SCALED_SHAPES.lock() {
+        *slot = scaled_shapes.clone();
+    }
 
     unsafe {
         let overlay_vis = visible_overlay_hwnd();
@@ -624,9 +1255,6 @@ pub fn apply_bar_layout(
 
         if overlay_vis.is_none() && already_topmost {
             if pos_changed {
-                // Preserve existing topmost Z-order without fighting floating voice-input capsules
-                // (Chatterfly, LogiVoice) or IME candidate windows; SWP_NOCOPYBITS prevents Windows
-                // from copying old top-left pixels upward when growing bottom-anchored Bar height.
                 let _ = SetWindowPos(
                     hwnd,
                     None,
@@ -654,55 +1282,15 @@ pub fn apply_bar_layout(
             );
         }
 
-        let rgn_changed = LAST_BAR_RGN_KEY
-            .lock()
-            .map(|mut slot| {
-                if slot.as_ref() == Some(&rgn_key) {
-                    false
-                } else {
-                    *slot = Some(rgn_key);
-                    true
-                }
-            })
-            .unwrap_or(true);
-
-        if rgn_changed {
-            let phys_boxes: Vec<(i32, i32, i32, i32)> = if scaled_shapes.is_empty() {
-                vec![(0, 0, phys_w, phys_h)]
-            } else {
-                scaled_shapes
-                    .iter()
-                    .map(|&(l, t, r, b, _)| (l, t, r, b))
-                    .collect()
-            };
-            if let Ok(mut slot) = LAST_BAR_SHAPES_PHYS.lock() {
-                *slot = phys_boxes;
-            }
-            let master_rgn: HRGN = if scaled_shapes.is_empty() {
-                let diam = (48.0 * scale).round() as i32;
-                CreateRoundRectRgn(0, 0, phys_w + 1, phys_h + 1, diam, diam)
-            } else {
-                let mut acc: Option<HRGN> = None;
-                for &(l, t, r, b, diam) in &scaled_shapes {
-                    // CreateRoundRectRgn excludes right/bottom edge by 1px in GDI, so +1 keeps exact border
-                    let part = CreateRoundRectRgn(l, t, r + 1, b + 1, diam, diam);
-                    if let Some(existing) = acc {
-                        let _ = CombineRgn(Some(existing), Some(existing), Some(part), RGN_OR);
-                        let _ = DeleteObject(part.into());
-                    } else {
-                        acc = Some(part);
-                    }
-                }
-                acc.unwrap_or_else(|| {
-                    let diam = (48.0 * scale).round() as i32;
-                    CreateRoundRectRgn(0, 0, phys_w + 1, phys_h + 1, diam, diam)
-                })
-            };
-
-            // Note: Windows takes ownership of `master_rgn` on success; do NOT DeleteObject it!
-            // Pass bRedraw=false during resize so DWM/DirectComposition composites cleanly without GDI flash.
-            let _ = SetWindowRgn(hwnd, Some(master_rgn), !pos_changed);
-        }
+        apply_shapes_region_clipped(
+            hwnd,
+            phys_w,
+            phys_h,
+            scale,
+            &scaled_shapes,
+            work_clip_local,
+            !pos_changed,
+        );
     }
 }
 
@@ -1112,5 +1700,81 @@ mod tests {
         assert!(point_hits_any_phys_rect(150, 400, &shapes));
         // Inside bottom composer -> inside!
         assert!(point_hits_any_phys_rect(400, 640, &shapes));
+    }
+
+    #[test]
+    fn docked_bar_rect_computes_all_four_edges_expanded_and_collapsed() {
+        let work = (0, 0, 1920, 1040);
+        // Bottom dock: expanded sits flush at work_bottom; collapsed peeks 10px above taskbar seam
+        let (bx, by, bw, bh) =
+            compute_docked_bar_rect(DockEdge::Bottom, false, work, 760, 104, 1.0);
+        assert_eq!((bw, bh), (760, BAR_STAGE_HEIGHT_DIP));
+        assert_eq!(bx, (1920 - 760) / 2);
+        assert_eq!(by + bh, 1040);
+
+        let (bcx, bcy, bcw, bch) =
+            compute_docked_bar_rect(DockEdge::Bottom, true, work, 760, 104, 1.0);
+        assert_eq!((bcx, bcw, bch), (bx, bw, bh));
+        // Composer occupies bottom 104px of 680px stage -> composer top is at bcy + (680 - 104) = 1040 - 10
+        assert_eq!(bcy + (BAR_STAGE_HEIGHT_DIP - 104), 1040 - DOCK_PEEK_DIP);
+
+        // Top dock: expanded sits flush at work_top; collapsed peeks 10px down from top edge
+        let (tx, ty, tw, th) =
+            compute_docked_bar_rect(DockEdge::Top, false, work, 760, 104, 1.0);
+        assert_eq!((tw, th), (760, BAR_STAGE_HEIGHT_DIP));
+        assert_eq!(tx, (1920 - 760) / 2);
+        assert_eq!(ty, 0);
+
+        let (tcx, tcy, _, _) =
+            compute_docked_bar_rect(DockEdge::Top, true, work, 760, 104, 1.0);
+        assert_eq!(tcx, tx);
+        // Composer occupies top 104px of stage -> composer bottom is at tcy + 104 = 10
+        assert_eq!(tcy + 104, DOCK_PEEK_DIP);
+
+        // Left dock: 420px wide x 84% work height, vertically centered
+        let (lx, ly, lw, lh) =
+            compute_docked_bar_rect(DockEdge::Left, false, work, 760, 104, 1.0);
+        assert_eq!(lw, SIDE_DOCK_WIDTH_DIP);
+        assert_eq!(lx, 0);
+        assert_eq!(lh, (1040.0 * SIDE_DOCK_HEIGHT_RATIO).round() as i32);
+        assert_eq!(ly, (1040 - lh) / 2);
+
+        let (lcx, lcy, _, _) =
+            compute_docked_bar_rect(DockEdge::Left, true, work, 760, 104, 1.0);
+        assert_eq!(lcy, ly);
+        assert_eq!(lcx + lw, DOCK_PEEK_DIP);
+
+        // Right dock: 420px wide x 84% work height, flush right; collapsed peeks 10px from right edge
+        let (rx, ry, rw, rh) =
+            compute_docked_bar_rect(DockEdge::Right, false, work, 760, 104, 1.0);
+        assert_eq!((rw, rh), (lw, lh));
+        assert_eq!(rx + rw, 1920);
+        assert_eq!(ry, ly);
+
+        let (rcx, rcy, _, _) =
+            compute_docked_bar_rect(DockEdge::Right, true, work, 760, 104, 1.0);
+        assert_eq!(rcy, ry);
+        assert_eq!(rcx, 1920 - DOCK_PEEK_DIP);
+    }
+
+    #[test]
+    fn edge_snap_detection_and_inward_pull_undock_thresholds() {
+        let work = (0, 0, 1920, 1040);
+        assert_eq!(detect_snap_edge_for_cursor(POINT { x: 10, y: 500 }, work, true), DockEdge::Left);
+        assert_eq!(detect_snap_edge_for_cursor(POINT { x: 1910, y: 500 }, work, true), DockEdge::Right);
+        assert_eq!(detect_snap_edge_for_cursor(POINT { x: 960, y: 12 }, work, true), DockEdge::Top);
+        assert_eq!(detect_snap_edge_for_cursor(POINT { x: 960, y: 1030 }, work, true), DockEdge::Bottom);
+        assert_eq!(detect_snap_edge_for_cursor(POINT { x: 960, y: 520 }, work, true), DockEdge::None);
+        assert_eq!(detect_snap_edge_for_cursor(POINT { x: 10, y: 500 }, work, false), DockEdge::None);
+
+        // Inward pull >= 50px undocks; small jitter stays docked
+        assert!(!should_undock_on_inward_pull(DockEdge::Left, POINT { x: 10, y: 500 }, POINT { x: 40, y: 500 }));
+        assert!(should_undock_on_inward_pull(DockEdge::Left, POINT { x: 10, y: 500 }, POINT { x: 65, y: 500 }));
+        assert!(!should_undock_on_inward_pull(DockEdge::Right, POINT { x: 1910, y: 500 }, POINT { x: 1880, y: 500 }));
+        assert!(should_undock_on_inward_pull(DockEdge::Right, POINT { x: 1910, y: 500 }, POINT { x: 1850, y: 500 }));
+        assert!(!should_undock_on_inward_pull(DockEdge::Top, POINT { x: 960, y: 10 }, POINT { x: 960, y: 40 }));
+        assert!(should_undock_on_inward_pull(DockEdge::Top, POINT { x: 960, y: 10 }, POINT { x: 960, y: 70 }));
+        assert!(!should_undock_on_inward_pull(DockEdge::Bottom, POINT { x: 960, y: 1030 }, POINT { x: 960, y: 1000 }));
+        assert!(should_undock_on_inward_pull(DockEdge::Bottom, POINT { x: 960, y: 1030 }, POINT { x: 960, y: 960 }));
     }
 }
