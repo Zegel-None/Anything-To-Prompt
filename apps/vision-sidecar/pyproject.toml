@@ -1,0 +1,25 @@
+[project]
+name = "anything-to-prompt-vision-sidecar"
+version = "0.9.1"
+description = "Multi-tier local segmentation (MobileSAM ONNX / SAM 2.1 Tiny & Small) and Florence-2 semantic grounding sidecar for Anything-to-Prompt"
+requires-python = ">=3.10,<3.13"
+dependencies = [
+    "fastapi>=0.115.0",
+    "uvicorn>=0.32.0",
+    "pillow>=10.4.0",
+    "numpy>=1.26.0",
+    "opencv-python-headless>=4.10.0",
+    "onnxruntime>=1.19.0",
+    "huggingface-hub>=0.25.0",
+]
+
+[project.optional-dependencies]
+gpu = [
+    "torch>=2.4.0",
+    "torchvision>=0.19.0",
+    "ultralytics>=8.3.0",
+    "transformers>=4.45.0,<5.0.0",
+    "timm>=1.0.9",
+    "einops>=0.8.0",
+    "accelerate>=0.34.0",
+]

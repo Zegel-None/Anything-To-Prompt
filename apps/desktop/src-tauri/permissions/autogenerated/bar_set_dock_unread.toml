@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-bar-set-dock-unread"
+description = "Enables the bar_set_dock_unread command without any pre-configured scope."
+commands.allow = ["bar_set_dock_unread"]
+
+[[permission]]
+identifier = "deny-bar-set-dock-unread"
+description = "Denies the bar_set_dock_unread command without any pre-configured scope."
+commands.deny = ["bar_set_dock_unread"]

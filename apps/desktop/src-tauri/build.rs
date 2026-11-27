@@ -104,18 +104,52 @@ fn discover_harnesses(repo_root: &Path) -> Vec<DiscoveredHarness> {
     found
 }
 
+fn load_client_template(repo_root: &Path) -> String {
+    let lib_dir = repo_root
+        .join("packages")
+        .join("anything-to-prompt")
+        .join("lib");
+    let parts_dir = lib_dir.join("client");
+    if parts_dir.is_dir() {
+        println!("cargo:rerun-if-changed={}", parts_dir.display());
+        let mut part_paths: Vec<PathBuf> = fs::read_dir(&parts_dir)
+            .unwrap_or_else(|e| panic!("failed to read {}: {e}", parts_dir.display()))
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.is_file() && p.extension().and_then(|s| s.to_str()) == Some("js"))
+            .collect();
+        part_paths.sort();
+        if !part_paths.is_empty() {
+            let mut out = String::from(
+                "// @local/anything-to-prompt/lib/client.js — Anything-to-Prompt Ambient Floating Bar + Session Picker + Tauri Bridge (v1.0.0)\n\
+                 // Assembled from packages/anything-to-prompt/lib/client/*.js by build.rs.\n\n\
+                 window.__ModuleLoader__.load({\n  id: '@local/anything-to-prompt',\n  factory(require) {\n",
+            );
+            for path in &part_paths {
+                println!("cargo:rerun-if-changed={}", path.display());
+                let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("part.js");
+                let body = fs::read_to_string(path)
+                    .unwrap_or_else(|e| panic!("failed to read {}: {e}", path.display()));
+                out.push_str(&format!("    // === module: lib/client/{name} ===\n"));
+                out.push_str(body.trim_end());
+                out.push_str("\n\n");
+            }
+            out.push_str("    return createAnythingToPromptPlugin();\n  },\n});\n");
+            return out;
+        }
+    }
+
+    let client_path = lib_dir.join("client.js");
+    println!("cargo:rerun-if-changed={}", client_path.display());
+    fs::read_to_string(&client_path)
+        .unwrap_or_else(|e| panic!("failed to read {}: {e}", client_path.display()))
+}
+
 fn generate_harness_artifacts(repo_root: &Path, out_dir: &Path) {
     let harnesses = discover_harnesses(repo_root);
 
     // 1. Assemble generated_client.js with auto-discovered harness modules injected cleanly
-    let client_path = repo_root
-        .join("packages")
-        .join("anything-to-prompt")
-        .join("lib")
-        .join("client.js");
-    println!("cargo:rerun-if-changed={}", client_path.display());
-    let client_template = fs::read_to_string(&client_path)
-        .unwrap_or_else(|e| panic!("failed to read {}: {e}", client_path.display()));
+    let client_template = load_client_template(repo_root);
 
     let mut js_entries = String::from("[\n");
     for h in &harnesses {
@@ -176,6 +210,8 @@ fn main() {
             "bar_drag_reset",
             "bar_get_dock_state",
             "bar_set_dock_edge",
+            "bar_set_vertical_mode",
+            "bar_set_dock_unread",
             "bar_dock_expand",
             "overlay_compose_done",
             "harness_get_active",
@@ -206,6 +242,26 @@ fn main() {
             "quick_search_build_capsule",
             "quick_search_open_path",
             "quick_search_refresh",
+            "pick_list_profiles",
+            "pick_reset_profile",
+            "pick_export_profile",
+            "pick_import_profile",
+            "adapter_plugins_list",
+            "adapter_plugins_reload",
+            "adapter_plugins_set_enabled",
+            "adapter_plugins_install_url",
+            "adapter_plugins_install_json",
+            "adapter_plugins_install_file",
+            "adapter_plugins_uninstall",
+            "adapter_plugins_export",
+            "adapter_plugins_fetch_registry",
+            "adapter_plugins_test",
+            "adapter_plugins_open_dir",
+            "vision_get_config",
+            "vision_probe_hardware",
+            "vision_update_config",
+            "vision_test_pipeline",
+            "vision_unload_models",
         ]),
     ))
     .expect("failed to run tauri-build");

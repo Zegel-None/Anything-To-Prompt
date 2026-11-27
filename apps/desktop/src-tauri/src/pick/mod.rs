@@ -1,7 +1,27 @@
+mod blue_selection;
+mod office_flow;
+mod solidworks_flow;
+
+pub use blue_selection::*;
+use office_flow::*;
+pub use solidworks_flow::*;
+
+pub mod adapter_plugins;
 pub mod adapters;
+pub mod brush_scan;
+pub mod enricher;
 pub mod fs_meta;
 pub mod grounding;
+pub mod hitmap;
+pub mod hover_diff;
+pub mod probe;
 pub mod process;
+pub mod profile;
+pub mod rebrush;
+pub mod scout;
+pub mod self_heal;
+pub mod vision;
+pub mod win32_controls;
 
 use crate::captures::{
     capture_target_window_bitblt, save_annotated_capture, save_red_dual_captures, RawScreenCapture,
@@ -33,7 +53,7 @@ use windows::Win32::Foundation::{COLORREF, HWND, POINT, RECT};
 use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_CLOAKED};
 use windows::Win32::UI::WindowsAndMessaging::{
     GetAncestor, GetForegroundWindow, GetLayeredWindowAttributes, GetTopWindow, GetWindow,
-    GetWindowLongPtrW, GetWindowRect, GetWindowTextW, GetWindowThreadProcessId, IsIconic,
+    GetWindowLongPtrW, GetWindowRect, GetWindowThreadProcessId, IsIconic,
     IsWindowVisible, WindowFromPoint, GA_ROOT, GWL_EXSTYLE, GW_HWNDNEXT,
     LAYERED_WINDOW_ATTRIBUTES_FLAGS, LWA_ALPHA, WS_EX_LAYERED, WS_EX_TRANSPARENT,
 };
@@ -117,20 +137,7 @@ pub fn circled_badge(n: usize) -> String {
     }
 }
 
-pub fn get_window_title(hwnd: HWND) -> String {
-    if hwnd.0.is_null() {
-        return String::new();
-    }
-    unsafe {
-        let mut buf = vec![0u16; 512];
-        let len = GetWindowTextW(hwnd, &mut buf);
-        if len <= 0 {
-            String::new()
-        } else {
-            String::from_utf16_lossy(&buf[..len as usize])
-        }
-    }
-}
+pub use crate::win32_util::window_title_text as get_window_title;
 
 pub fn should_skip_overlay_window(
     ex_style: isize,
@@ -265,6 +272,10 @@ fn find_target_uia_element(
     x: i32,
     y: i32,
 ) -> Option<UIElement> {
+    // P0-1: Never touch Windows UIAutomation on SolidWorks (FeatureManager/Ribbon UIA hang hazard).
+    if target_pid != 0 && solidworks::is_solidworks_exe(&office::fast_exe_basename_for_pid(target_pid)) {
+        return None;
+    }
     let is_own_bar = target_pid == std::process::id();
     if let Ok(direct) = automation.element_from_point(UiaPoint::new(x, y)) {
         let el_pid = direct.get_process_id().unwrap_or(0);
@@ -368,6 +379,23 @@ fn drill_deepest_containing(
     }
 }
 
+pub(crate) fn get_window_screen_rect_pub(hwnd: HWND) -> ScreenRect {
+    get_window_screen_rect(hwnd)
+}
+
+pub(crate) fn inspect_uia_element_with_node_at(
+    automation: &UIAutomation,
+    walker: &UITreeWalker,
+    root_hwnd: HWND,
+    target_pid: u32,
+    x: i32,
+    y: i32,
+) -> Option<(UIElement, UiaElementInfo)> {
+    let el = find_target_uia_element(automation, walker, root_hwnd, target_pid, x, y)?;
+    let info = extract_uia_element_info(&el, walker, false);
+    Some((el, info))
+}
+
 fn get_window_screen_rect(hwnd: HWND) -> ScreenRect {
     if hwnd.0.is_null() {
         return ScreenRect {
@@ -401,73 +429,26 @@ pub fn is_desktop_window_class(win_class: &str) -> bool {
     matches!(win_class, "Progman" | "WorkerW")
 }
 
-/// Returns true for Office / WPS suite and similar document, code-editor, PDF, note,
-/// and creative/design canvas apps where hovering over the canvas must NEVER trigger
-/// the 0.5s background dwell ring or select the entire window background.
-pub fn should_ignore_background_for_app(exe_name: &str, win_class: &str) -> bool {
+/// Returns true ONLY for SolidWorks and professional CAD apps where hovering/clicking the
+/// empty 3D/2D model canvas must NEVER trigger the 0.5s background dwell ring or select the
+/// entire window background. All other apps (Office/WPS, IDEs, browsers, editors, etc.) keep
+/// normal background/canvas behavior.
+pub fn should_ignore_background_for_app(exe_name: &str, _win_class: &str) -> bool {
     let exe = exe_name.trim().to_ascii_lowercase();
-    if matches!(
-        exe.as_str(),
-        // Microsoft Office & WPS Office
-        "winword.exe"
-            | "excel.exe"
-            | "powerpnt.exe"
-            | "wps.exe"
-            | "wpsoffice.exe"
-            | "et.exe"
-            | "wpp.exe"
-            | "wpspdf.exe"
-            | "visio.exe"
-            | "onenote.exe"
-            | "msaccess.exe"
-            | "mspub.exe"
-            // PDF / Document / Markdown / Note / Text editors
-            | "acrobat.exe"
-            | "acrord32.exe"
-            | "foxitpdfreader.exe"
-            | "foxitreader.exe"
-            | "sumatrapdf.exe"
-            | "obsidian.exe"
-            | "notion.exe"
-            | "typora.exe"
-            | "xmind.exe"
-            | "notepad.exe"
-            | "notepad++.exe"
-            | "sublime_text.exe"
-            // Code editors & IDEs
-            | "code.exe"
-            | "cursor.exe"
-            | "windsurf.exe"
-            | "antigravity.exe"
-            | "devenv.exe"
-            | "idea64.exe"
-            | "pycharm64.exe"
-            | "webstorm64.exe"
-            | "clion64.exe"
-            | "goland64.exe"
-            | "rider64.exe"
-            | "fleet.exe"
-            // Design / Creative / Canvas / CAD / Video editors
-            | "photoshop.exe"
-            | "illustrator.exe"
-            | "indesign.exe"
-            | "afterfx.exe"
-            | "premiere pro.exe"
-            | "figma.exe"
-            | "blender.exe"
-            | "acad.exe"
-            | "mspaint.exe"
-            | "krita.exe"
-            | "inkscape.exe"
-            | "jianyingpro.exe"
-            | "capcut.exe"
-    ) {
-        return true;
-    }
-
     matches!(
-        win_class,
-        "OpusApp" | "XLMAIN" | "PPTFrameClass" | "ETMain" | "WPPMain" | "SunAwtFrame"
+        exe.as_str(),
+        "sldworks.exe"
+            | "acad.exe"
+            | "zwcad.exe"
+            | "gstarcad.exe"
+            | "bricscad.exe"
+            | "ugraf.exe"
+            | "xtop.exe"
+            | "inventor.exe"
+            | "fusion360.exe"
+            | "rhino.exe"
+            | "cnext.exe"
+            | "freecad.exe"
     )
 }
 
@@ -600,15 +581,139 @@ pub fn inspect_hover_at(x: i32, y: i32, own_pid: u32) -> HoverInspection {
     }
 }
 
+pub(crate) fn resolve_child_hwnd_at(root_hwnd: HWND, x: i32, y: i32) -> (HWND, String, ScreenRect) {
+    use windows::Win32::Graphics::Gdi::ScreenToClient;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        ChildWindowFromPointEx, GetClassNameW, CWP_SKIPINVISIBLE, CWP_SKIPTRANSPARENT,
+    };
+    let mut target = unsafe { WindowFromPoint(POINT { x, y }) };
+    if target.0.is_null() {
+        target = root_hwnd;
+    }
+    for _ in 0..6 {
+        let mut pt = POINT { x, y };
+        if !unsafe { ScreenToClient(target, &mut pt) }.as_bool() {
+            break;
+        }
+        let next = unsafe {
+            ChildWindowFromPointEx(target, pt, CWP_SKIPINVISIBLE | CWP_SKIPTRANSPARENT)
+        };
+        if next.0.is_null() || next == target {
+            break;
+        }
+        target = next;
+    }
+    let mut cls_buf = [0u16; 128];
+    let clen = unsafe { GetClassNameW(target, &mut cls_buf) }.max(0) as usize;
+    let class_name = String::from_utf16_lossy(&cls_buf[..clen]);
+    let rect = get_window_screen_rect(target);
+    (target, class_name, rect)
+}
+
+/// Universal non-UIA L2 (MSAA container Hit-Map) -> L3 (Static visual Hit-Map) lookup for ANY app.
+fn inspect_non_uia_hitmap_at(
+    root_hwnd: HWND,
+    x: i32,
+    y: i32,
+    prof: &profile::AppUiProfile,
+) -> Option<(hitmap::HitMapEntry, HWND, String)> {
+    let (child_hwnd, child_class, child_rect) = resolve_child_hwnd_at(root_hwnd, x, y);
+    if child_rect.w < 16 || child_rect.h < 14 {
+        return None;
+    }
+    let cls_lower = child_class.to_ascii_lowercase();
+    let is_popup = solidworks::is_popup_menu_hwnd(child_hwnd, root_hwnd, &cls_lower);
+    if !is_popup
+        && prof
+            .ignore_canvas_classes
+            .iter()
+            .any(|c| !c.is_empty() && cls_lower.contains(c))
+    {
+        return None;
+    }
+    let forced_layout = prof
+        .learned_regions
+        .iter()
+        .find(|r| r.class_name.eq_ignore_ascii_case(&cls_lower))
+        .map(|r| hitmap::ContainerLayoutKind::parse(&r.layout_kind))
+        .unwrap_or(hitmap::ContainerLayoutKind::Auto);
+    // Always check woken ExternalBoxProvider (OmniParser / Hover-Diff) FIRST so Dose 1 results
+    // are NEVER shadowed by coarse MsaaHitMap layers!
+    if let Some(entry) = hitmap::lookup_cached_any_source(child_hwnd.0 as isize, x, y) {
+        return Some((entry, child_hwnd, child_class));
+    }
+    for layer in &prof.preferred_layers {
+        match layer {
+            profile::GroundingLayer::MsaaHitMap => {
+                if let hitmap::MsaaLookup::Hit(entry) =
+                    hitmap::lookup_or_build_msaa(child_hwnd, child_rect, x, y)
+                {
+                    return Some((entry, child_hwnd, child_class));
+                }
+            }
+            profile::GroundingLayer::StaticVisualHitMap => {
+                if let Some(entry) = hitmap::lookup_or_build_static_visual_with_hint(
+                    child_hwnd,
+                    child_rect,
+                    &child_class,
+                    is_popup,
+                    forced_layout,
+                    x,
+                    y,
+                ) {
+                    return Some((entry, child_hwnd, child_class));
+                }
+            }
+            profile::GroundingLayer::Uia => {}
+        }
+    }
+    None
+}
+
 pub fn inspect_hover_at_with_uia(
     uia: Option<(&UIAutomation, &UITreeWalker)>,
     x: i32,
     y: i32,
-    _own_pid: u32,
+    own_pid: u32,
+) -> HoverInspection {
+    inspect_hover_at_with_context(None, uia, x, y, own_pid)
+}
+
+pub fn inspect_hover_at_with_context(
+    app: Option<&AppHandle>,
+    uia: Option<(&UIAutomation, &UITreeWalker)>,
+    x: i32,
+    y: i32,
+    own_pid: u32,
 ) -> HoverInspection {
     let cursor = serde_json::json!({ "x": x, "y": y });
+
+    // Priority 0: If Dose 2 revealed an organic photo cutout or expanded submenu item at `(x, y)`,
+    // highlight it directly with zero background dwell ring or overlapping rectangle collision!
+    if let Some(rev) = brush_scan::find_revealed_item_at(x, y) {
+        let lbl = if rev.label.trim().is_empty() {
+            rev.role.clone()
+        } else {
+            truncate_chars(&rev.label, 32)
+        };
+        return HoverInspection {
+            ok: true,
+            kind: HoverTargetKind::Element,
+            target_key: rev.key,
+            // For organic photo polygons, overlay.js already renders the cyan silhouette — suppress
+            // the redundant outer blue rectangle while keeping the crisp semantic label!
+            rect: if rev.polygon.is_some() {
+                None
+            } else {
+                Some(rev.rect)
+            },
+            cursor,
+            label: lbl,
+        };
+    }
+
     let (root_hwnd, target_pid, win_title, win_class) = resolve_root_window_at(x, y);
-    if target_pid == 0 {
+    if target_pid == 0 || (own_pid != 0 && target_pid == own_pid) {
         return HoverInspection {
             ok: false,
             kind: HoverTargetKind::None,
@@ -621,7 +726,59 @@ pub fn inspect_hover_at_with_uia(
 
     let win_rect = get_window_screen_rect(root_hwnd);
     let target_exe = office::fast_exe_basename_for_pid(target_pid);
-    let ignore_bg = should_ignore_background_for_app(&target_exe, &win_class);
+    let prof = profile::get_effective_profile(&target_exe);
+    if let Some(a) = app {
+        if !target_exe.is_empty() && !profile::is_known_profile(&target_exe) {
+            self_heal::maybe_trigger_first_time_onboarding(a, root_hwnd, &target_exe, (x, y));
+        }
+    }
+    let ignore_bg =
+        prof.ignore_background || should_ignore_background_for_app(&target_exe, &win_class);
+
+    // P0-1 + CAD UX: Never run UIA hover traversal or 0.5s background dwell ring on SolidWorks.
+    // Uses universal L2 MSAA Hit-Map -> L3 Static Visual Hit-Map + Win32 controls (<0.3ms cached)
+    // + Stage B passive Tooltip Catcher / cached OCR enrichment!
+    if solidworks::is_solidworks_exe(&target_exe) {
+        if let Some(ctrl) = solidworks::inspect_win32_ui_control_at(root_hwnd, x, y, false) {
+            self_heal::record_hover_stability(app, &target_exe, (x, y), ctrl.rect);
+            let enriched = enricher::enrich_box_semantics(
+                HWND(ctrl.hwnd_raw as *mut std::ffi::c_void),
+                target_pid,
+                &target_exe,
+                ctrl.rect,
+                &ctrl.text,
+                &ctrl.description,
+                &ctrl.role,
+                None,
+                false,
+            );
+            let display = if !enriched.label.is_empty() {
+                enriched.label
+            } else {
+                ctrl.display_label()
+            };
+            let key = format!(
+                "sw-ui:{}:{}:{}:{}:{}",
+                ctrl.hwnd_raw, ctrl.rect.x, ctrl.rect.y, ctrl.rect.w, ctrl.rect.h
+            );
+            return HoverInspection {
+                ok: true,
+                kind: HoverTargetKind::Element,
+                target_key: key,
+                rect: Some(ctrl.rect),
+                cursor,
+                label: truncate_chars(&display, 32),
+            };
+        }
+        return HoverInspection {
+            ok: false,
+            kind: HoverTargetKind::None,
+            target_key: String::new(),
+            rect: None,
+            cursor,
+            label: String::new(),
+        };
+    }
 
     // Inside Office / WPS document/grid/slide canvases, keep hover completely clean & distraction-free
     // (no giant pane frame, no 0.5s background dwell ring) so text drag / cell pick / shape click feel native.
@@ -638,14 +795,119 @@ pub fn inspect_hover_at_with_uia(
         }
     }
 
+    // For UIA-forbidden or Hit-Map-first apps (Blender, RDP/ToDesk/Sunlogin, AutoCAD, Photoshop,
+    // or auto-healed slow legacy apps), run universal L2 MSAA -> L3 Static Visual Hit-Map directly!
+    let prefer_hitmap_first = prof.uia_policy == profile::UiaPolicy::Forbidden
+        || !matches!(
+            prof.preferred_layers.first(),
+            Some(profile::GroundingLayer::Uia)
+        );
+    if prefer_hitmap_first {
+        if let Some((entry, child_hwnd, _cls)) = inspect_non_uia_hitmap_at(root_hwnd, x, y, &prof) {
+            self_heal::record_hover_stability(app, &target_exe, (x, y), entry.rect);
+            let enriched = enricher::enrich_box_semantics(
+                child_hwnd,
+                target_pid,
+                &target_exe,
+                entry.rect,
+                &entry.label,
+                &entry.description,
+                &entry.role,
+                None,
+                false,
+            );
+            let label = if enriched.label.is_empty() {
+                enriched.role
+            } else {
+                truncate_chars(&enriched.label, 32)
+            };
+            let target_key = format!(
+                "hm:{}:{}:{}:{}:{}",
+                child_hwnd.0 as isize, entry.rect.x, entry.rect.y, entry.rect.w, entry.rect.h
+            );
+            return HoverInspection {
+                ok: true,
+                kind: HoverTargetKind::Element,
+                target_key,
+                rect: Some(entry.rect),
+                cursor,
+                label,
+            };
+        }
+        if prof.uia_policy == profile::UiaPolicy::Forbidden {
+            return HoverInspection {
+                ok: false,
+                kind: HoverTargetKind::None,
+                target_key: String::new(),
+                rect: None,
+                cursor,
+                label: String::new(),
+            };
+        }
+    }
+
+    let uia_t0 = std::time::Instant::now();
     let uia_info = uia.and_then(|(automation, walker)| {
         let el = find_target_uia_element(automation, walker, root_hwnd, target_pid, x, y)?;
         Some(extract_uia_element_info(&el, walker, false))
     });
+    let uia_elapsed_ms = uia_t0.elapsed().as_millis() as u64;
+    if uia.is_some() {
+        self_heal::record_uia_latency(app, &target_exe, uia_elapsed_ms, prof.uia_timeout_ms, (x, y));
+    }
 
     if let Some(ref info) = uia_info {
         match classify_hover_target(info, win_rect, &win_class) {
             HoverTargetKind::Element => {
+                // If Dose 1 Shake-to-Wake found a much finer button (>= 4x smaller) inside a coarse
+                // custom UIA Group/Pane/Custom container, prefer the finer woken button!
+                if info.rect.w > 240 || info.rect.h > 140 {
+                    let (child_hwnd, _, _) = resolve_child_hwnd_at(root_hwnd, x, y);
+                    if let Some(ext) = hitmap::get_cached_entries(
+                        child_hwnd.0 as isize,
+                        hitmap::HitMapSource::ExternalBoxProvider,
+                    )
+                    .and_then(|v| hitmap::find_entry_at(&v, x, y))
+                    {
+                        let uia_area = (info.rect.w.max(1) as i64) * (info.rect.h.max(1) as i64);
+                        let ext_area = (ext.rect.w.max(1) as i64) * (ext.rect.h.max(1) as i64);
+                        if uia_area >= ext_area * 4 {
+                            let enriched = enricher::enrich_box_semantics(
+                                child_hwnd,
+                                target_pid,
+                                &target_exe,
+                                ext.rect,
+                                &ext.label,
+                                &ext.description,
+                                &ext.role,
+                                None,
+                                false,
+                            );
+                            let lbl = if enriched.label.is_empty() {
+                                enriched.role
+                            } else {
+                                truncate_chars(&enriched.label, 32)
+                            };
+                            return HoverInspection {
+                                ok: true,
+                                kind: HoverTargetKind::Element,
+                                target_key: format!(
+                                    "hm:{}:{}:{}:{}:{}",
+                                    child_hwnd.0 as isize,
+                                    ext.rect.x,
+                                    ext.rect.y,
+                                    ext.rect.w,
+                                    ext.rect.h
+                                ),
+                                rect: Some(ext.rect),
+                                cursor,
+                                label: lbl,
+                            };
+                        }
+                    }
+                }
+                self_heal::record_hover_box(app, &target_exe, info.rect, win_rect, false, (x, y));
+                self_heal::record_hover_stability(app, &target_exe, (x, y), info.rect);
                 let display = resolve_primary_element_label(info).unwrap_or_else(|| {
                     if !info.class_name.is_empty() {
                         truncate_chars(&info.class_name, 26)
@@ -671,35 +933,138 @@ pub fn inspect_hover_at_with_uia(
                     label,
                 };
             }
-            HoverTargetKind::Background if !ignore_bg => {
-                let bg_rect = if is_desktop_window_class(&win_class) {
-                    if win_rect.w > 24 && win_rect.h > 24 {
-                        win_rect
-                    } else {
-                        info.rect
-                    }
-                } else if info.rect.w > 24 && info.rect.h > 24 {
-                    info.rect
-                } else {
-                    win_rect
-                };
-                if bg_rect.w > 24 && bg_rect.h > 24 {
-                    let target_key = format!(
-                        "bg:{}:{}:{}:{}:{}",
-                        target_pid, bg_rect.x, bg_rect.y, bg_rect.w, bg_rect.h
+            HoverTargetKind::Background => {
+                // Step down to cached Dose 1 / Scheme B OmniParser / MSAA / StaticVisual Hit-Map
+                // when UIA only sees a monolithic pane or custom Canvas over a toolbar!
+                let (child_hwnd, _, _) = resolve_child_hwnd_at(root_hwnd, x, y);
+                if let Some(entry) = hitmap::lookup_cached_any_source(child_hwnd.0 as isize, x, y) {
+                    let enriched = enricher::enrich_box_semantics(
+                        child_hwnd,
+                        target_pid,
+                        &target_exe,
+                        entry.rect,
+                        &entry.label,
+                        &entry.description,
+                        &entry.role,
+                        None,
+                        false,
                     );
+                    let label = if enriched.label.is_empty() {
+                        enriched.role
+                    } else {
+                        truncate_chars(&enriched.label, 32)
+                    };
                     return HoverInspection {
                         ok: true,
-                        kind: HoverTargetKind::Background,
-                        target_key,
-                        rect: Some(bg_rect),
+                        kind: HoverTargetKind::Element,
+                        target_key: format!(
+                            "hm:{}:{}:{}:{}:{}",
+                            child_hwnd.0 as isize,
+                            entry.rect.x,
+                            entry.rect.y,
+                            entry.rect.w,
+                            entry.rect.h
+                        ),
+                        rect: Some(entry.rect),
                         cursor,
-                        label: format_background_label(Some(info), &win_title, &win_class),
+                        label,
                     };
                 }
+                if let Some((entry, child_hwnd, _cls)) =
+                    inspect_non_uia_hitmap_at(root_hwnd, x, y, &prof)
+                {
+                    let enriched = enricher::enrich_box_semantics(
+                        child_hwnd,
+                        target_pid,
+                        &target_exe,
+                        entry.rect,
+                        &entry.label,
+                        &entry.description,
+                        &entry.role,
+                        None,
+                        false,
+                    );
+                    let label = if enriched.label.is_empty() {
+                        enriched.role
+                    } else {
+                        truncate_chars(&enriched.label, 32)
+                    };
+                    return HoverInspection {
+                        ok: true,
+                        kind: HoverTargetKind::Element,
+                        target_key: format!(
+                            "hm:{}:{}:{}:{}:{}",
+                            child_hwnd.0 as isize,
+                            entry.rect.x,
+                            entry.rect.y,
+                            entry.rect.w,
+                            entry.rect.h
+                        ),
+                        rect: Some(entry.rect),
+                        cursor,
+                        label,
+                    };
+                }
+                if !ignore_bg {
+                    let bg_rect = if is_desktop_window_class(&win_class) {
+                        if win_rect.w > 24 && win_rect.h > 24 {
+                            win_rect
+                        } else {
+                            info.rect
+                        }
+                    } else if info.rect.w > 24 && info.rect.h > 24 {
+                        info.rect
+                    } else {
+                        win_rect
+                    };
+                    if bg_rect.w > 24 && bg_rect.h > 24 {
+                        let target_key = format!(
+                            "bg:{}:{}:{}:{}:{}",
+                            target_pid, bg_rect.x, bg_rect.y, bg_rect.w, bg_rect.h
+                        );
+                        return HoverInspection {
+                            ok: true,
+                            kind: HoverTargetKind::Background,
+                            target_key,
+                            rect: Some(bg_rect),
+                            cursor,
+                            label: format_background_label(Some(info), &win_title, &win_class),
+                        };
+                    }
+                }
             }
-            HoverTargetKind::Background | HoverTargetKind::None => {}
+            HoverTargetKind::None => {}
         }
+    } else if let Some((entry, child_hwnd, _cls)) =
+        inspect_non_uia_hitmap_at(root_hwnd, x, y, &prof)
+    {
+        let enriched = enricher::enrich_box_semantics(
+            child_hwnd,
+            target_pid,
+            &target_exe,
+            entry.rect,
+            &entry.label,
+            &entry.description,
+            &entry.role,
+            None,
+            false,
+        );
+        let label = if enriched.label.is_empty() {
+            enriched.role
+        } else {
+            truncate_chars(&enriched.label, 32)
+        };
+        return HoverInspection {
+            ok: true,
+            kind: HoverTargetKind::Element,
+            target_key: format!(
+                "hm:{}:{}:{}:{}:{}",
+                child_hwnd.0 as isize, entry.rect.x, entry.rect.y, entry.rect.w, entry.rect.h
+            ),
+            rect: Some(entry.rect),
+            cursor,
+            label,
+        };
     } else if !ignore_bg && win_rect.w > 24 && win_rect.h > 24 {
         let target_key = format!(
             "bg:{}:{}:{}:{}:{}",
@@ -874,6 +1239,76 @@ pub fn execute_tap_pick(
         return;
     };
 
+    // Priority 0: If the user clicked a Dose 2 revealed item (organic photo cutout, expanded submenu item,
+    // or VLM-corrected control), pick it FIRST before Office/SolidWorks tap handlers can hijack it!
+    if let Some(rev) = brush_scan::find_revealed_item_at(x, y) {
+        let (root_hwnd, target_pid, win_title, _win_class) = resolve_root_window_at(x, y);
+        let cfg = shared.config.lock().map(|c| c.clone()).unwrap_or_default();
+        let n = shared.allocate_pick_number();
+        let badge = circled_badge(n);
+        if let Some(ov) = app.get_webview_window("overlay") {
+            let _ = ov.emit("pen:picked", serde_json::json!({ "n": n, "rect": rev.rect }));
+        }
+        let owned_cap;
+        let raw_ref = match pre_capture.as_ref() {
+            Some(r) => Some(r),
+            None => {
+                owned_cap = capture_target_window_bitblt(root_hwnd, x, y).ok();
+                owned_cap.as_ref()
+            }
+        };
+        let screenshot_path = raw_ref.and_then(|raw| {
+            save_annotated_capture(app, raw, Some(rev.rect), &[], n, &cfg)
+                .ok()
+                .map(|p| p.to_string_lossy().to_string())
+        });
+        let target_exe = office::fast_exe_basename_for_pid(target_pid);
+        let lbl = if rev.label.trim().is_empty() {
+            rev.role.clone()
+        } else {
+            rev.label.clone()
+        };
+        let (kind_tag, detail_tag) = match rev.semantic_kind.as_str() {
+            "photo_object" => ("photo_semantic_cutout", "智能语义抠图"),
+            "menu_item" => ("expanded_submenu_item", "展开子菜单项"),
+            _ => ("vlm_corrected_ui", "视觉模型纠偏控件"),
+        };
+        let mut lines = vec![
+            format!("[DSB-PICK #{n} | kind={kind_tag}]"),
+            format!(
+                "应用: {} | 主体: label=\"{}\" role={} rect=({},{},{}x{})",
+                target_exe, lbl, rev.role, rev.rect.x, rev.rect.y, rev.rect.w, rev.rect.h
+            ),
+        ];
+        if let Some(poly) = rev.polygon.as_ref() {
+            lines.push(format!("polygon_vertices: {}", poly.len()));
+        }
+        if !win_title.trim().is_empty() {
+            lines.push(format!("window: \"{}\"", win_title.trim()));
+        }
+        if let Some(sp) = screenshot_path.as_deref() {
+            lines.push(format!("screenshot_path: {sp}"));
+        }
+        lines.push("[/DSB-PICK]".to_string());
+        let cap = CapsulePayload {
+            summary: CapsuleQuoteSummary {
+                label: badge.clone(),
+                title: truncate_chars(&format!("{badge} {lbl}"), 44),
+                detail: truncate_chars(detail_tag, 44),
+                body: truncate_chars(&format!("{lbl} ({}x{})", rev.rect.w, rev.rect.h), 110),
+            },
+            text: lines.join("\n"),
+        };
+        inject_capsule_into_bar_with_meta(app, &cap, None, None);
+        return;
+    }
+
+    // External community plugin `tap_override` hook (allows third-party CAD/3D/DAW plugins
+    // to take over single-click entity picking cleanly without modifying Rust!)
+    if try_execute_external_plugin_tap_override(app, &shared, x, y, pre_capture.as_ref()) {
+        return;
+    }
+
     // Specialized Office / WPS tap handling:
     // - Excel / WPS Spreadsheets: single-click picks a single worksheet cell
     // - PowerPoint / WPS Presentation: single-click picks a single design element (text/shape/table/picture)
@@ -896,13 +1331,226 @@ pub fn execute_tap_pick(
 
     let win_rect = get_window_screen_rect(root_hwnd);
     let target_exe = office::fast_exe_basename_for_pid(target_pid);
-    let ignore_bg = should_ignore_background_for_app(&target_exe, &win_class);
+    // P0-1 + CAD UX: Never fall through to UIA or background pick on SolidWorks.
+    if solidworks::is_solidworks_exe(&target_exe) {
+        return;
+    }
+    let prof = profile::get_effective_profile(&target_exe);
+    let ignore_bg =
+        prof.ignore_background || should_ignore_background_for_app(&target_exe, &win_class);
 
-    let uia_info = UIAutomation::new().ok().and_then(|auto| {
-        let walker = auto.get_control_view_walker().ok()?;
-        let el = find_target_uia_element(&auto, &walker, root_hwnd, target_pid, x, y)?;
-        Some(extract_uia_element_info(&el, &walker, true))
-    });
+    // Universal L2/L3 Hit-Map tap pick for UIA-forbidden / Hit-Map-first apps (AutoCAD, Blender,
+    // Photoshop, RDP/ToDesk/Sunlogin, or auto-healed legacy apps) with Stage B semantic enrichment
+    // (Native MSAA/Win32 + Passive Tooltip Catcher + 10ms built-in Windows OCR)!
+    let prefer_hitmap_first = prof.uia_policy == profile::UiaPolicy::Forbidden
+        || !matches!(
+            prof.preferred_layers.first(),
+            Some(profile::GroundingLayer::Uia)
+        );
+    let mut picked_hitmap: Option<(hitmap::HitMapEntry, HWND, String)> = None;
+    if prefer_hitmap_first {
+        picked_hitmap = inspect_non_uia_hitmap_at(root_hwnd, x, y, &prof);
+    }
+
+    let uia_info = if picked_hitmap.is_none() && prof.uia_policy != profile::UiaPolicy::Forbidden {
+        UIAutomation::new().ok().and_then(|auto| {
+            let walker = auto.get_control_view_walker().ok()?;
+            let el = find_target_uia_element(&auto, &walker, root_hwnd, target_pid, x, y)?;
+            Some(extract_uia_element_info(&el, &walker, true))
+        })
+    } else {
+        None
+    };
+
+    // If UIA missed (returned None or Background on a Canvas/WebGL/custom button), check whether
+    // Dose 1 Shake-to-Wake already cached a visually-located button at `(x, y)`!
+    if picked_hitmap.is_none() {
+        let uia_is_element = uia_info
+            .as_ref()
+            .is_some_and(|i| classify_hover_target(i, win_rect, &win_class) == HoverTargetKind::Element);
+        if !uia_is_element {
+            let (child_hwnd, child_class, _) = resolve_child_hwnd_at(root_hwnd, x, y);
+            if let Some(entry) = hitmap::lookup_cached_any_source(child_hwnd.0 as isize, x, y) {
+                picked_hitmap = Some((entry, child_hwnd, child_class));
+            }
+        }
+    }
+
+    if let Some((entry, child_hwnd, child_class)) = picked_hitmap {
+        let cfg = shared.config.lock().map(|c| c.clone()).unwrap_or_default();
+        let n = shared.allocate_pick_number();
+        let badge = circled_badge(n);
+        if let Some(ov) = app.get_webview_window("overlay") {
+            let _ = ov.emit("pen:picked", serde_json::json!({ "n": n, "rect": entry.rect }));
+        }
+        let owned_cap;
+        let raw_ref = match pre_capture.as_ref() {
+            Some(r) => Some(r),
+            None => {
+                owned_cap = capture_target_window_bitblt(root_hwnd, x, y).ok();
+                owned_cap.as_ref()
+            }
+        };
+        let screenshot_path = raw_ref.and_then(|raw| {
+            save_annotated_capture(app, raw, Some(entry.rect), &[], n, &cfg)
+                .ok()
+                .map(|p| p.to_string_lossy().to_string())
+        });
+        // Stage B fast enrichment (Native MSAA/Win32 + live Tooltip Catcher + session cache)
+        let fast_enriched = enricher::enrich_box_semantics(
+            child_hwnd,
+            target_pid,
+            &target_exe,
+            entry.rect,
+            &entry.label,
+            &entry.description,
+            &entry.role,
+            None,
+            false,
+        );
+        let needs_ocr = fast_enriched.label.trim().is_empty() && raw_ref.is_some();
+        let cap_id = format!("cap-hm-{n}-{}", profile::now_unix_secs());
+        let initial_label = if needs_ocr {
+            "按钮 · 识别中…".to_string()
+        } else if fast_enriched.label.trim().is_empty() {
+            fast_enriched.role.clone()
+        } else {
+            fast_enriched.label.clone()
+        };
+        let app_label = if prof.display_name.is_empty() {
+            target_exe.clone()
+        } else {
+            prof.display_name.clone()
+        };
+        let build_hm_capsule = |lbl: &str, desc: &str| -> CapsulePayload {
+            let mut lines = vec![
+                format!("[DSB-PICK #{n} | kind=ui_hitmap]"),
+                format!(
+                    "应用: {} ({}) | 控件: role={} label=\"{}\" class=\"{}\" rect=({},{},{}x{})",
+                    app_label,
+                    target_exe,
+                    fast_enriched.role,
+                    lbl,
+                    child_class,
+                    entry.rect.x,
+                    entry.rect.y,
+                    entry.rect.w,
+                    entry.rect.h
+                ),
+            ];
+            if !desc.is_empty() {
+                lines.push(format!("description: \"{desc}\""));
+            }
+            if !win_title.trim().is_empty() {
+                lines.push(format!("window: \"{}\"", win_title.trim()));
+            }
+            if let Some(sp) = screenshot_path.as_deref() {
+                lines.push(format!("screenshot_path: {sp}"));
+            }
+            lines.push("[/DSB-PICK]".to_string());
+            CapsulePayload {
+                summary: CapsuleQuoteSummary {
+                    label: badge.clone(),
+                    title: truncate_chars(&format!("{badge} {lbl}"), 44),
+                    detail: truncate_chars(&format!("{app_label} · {}", fast_enriched.role), 44),
+                    body: truncate_chars(&format!("{lbl} ({child_class})"), 110),
+                },
+                text: lines.join("\n"),
+            }
+        };
+        let initial_cap = build_hm_capsule(&initial_label, &fast_enriched.description);
+        inject_capsule_into_bar_with_meta(
+            app,
+            &initial_cap,
+            Some(&cap_id),
+            Some(serde_json::json!({
+                "exe": target_exe,
+                "containerClass": child_class,
+            })),
+        );
+        let toast_msg = if needs_ocr {
+            "已抓取按钮 · 后台补全名称…".to_string()
+        } else {
+            format!("已加入 {app_label} 控件")
+        };
+        emit_pick_toast(app, &toast_msg);
+        if needs_ocr {
+            if let Some(raw_cloned) = raw_ref.cloned() {
+                let app_bg = app.clone();
+                let cap_id_bg = cap_id.clone();
+                let rect_bg = entry.rect;
+                let role_bg = fast_enriched.role.clone();
+                let desc_bg = fast_enriched.description.clone();
+                let cls_bg = child_class.clone();
+                let exe_bg = target_exe.clone();
+                let app_lbl_bg = app_label.clone();
+                let win_t_bg = win_title.clone();
+                let sp_bg = screenshot_path.clone();
+                let badge_bg = badge.clone();
+                let child_raw_bg = child_hwnd.0 as isize;
+                let _ = std::thread::Builder::new()
+                    .name(format!("atp-hm-ocr-{n}"))
+                    .spawn(move || {
+                        let full = enricher::enrich_box_semantics(
+                            HWND(child_raw_bg as *mut std::ffi::c_void),
+                            target_pid,
+                            &exe_bg,
+                            rect_bg,
+                            "",
+                            &desc_bg,
+                            &role_bg,
+                            Some(&raw_cloned),
+                            true,
+                        );
+                        let final_lbl = if !full.label.trim().is_empty() {
+                            full.label
+                        } else {
+                            "图标按钮".to_string()
+                        };
+                        let final_desc = full.description;
+                        let mut lines = vec![
+                            format!("[DSB-PICK #{n} | kind=ui_hitmap]"),
+                            format!(
+                                "应用: {} ({}) | 控件: role={} label=\"{}\" class=\"{}\" rect=({},{},{}x{})",
+                                app_lbl_bg,
+                                exe_bg,
+                                role_bg,
+                                final_lbl,
+                                cls_bg,
+                                rect_bg.x,
+                                rect_bg.y,
+                                rect_bg.w,
+                                rect_bg.h
+                            ),
+                        ];
+                        if !final_desc.is_empty() {
+                            lines.push(format!("description: \"{final_desc}\""));
+                        }
+                        if !win_t_bg.trim().is_empty() {
+                            lines.push(format!("window: \"{}\"", win_t_bg.trim()));
+                        }
+                        if let Some(sp) = sp_bg.as_deref() {
+                            lines.push(format!("screenshot_path: {sp}"));
+                        }
+                        lines.push("[/DSB-PICK]".to_string());
+                        let patched = CapsulePayload {
+                            summary: CapsuleQuoteSummary {
+                                label: badge_bg.clone(),
+                                title: truncate_chars(&format!("{badge_bg} {final_lbl}"), 44),
+                                detail: truncate_chars(&format!("{app_lbl_bg} · {role_bg}"), 44),
+                                body: truncate_chars(&format!("{final_lbl} ({cls_bg})"), 110),
+                            },
+                            text: lines.join("\n"),
+                        };
+                        patch_capsule_in_bar(&app_bg, &cap_id_bg, &patched);
+                    });
+            }
+        }
+        return;
+    }
+    if prof.uia_policy == profile::UiaPolicy::Forbidden {
+        return;
+    }
 
     let mut kind = match uia_info.as_ref() {
         Some(info) => classify_hover_target(info, win_rect, &win_class),
@@ -1049,714 +1697,6 @@ pub enum BlueGestureKind {
     Box,
     /// Curved, looping, or irregular freehand stroke -> Freehand Lasso Select
     Lasso,
-}
-
-/// CAD-style automatic Box vs Lasso trajectory classifier.
-/// Straight/monotonic diagonal drags classify as `Box`; curving, hooking, reversing,
-/// or looping trajectories seamlessly switch to `Lasso`.
-pub fn classify_blue_gesture(points: &[(i32, i32)]) -> BlueGestureKind {
-    if points.len() < 3 {
-        return BlueGestureKind::Box;
-    }
-    let start = points[0];
-    let end = *points.last().unwrap_or(&start);
-    let dx_total = (end.0 - start.0) as f64;
-    let dy_total = (end.1 - start.1) as f64;
-    let chord = dx_total.hypot(dy_total);
-
-    let mut arc_len = 0.0_f64;
-    let (mut min_x, mut max_x) = (start.0, start.0);
-    let (mut min_y, mut max_y) = (start.1, start.1);
-    for w in points.windows(2) {
-        let seg_dx = (w[1].0 - w[0].0) as f64;
-        let seg_dy = (w[1].1 - w[0].1) as f64;
-        arc_len += seg_dx.hypot(seg_dy);
-        min_x = min_x.min(w[1].0);
-        max_x = max_x.max(w[1].0);
-        min_y = min_y.min(w[1].1);
-        max_y = max_y.max(w[1].1);
-    }
-
-    if arc_len < 36.0 {
-        return BlueGestureKind::Box;
-    }
-    if chord < 24.0 {
-        // Closed loop returning near start point
-        return BlueGestureKind::Lasso;
-    }
-
-    let overshoot_x_pos = max_x - start.0.max(end.0);
-    let overshoot_x_neg = start.0.min(end.0) - min_x;
-    let overshoot_y_pos = max_y - start.1.max(end.1);
-    let overshoot_y_neg = start.1.min(end.1) - min_y;
-    let max_overshoot = overshoot_x_pos
-        .max(overshoot_x_neg)
-        .max(overshoot_y_pos)
-        .max(overshoot_y_neg);
-    if max_overshoot > 26 {
-        return BlueGestureKind::Lasso;
-    }
-
-    let straightness = chord / arc_len.max(1.0);
-    if straightness < 0.80 {
-        return BlueGestureKind::Lasso;
-    }
-
-    let mut max_perp_dev = 0.0_f64;
-    for &(px, py) in &points[1..points.len() - 1] {
-        let cross = ((px - start.0) as f64 * dy_total - (py - start.1) as f64 * dx_total).abs();
-        let perp = cross / chord;
-        if perp > max_perp_dev {
-            max_perp_dev = perp;
-        }
-    }
-    if max_perp_dev > 34.0 && (max_perp_dev / chord) > 0.24 {
-        return BlueGestureKind::Lasso;
-    }
-
-    BlueGestureKind::Box
-}
-
-pub fn point_in_polygon(pt: (i32, i32), poly: &[(i32, i32)]) -> bool {
-    if poly.len() < 3 {
-        return false;
-    }
-    let (px, py) = (pt.0 as f64, pt.1 as f64);
-    let mut inside = false;
-    let mut j = poly.len() - 1;
-    for i in 0..poly.len() {
-        let (xi, yi) = (poly[i].0 as f64, poly[i].1 as f64);
-        let (xj, yj) = (poly[j].0 as f64, poly[j].1 as f64);
-        let intersects = ((yi > py) != (yj > py))
-            && (px < (xj - xi) * (py - yi) / ((yj - yi) + 1e-12) + xi);
-        if intersects {
-            inside = !inside;
-        }
-        j = i;
-    }
-    inside
-}
-
-fn rect_contains_pt(r: ScreenRect, pt: (i32, i32)) -> bool {
-    pt.0 >= r.x && pt.0 <= r.x + r.w && pt.1 >= r.y && pt.1 <= r.y + r.h
-}
-
-pub fn rects_intersect(a: ScreenRect, b: ScreenRect) -> bool {
-    a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y
-}
-
-fn segments_intersect(a: (i32, i32), b: (i32, i32), c: (i32, i32), d: (i32, i32)) -> bool {
-    fn orient(p: (i32, i32), q: (i32, i32), r: (i32, i32)) -> i64 {
-        (q.0 - p.0) as i64 * (r.1 - p.1) as i64 - (q.1 - p.1) as i64 * (r.0 - p.0) as i64
-    }
-    fn on_seg(p: (i32, i32), q: (i32, i32), r: (i32, i32)) -> bool {
-        q.0 >= p.0.min(r.0) && q.0 <= p.0.max(r.0) && q.1 >= p.1.min(r.1) && q.1 <= p.1.max(r.1)
-    }
-    let o1 = orient(a, b, c);
-    let o2 = orient(a, b, d);
-    let o3 = orient(c, d, a);
-    let o4 = orient(c, d, b);
-
-    if (o1 > 0 && o2 < 0 || o1 < 0 && o2 > 0) && (o3 > 0 && o4 < 0 || o3 < 0 && o4 > 0) {
-        return true;
-    }
-    (o1 == 0 && on_seg(a, c, b))
-        || (o2 == 0 && on_seg(a, d, b))
-        || (o3 == 0 && on_seg(c, a, d))
-        || (o4 == 0 && on_seg(c, b, d))
-}
-
-pub fn segment_intersects_rect(a: (i32, i32), b: (i32, i32), r: ScreenRect) -> bool {
-    if rect_contains_pt(r, a) || rect_contains_pt(r, b) {
-        return true;
-    }
-    let seg_min_x = a.0.min(b.0);
-    let seg_max_x = a.0.max(b.0);
-    let seg_min_y = a.1.min(b.1);
-    let seg_max_y = a.1.max(b.1);
-    if seg_max_x < r.x || seg_min_x > r.x + r.w || seg_max_y < r.y || seg_min_y > r.y + r.h {
-        return false;
-    }
-    let tl = (r.x, r.y);
-    let tr = (r.x + r.w, r.y);
-    let br = (r.x + r.w, r.y + r.h);
-    let bl = (r.x, r.y + r.h);
-    segments_intersect(a, b, tl, tr)
-        || segments_intersect(a, b, tr, br)
-        || segments_intersect(a, b, br, bl)
-        || segments_intersect(a, b, bl, tl)
-}
-
-/// True if the freehand blue polyline touches/crosses `r` OR encloses `r` (center or any corner inside polygon).
-pub fn polyline_touches_or_encloses_rect(points: &[(i32, i32)], r: ScreenRect) -> bool {
-    if points.is_empty() || r.w <= 0 || r.h <= 0 {
-        return false;
-    }
-    for w in points.windows(2) {
-        if segment_intersects_rect(w[0], w[1], r) {
-            return true;
-        }
-    }
-    if points.len() >= 3 {
-        let cx = r.x + r.w / 2;
-        let cy = r.y + r.h / 2;
-        let probe_pts = [
-            (cx, cy),
-            (r.x + 2, r.y + 2),
-            (r.x + r.w - 2, r.y + 2),
-            (r.x + r.w - 2, r.y + r.h - 2),
-            (r.x + 2, r.y + r.h - 2),
-        ];
-        if probe_pts.iter().any(|&p| point_in_polygon(p, points)) {
-            return true;
-        }
-    }
-    false
-}
-
-fn is_strict_foreground_for_blue(
-    info: &UiaElementInfo,
-    win_rect: ScreenRect,
-    win_class: &str,
-) -> bool {
-    if !is_valid_tap_element(info) {
-        return false;
-    }
-    // Desktop: ONLY allow actual desktop icons (ListItem), never wallpaper/shell list/pane
-    if is_desktop_window_class(win_class) {
-        return info.control_type == "ListItem";
-    }
-    if classify_hover_target(info, win_rect, win_class) != HoverTargetKind::Element {
-        return false;
-    }
-    // Never treat giant window-filling container panels as selected foreground items
-    let win_area = (win_rect.w.max(1) as i64) * (win_rect.h.max(1) as i64);
-    let el_area = (info.rect.w.max(0) as i64) * (info.rect.h.max(0) as i64);
-    let is_container = matches!(
-        info.control_type.as_str(),
-        "Pane" | "Group" | "Window" | "Document" | "Custom" | "List" | "Table" | "Tree"
-    );
-    if is_container && el_area * 100 >= win_area * 55 {
-        return false;
-    }
-    true
-}
-
-struct BlueTextRangeHit {
-    text: String,
-    start_pt: (i32, i32),
-    end_pt: (i32, i32),
-    bbox: ScreenRect,
-    container_info: UiaElementInfo,
-}
-
-fn point_distance_to_rect(pt: (i32, i32), r: ScreenRect) -> i32 {
-    let dx = if pt.0 < r.x {
-        r.x - pt.0
-    } else if pt.0 > r.x + r.w {
-        pt.0 - (r.x + r.w)
-    } else {
-        0
-    };
-    let dy = if pt.1 < r.y {
-        r.y - pt.1
-    } else if pt.1 > r.y + r.h {
-        pt.1 - (r.y + r.h)
-    } else {
-        0
-    };
-    ((dx as f64).hypot(dy as f64)) as i32
-}
-
-fn find_text_pattern_ancestor(
-    el: &UIElement,
-    walker: &UITreeWalker,
-) -> Option<(UIElement, UITextPattern)> {
-    let mut cur = el.clone();
-    for _ in 0..5 {
-        if let Ok(tp) = cur.get_pattern::<UITextPattern>() {
-            return Some((cur, tp));
-        }
-        match walker.get_parent(&cur) {
-            Ok(p) => cur = p,
-            Err(_) => break,
-        }
-    }
-    None
-}
-
-fn range_char_distance_to_pt(
-    tp: &UITextPattern,
-    pt: (i32, i32),
-) -> Option<i32> {
-    let probe = tp.get_range_from_point(UiaPoint::new(pt.0, pt.1)).ok()?;
-    let enclosing = probe.get_enclosing_element().ok()?;
-    let r = enclosing.get_bounding_rectangle().ok()?;
-    let sr = ScreenRect {
-        x: r.get_left(),
-        y: r.get_top(),
-        w: (r.get_right() - r.get_left()).max(1),
-        h: (r.get_bottom() - r.get_top()).max(1),
-    };
-    Some(point_distance_to_rect(pt, sr))
-}
-
-fn try_extract_win32_edit_char_range(
-    el: &UIElement,
-    tp: Option<&UITextPattern>,
-    start_pt: (i32, i32),
-    end_pt: (i32, i32),
-) -> Option<String> {
-    use uiautomation::patterns::UIValuePattern;
-    use windows::Win32::Foundation::{LPARAM, WPARAM};
-    use windows::Win32::Graphics::Gdi::ScreenToClient;
-    use windows::Win32::UI::WindowsAndMessaging::SendMessageW;
-
-    const EM_CHARFROMPOS: u32 = 0x00D7;
-    // Standard Win32 Edit / WinForms TextBox passes packed MAKELPARAM(x, y) by value (safe cross-process).
-    // RichEdit expects a pointer in LPARAM which is NOT marshaled cross-process, so skip it here.
-    let class_lower = el
-        .get_classname()
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-    if class_lower.contains("richedit") || !class_lower.contains("edit") {
-        return None;
-    }
-    let raw_hwnd: isize = el.get_native_window_handle().ok()?.into();
-    if raw_hwnd == 0 {
-        return None;
-    }
-    let hwnd = HWND(raw_hwnd as *mut std::ffi::c_void);
-    let mut c1 = POINT {
-        x: start_pt.0,
-        y: start_pt.1,
-    };
-    let mut c2 = POINT {
-        x: end_pt.0,
-        y: end_pt.1,
-    };
-    unsafe {
-        if !ScreenToClient(hwnd, &mut c1).as_bool() || !ScreenToClient(hwnd, &mut c2).as_bool() {
-            return None;
-        }
-    }
-
-    let char_index_at = |pt: &POINT| -> usize {
-        let lparam = ((pt.x & 0xFFFF) | ((pt.y & 0xFFFF) << 16)) as isize;
-        let res = unsafe {
-            SendMessageW(
-                hwnd,
-                EM_CHARFROMPOS,
-                Some(WPARAM(0)),
-                Some(LPARAM(lparam)),
-            )
-        };
-        (res.0 as usize) & 0xFFFF
-    };
-
-    let idx1 = char_index_at(&c1);
-    let idx2 = char_index_at(&c2);
-    let lo = idx1.min(idx2);
-    let hi = idx1.max(idx2);
-    if hi <= lo {
-        return None;
-    }
-
-    let full = tp
-        .and_then(|p| p.get_document_range().ok())
-        .and_then(|d| d.get_text(32_000).ok())
-        .or_else(|| {
-            el.get_pattern::<UIValuePattern>()
-                .ok()
-                .and_then(|vp| vp.get_value().ok())
-        })?;
-    let utf16: Vec<u16> = full.encode_utf16().collect();
-    if lo >= utf16.len() {
-        return None;
-    }
-    let end_excl = (hi + 1).min(utf16.len());
-    let sliced = String::from_utf16_lossy(&utf16[lo..end_excl])
-        .replace("\r\n", "\n")
-        .replace('\r', "\n")
-        .trim()
-        .to_string();
-    if sliced.chars().count() >= 2 {
-        Some(sliced)
-    } else {
-        None
-    }
-}
-
-/// Optimized diagonal/horizontal blue text sweep:
-/// 1) Uses UIA `UITextPattern::get_range_from_point(start..end)` to capture exact characters
-///    from the first character touched to the last character touched across multiple lines.
-/// 2) Falls back to reading-order sibling `Text` sweep when both endpoints hit sibling text rows.
-fn try_extract_blue_text_range(
-    points: &[(i32, i32)],
-    bbox: ScreenRect,
-    root_hwnd: HWND,
-    expected_pid: u32,
-    win_class: &str,
-) -> Option<BlueTextRangeHit> {
-    if points.len() < 2 || is_desktop_window_class(win_class) {
-        return None;
-    }
-    let start_pt = points[0];
-    let end_pt = *points.last()?;
-    let chord = ((end_pt.0 - start_pt.0) as f64).hypot((end_pt.1 - start_pt.1) as f64);
-    if chord < 18.0 {
-        return None;
-    }
-    // Skip closed lasso loops around icons/controls; diagonal/horizontal text sweeps are open strokes
-    let mut arc_len = 0.0_f64;
-    for w in points.windows(2) {
-        arc_len += ((w[1].0 - w[0].0) as f64).hypot((w[1].1 - w[0].1) as f64);
-    }
-    if chord / arc_len.max(1.0) < 0.65 {
-        return None;
-    }
-
-    let auto = UIAutomation::new().ok()?;
-    let walker = auto.get_control_view_walker().ok()?;
-    let el_start = find_target_uia_element(&auto, &walker, root_hwnd, expected_pid, start_pt.0, start_pt.1)?;
-    let el_end = find_target_uia_element(&auto, &walker, root_hwnd, expected_pid, end_pt.0, end_pt.1)?;
-
-    // Reject if user clearly started/ended on an interactive non-text widget (button, checkbox, icon, etc.)
-    let start_ct = format!("{:?}", el_start.get_control_type().unwrap_or(ControlType::Custom));
-    let end_ct = format!("{:?}", el_end.get_control_type().unwrap_or(ControlType::Custom));
-    let is_widget = |ct: &str| {
-        matches!(
-            ct,
-            "Button"
-                | "CheckBox"
-                | "RadioButton"
-                | "ComboBox"
-                | "MenuItem"
-                | "TabItem"
-                | "ListItem"
-                | "TreeItem"
-                | "Slider"
-                | "ScrollBar"
-                | "Image"
-        )
-    };
-    if is_widget(&start_ct) || is_widget(&end_ct) {
-        return None;
-    }
-
-    // Tier 1: Exact character-level UIA TextPattern RangeFromPoint
-    if let Some((tp_el, tp)) = find_text_pattern_ancestor(&el_start, &walker) {
-        let start_near = range_char_distance_to_pt(&tp, start_pt)
-            .map(|d| d <= 52)
-            .unwrap_or(true);
-        let end_near = range_char_distance_to_pt(&tp, end_pt)
-            .map(|d| d <= 52)
-            .unwrap_or(true);
-
-        if start_near && end_near {
-            let r_start_res = tp.get_range_from_point(UiaPoint::new(start_pt.0, start_pt.1));
-            let r_end_res = tp.get_range_from_point(UiaPoint::new(end_pt.0, end_pt.1));
-            match (r_start_res, r_end_res) {
-                (Ok(r_start), Ok(r_end)) => {
-                    let cmp = r_start
-                        .compare_endpoints(
-                            TextPatternRangeEndpoint::Start,
-                            &r_end,
-                            TextPatternRangeEndpoint::Start,
-                        )
-                        .unwrap_or(0);
-                    let (first_r, last_r) = if cmp <= 0 {
-                        (r_start, r_end)
-                    } else {
-                        (r_end, r_start)
-                    };
-
-                    let _ = first_r.move_endpoint_by_range(
-                        TextPatternRangeEndpoint::End,
-                        &last_r,
-                        TextPatternRangeEndpoint::End,
-                    );
-                    // Include the final character under the end cursor tip
-                    let _ = first_r.move_endpoint_by_unit(
-                        TextPatternRangeEndpoint::End,
-                        TextUnit::Character,
-                        1,
-                    );
-                    if let Ok(raw_text) = first_r.get_text(8000) {
-                        let cleaned = raw_text.replace("\r\n", "\n").trim().to_string();
-                        if cleaned.chars().count() >= 2 {
-                            let container_info = extract_uia_element_info(&tp_el, &walker, false);
-                            return Some(BlueTextRangeHit {
-                                text: cleaned,
-                                start_pt,
-                                end_pt,
-                                bbox,
-                                container_info,
-                            });
-                        }
-                    }
-                }
-                (e1, e2) => {
-                    log::debug!(
-                        "[BLUE-TEXT] RangeFromPoint failed: start={:?} end={:?}",
-                        e1.err(),
-                        e2.err()
-                    );
-                }
-            }
-        }
-
-        // Tier 1b (inside TextPattern provider): Win32 Edit fallback
-        if let Some(text) = try_extract_win32_edit_char_range(&tp_el, Some(&tp), start_pt, end_pt) {
-            let container_info = extract_uia_element_info(&tp_el, &walker, false);
-            return Some(BlueTextRangeHit {
-                text,
-                start_pt,
-                end_pt,
-                bbox,
-                container_info,
-            });
-        }
-    }
-
-    // Tier 1c: Classic Win32 Edit / WinForms TextBox (exposes ValuePattern instead of TextPattern)
-    if let Some(text) = try_extract_win32_edit_char_range(&el_start, None, start_pt, end_pt) {
-        let container_info = extract_uia_element_info(&el_start, &walker, false);
-        return Some(BlueTextRangeHit {
-            text,
-            start_pt,
-            end_pt,
-            bbox,
-            container_info,
-        });
-    }
-
-    // Tier 2: Multi-line sibling `Text` sweep (for WinForms/WPF/Qt/chat UIs without TextPattern)
-    if start_ct == "Text" && end_ct == "Text" {
-        if let Ok(parent) = walker.get_parent(&el_start) {
-            let y_min = start_pt.1.min(end_pt.1) - 6;
-            let y_max = start_pt.1.max(end_pt.1) + 6;
-            let mut rows: Vec<(i32, i32, String)> = Vec::new();
-            if let Ok(mut child) = walker.get_first_child(&parent) {
-                for _ in 0..100 {
-                    let ct = format!("{:?}", child.get_control_type().unwrap_or(ControlType::Custom));
-                    if ct == "Text" {
-                        if let Ok(rc) = child.get_bounding_rectangle() {
-                            let cy = (rc.get_top() + rc.get_bottom()) / 2;
-                            if cy >= y_min && cy <= y_max {
-                                let name = child.get_name().unwrap_or_default().trim().to_string();
-                                if !name.is_empty() {
-                                    rows.push((rc.get_top(), rc.get_left(), name));
-                                }
-                            }
-                        }
-                    }
-                    match walker.get_next_sibling(&child) {
-                        Ok(next) => child = next,
-                        Err(_) => break,
-                    }
-                }
-            }
-            if rows.len() >= 2 {
-                rows.sort_by_key(|(y, x, _)| (*y / 14, *x));
-                let joined = rows
-                    .into_iter()
-                    .map(|(_, _, s)| s)
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                if joined.chars().count() >= 2 {
-                    let container_info = extract_uia_element_info(&el_start, &walker, false);
-                    return Some(BlueTextRangeHit {
-                        text: joined,
-                        start_pt,
-                        end_pt,
-                        bbox,
-                        container_info,
-                    });
-                }
-            }
-        }
-    }
-
-    None
-}
-
-fn sample_blue_foreground_elements(
-    points: &[(i32, i32)],
-    bbox: ScreenRect,
-    gesture: BlueGestureKind,
-    expected_pid: u32,
-    cap: usize,
-) -> Vec<UiaElementInfo> {
-    let mut out: Vec<UiaElementInfo> = Vec::new();
-    let Ok(auto) = UIAutomation::new() else {
-        return out;
-    };
-    let Ok(walker) = auto.get_control_view_walker() else {
-        return out;
-    };
-
-    let mut probe_points: Vec<(i32, i32)> = Vec::with_capacity(64);
-    match gesture {
-        BlueGestureKind::Box => {
-            let cols = 6usize;
-            let rows = 6usize;
-            for r in 0..rows {
-                for c in 0..cols {
-                    let px = bbox.x + ((bbox.w as usize) * (2 * c + 1) / (2 * cols)) as i32;
-                    let py = bbox.y + ((bbox.h as usize) * (2 * r + 1) / (2 * rows)) as i32;
-                    probe_points.push((px, py));
-                }
-            }
-            probe_points.push((bbox.x + 4, bbox.y + 4));
-            probe_points.push((bbox.x + bbox.w - 4, bbox.y + bbox.h - 4));
-        }
-        BlueGestureKind::Lasso => {
-            // 1. Sample along the blue stroke polyline (every ~20px, up to 34 pts) -> elements TOUCHED
-            let mut accum = 0.0_f64;
-            let step = 20.0_f64;
-            if let Some(&first) = points.first() {
-                probe_points.push(first);
-            }
-            for w in points.windows(2) {
-                let d = ((w[1].0 - w[0].0) as f64).hypot((w[1].1 - w[0].1) as f64);
-                accum += d;
-                if accum >= step {
-                    probe_points.push(w[1]);
-                    accum = 0.0;
-                    if probe_points.len() >= 34 {
-                        break;
-                    }
-                }
-            }
-            if let Some(&last) = points.last() {
-                probe_points.push(last);
-            }
-
-            // 2. Sample interior points enclosed inside the blue polygon -> elements ENCLOSED
-            let grid = 8usize;
-            let mut interior_added = 0usize;
-            for r in 0..grid {
-                for c in 0..grid {
-                    if interior_added >= 24 {
-                        break;
-                    }
-                    let px = bbox.x + ((bbox.w as usize) * (2 * c + 1) / (2 * grid)) as i32;
-                    let py = bbox.y + ((bbox.h as usize) * (2 * r + 1) / (2 * grid)) as i32;
-                    if point_in_polygon((px, py), points) {
-                        probe_points.push((px, py));
-                        interior_added += 1;
-                    }
-                }
-            }
-        }
-    }
-
-    let mut seen_els: HashSet<String> = HashSet::new();
-    let mut swept_parents: HashSet<String> = HashSet::new();
-    let started = std::time::Instant::now();
-
-    let geom_matches = |rect: ScreenRect| -> bool {
-        match gesture {
-            BlueGestureKind::Box => rects_intersect(bbox, rect),
-            BlueGestureKind::Lasso => polyline_touches_or_encloses_rect(points, rect),
-        }
-    };
-
-    for (px, py) in probe_points {
-        if out.len() >= cap || started.elapsed().as_millis() > 480 {
-            break;
-        }
-        let (rhwnd, pid, _, wclass) = resolve_root_window_at(px, py);
-        if pid == 0 || (expected_pid != 0 && pid != expected_pid && !is_desktop_window_class(&wclass)) {
-            continue;
-        }
-        let win_rect = get_window_screen_rect(rhwnd);
-        let Some(el) = find_target_uia_element(&auto, &walker, rhwnd, pid, px, py) else {
-            continue;
-        };
-        let info = extract_uia_element_info(&el, &walker, false);
-        if is_strict_foreground_for_blue(&info, win_rect, &wclass) && geom_matches(info.rect) {
-            let key = format!(
-                "{}:{}:{}:{}:{}",
-                info.control_type_id, info.rect.x, info.rect.y, info.name, info.automation_id
-            );
-            if seen_els.insert(key) {
-                out.push(info.clone());
-            }
-
-            // Sibling container sweep: catches 100% of touched/enclosed ListItems, icons, buttons, tabs, etc.
-            let is_sweepable = matches!(
-                info.control_type.as_str(),
-                "ListItem"
-                    | "TreeItem"
-                    | "DataItem"
-                    | "TabItem"
-                    | "Button"
-                    | "CheckBox"
-                    | "RadioButton"
-                    | "MenuItem"
-                    | "Hyperlink"
-                    | "Text"
-                    | "Edit"
-            );
-            if is_sweepable {
-                if let Ok(parent) = walker.get_parent(&el) {
-                    if let Ok(prc) = parent.get_bounding_rectangle() {
-                        let pkey = format!(
-                            "{}:{}:{}:{}",
-                            pid,
-                            prc.get_left(),
-                            prc.get_top(),
-                            prc.get_right() - prc.get_left()
-                        );
-                        if swept_parents.insert(pkey) {
-                            if let Ok(mut child) = walker.get_first_child(&parent) {
-                                for _ in 0..120 {
-                                    if out.len() >= cap || started.elapsed().as_millis() > 480 {
-                                        break;
-                                    }
-                                    if let Ok(crc) = child.get_bounding_rectangle() {
-                                        let sr = ScreenRect {
-                                            x: crc.get_left(),
-                                            y: crc.get_top(),
-                                            w: (crc.get_right() - crc.get_left()).max(0),
-                                            h: (crc.get_bottom() - crc.get_top()).max(0),
-                                        };
-                                        if sr.w > 2 && sr.h > 2 && geom_matches(sr) {
-                                            let cinfo = extract_uia_element_info(&child, &walker, false);
-                                            if is_strict_foreground_for_blue(&cinfo, win_rect, &wclass) {
-                                                let ckey = format!(
-                                                    "{}:{}:{}:{}:{}",
-                                                    cinfo.control_type_id,
-                                                    cinfo.rect.x,
-                                                    cinfo.rect.y,
-                                                    cinfo.name,
-                                                    cinfo.automation_id
-                                                );
-                                                if seen_els.insert(ckey) {
-                                                    out.push(cinfo);
-                                                }
-                                            }
-                                        }
-                                    }
-                                    match walker.get_next_sibling(&child) {
-                                        Ok(next) => child = next,
-                                        Err(_) => break,
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    // Natural top-to-bottom, left-to-right reading order
-    out.sort_by_key(|e| (e.rect.y / 18, e.rect.x));
-    out.truncate(cap);
-    out
 }
 
 pub fn execute_stroke_pick(
@@ -1913,540 +1853,48 @@ fn execute_red_screenshot_pick(
     inject_capsule_into_bar(app, &capsule);
 }
 
-/// Left-button BLUE drag:
-/// 1) Word / Excel smart selection if inside Office canvas
-/// 2) Diagonal/horizontal text range extraction (UIA TextPattern RangeFromPoint)
-/// 3) CAD-style Auto-Box / Auto-Lasso foreground element group (`元素组`, strictly excluding background)
-fn execute_blue_selection_pick(
-    app: &AppHandle,
-    shared: &AppShared,
-    points: Vec<(i32, i32)>,
-    pre_capture: Option<RawScreenCapture>,
-) {
-    // Keep Word text drag & Excel cell range box on Left drag inside Office
-    if try_execute_office_drag_pick(app, shared, &points, pre_capture.as_ref()) {
-        return;
-    }
-
-    let (mut min_x, mut min_y) = points[0];
-    let (mut max_x, mut max_y) = points[0];
-    for &(px, py) in &points[1..] {
-        min_x = min_x.min(px);
-        min_y = min_y.min(py);
-        max_x = max_x.max(px);
-        max_y = max_y.max(py);
-    }
-    let bbox = ScreenRect {
-        x: min_x,
-        y: min_y,
-        w: (max_x - min_x).max(12),
-        h: (max_y - min_y).max(12),
-    };
-    let gesture = classify_blue_gesture(&points);
-    let start_pt = points[0];
-    let end_pt = *points.last().unwrap_or(&start_pt);
-    let center_x = bbox.x + bbox.w / 2;
-    let center_y = bbox.y + bbox.h / 2;
-
-    let (root_hwnd, target_pid, win_title, win_class) = resolve_root_window_at(start_pt.0, start_pt.1);
-    if target_pid == 0 {
-        if let Some(ov) = app.get_webview_window("overlay") {
-            let _ = ov.emit("pen:clear_stroke", serde_json::json!({}));
-        }
-        return;
-    }
-
-    let cfg = shared.config.lock().map(|c| c.clone()).unwrap_or_default();
-    let proc_meta = inspect_process(target_pid, &cfg.app_source_map);
-    let app_display = if !proc_meta.product_name.is_empty() {
-        proc_meta.product_name.as_str()
-    } else if !proc_meta.exe_name.is_empty() {
-        proc_meta.exe_name.as_str()
-    } else {
-        "App"
-    };
-    let win_rect = get_window_screen_rect(root_hwnd);
-    let mon = MonitorSpace::for_point(center_x, center_y, root_hwnd);
-
-    // Priority 1: Diagonal / horizontal blue text selection
-    if let Some(text_hit) =
-        try_extract_blue_text_range(&points, bbox, root_hwnd, target_pid, &win_class)
-    {
-        let n = shared.allocate_pick_number();
-        let badge = circled_badge(n);
-        if let Some(ov) = app.get_webview_window("overlay") {
-            let pts_json: Vec<serde_json::Value> = points
-                .iter()
-                .map(|&(px, py)| serde_json::json!({ "x": px, "y": py }))
-                .collect();
-            let _ = ov.emit(
-                "pen:picked",
-                serde_json::json!({
-                    "n": n,
-                    "mode": "blue_text",
-                    "color": "blue",
-                    "rect": text_hit.bbox,
-                    "strokes": pts_json,
-                }),
-            );
-        }
-
-        let grounding_lines = grounding::format_drag_grounding(
-            root_hwnd,
-            win_rect,
-            &mon,
-            text_hit.start_pt,
-            text_hit.end_pt,
-            text_hit.bbox,
-        );
-        let one_line_preview = text_hit
-            .text
-            .lines()
-            .map(str::trim)
-            .filter(|l| !l.is_empty())
-            .collect::<Vec<_>>()
-            .join(" ");
-        let short_preview = truncate_chars(&one_line_preview, 22);
-        let char_count = text_hit.text.chars().count();
-
-        let mut lines = Vec::new();
-        lines.push(format!(
-            "[DSB-PICK #{n} badge={badge} kind=blue_text_select chars={char_count} app=\"{}\"]",
-            proc_meta.exe_name
-        ));
-        lines.push(format!("window_title: {}", win_title.trim()));
-        lines.push(format!("window_class: {win_class}"));
-        lines.push(format!(
-            "process: pid={} exe=\"{}\" framework=\"{}\"",
-            proc_meta.pid, proc_meta.exe_path, proc_meta.framework_guess
-        ));
-        lines.extend(grounding_lines);
-        lines.push(format!(
-            "source_control: type={} name=\"{}\"",
-            text_hit.container_info.control_type,
-            truncate_chars(&text_hit.container_info.name, 60)
-        ));
-        lines.push("selected_text:".to_string());
-        lines.push(truncate_chars(&text_hit.text, 6000));
-        lines.push("[/DSB-PICK]".to_string());
-
-        let capsule = CapsulePayload {
-            summary: CapsuleQuoteSummary {
-                label: badge.clone(),
-                title: format!("{badge} 选字 · {short_preview}"),
-                detail: format!("{app_display} · {char_count} 字"),
-                body: truncate_chars(&one_line_preview, 120),
-            },
-            text: lines.join("\n"),
-        };
-
-        log::info!(
-            "Committed Stroke Pick #{n}: mode=blue_text_select chars={char_count} bbox=({},{},{}x{})",
-            bbox.x,
-            bbox.y,
-            bbox.w,
-            bbox.h
-        );
-        inject_capsule_into_bar(app, &capsule);
-        return;
-    }
-
-    // Priority 2: CAD-style Blue Box / Freehand Lasso foreground element selection (NEVER background!)
-    let raw_sampled = sample_blue_foreground_elements(&points, bbox, gesture, target_pid, 80);
-    let sampled = coalesce_inline_text_runs(raw_sampled);
-    if sampled.is_empty() {
-        log::info!(
-            "Blue {:?} found 0 foreground elements (background excluded) in bbox=({},{},{}x{})",
-            gesture,
-            bbox.x,
-            bbox.y,
-            bbox.w,
-            bbox.h
-        );
-        if let Some(ov) = app.get_webview_window("overlay") {
-            let _ = ov.emit("pen:clear_stroke", serde_json::json!({}));
-        }
-        emit_pick_toast(app, "蓝线范围内未检测到前景元素（已自动排除背景）");
-        return;
-    }
-
-    let n = shared.allocate_pick_number();
-
-    if let Some(ov) = app.get_webview_window("overlay") {
-        let pts_json: Vec<serde_json::Value> = points
-            .iter()
-            .map(|&(px, py)| serde_json::json!({ "x": px, "y": py }))
-            .collect();
-        let item_rects: Vec<ScreenRect> = sampled.iter().map(|e| e.rect).collect();
-        let _ = ov.emit(
-            "pen:picked",
-            serde_json::json!({
-                "n": n,
-                "mode": if gesture == BlueGestureKind::Lasso { "blue_lasso" } else { "blue_box" },
-                "color": "blue",
-                "strokes": pts_json,
-                "rect": bbox,
-                "itemRects": item_rects,
-            }),
-        );
-    }
-
-    let adapter_outputs = collect_deep_adapter_outputs(
-        AdapterContext {
-            hwnd: root_hwnd.0 as isize,
-            window_title: win_title.clone(),
-            window_class: win_class.clone(),
-            proc_meta: proc_meta.clone(),
-            primary_element: sampled.first().cloned(),
-            tap_point: Some((center_x, center_y)),
-            broker: shared.broker.clone(),
-        },
-        1200,
-    );
-
-    let grounding_lines =
-        grounding::format_drag_grounding(root_hwnd, win_rect, &mon, start_pt, end_pt, bbox);
-
-    let capsule = if sampled.len() == 1 {
-        build_capsule_payload(
-            n,
-            "blue_select",
-            &win_title,
-            &win_class,
-            &proc_meta,
-            sampled.first(),
-            &sampled,
-            &adapter_outputs,
-            &grounding_lines,
-            Some((&mon, win_rect)),
-            None,
-        )
-    } else {
-        build_blue_element_group_capsule(
-            n,
-            gesture,
-            &win_title,
-            &win_class,
-            &proc_meta,
-            &sampled,
-            &adapter_outputs,
-            &grounding_lines,
-        )
-    };
-
-    log::info!(
-        "Committed Stroke Pick #{n}: mode={} bbox=({},{},{}x{}) sampled={}",
-        if gesture == BlueGestureKind::Lasso {
-            "blue_lasso"
-        } else {
-            "blue_box"
-        },
-        bbox.x,
-        bbox.y,
-        bbox.w,
-        bbox.h,
-        sampled.len()
-    );
-    inject_capsule_into_bar(app, &capsule);
-}
-
-/// Coalesce adjacent inline `type=Text` UIA leaf fragments on the same visual line
-/// (common in Electron / streaming Markdown DOMs where every CJK word or inline code
-/// token is a separate span) into a single continuous text item with a union bbox.
-/// Non-Text interactive controls (Button, Edit, etc.) and far-apart columns are untouched.
-fn coalesce_inline_text_runs(mut elements: Vec<UiaElementInfo>) -> Vec<UiaElementInfo> {
-    if elements.len() <= 1 {
-        return elements;
-    }
-
-    // Sort in natural reading order (same visual line left-to-right, then top-to-bottom)
-    // so adjacent streaming text fragments are contiguous before merging.
-    elements.sort_by(|a, b| {
-        let a_cy = a.rect.y + a.rect.h / 2;
-        let b_cy = b.rect.y + b.rect.h / 2;
-        let line_tol = (a.rect.h.min(b.rect.h).max(12) / 2).clamp(6, 14);
-        if (a_cy - b_cy).abs() <= line_tol {
-            a.rect.x.cmp(&b.rect.x)
-        } else {
-            a.rect.y.cmp(&b.rect.y)
-        }
-    });
-
-    fn is_mergeable_text(el: &UiaElementInfo) -> bool {
-        el.control_type == "Text"
-            && el.automation_id.trim().is_empty()
-            && !el.name.trim().is_empty()
-    }
-
-    fn needs_space_between(prev: &str, next: &str, gap_px: i32) -> bool {
-        let Some(last_ch) = prev.chars().last() else {
-            return false;
-        };
-        let Some(first_ch) = next.chars().next() else {
-            return false;
-        };
-        if last_ch.is_whitespace() || first_ch.is_whitespace() {
-            return false;
-        }
-        if matches!(last_ch, '（' | '(' | '「' | '『' | '【' | '[')
-            || matches!(
-                first_ch,
-                '）' | ')' | '，' | '。' | '！' | '？' | '、' | '：' | '；' | '」' | '』' | '】' | ']' | ',' | '.' | '!' | '?' | ':' | ';'
-            )
-        {
-            return false;
-        }
-        // Inline code pills / spaced runs have >=3px visual gap; also keep space between two ASCII word tokens.
-        gap_px >= 3 || (last_ch.is_ascii_alphanumeric() && first_ch.is_ascii_alphanumeric())
-    }
-
-    let mut merged: Vec<UiaElementInfo> = Vec::with_capacity(elements.len());
-    for el in elements {
-        if let Some(prev) = merged.last_mut() {
-            if is_mergeable_text(prev) && is_mergeable_text(&el) {
-                let prev_cy = prev.rect.y + prev.rect.h / 2;
-                let cur_cy = el.rect.y + el.rect.h / 2;
-                let max_h = prev.rect.h.max(el.rect.h).max(16);
-                let same_line =
-                    (prev.rect.y - el.rect.y).abs() <= 8 && (prev_cy - cur_cy).abs() <= max_h / 2;
-                let gap = el.rect.x - (prev.rect.x + prev.rect.w);
-                if same_line && (-6..=20).contains(&gap) {
-                    if needs_space_between(&prev.name, &el.name, gap) {
-                        prev.name.push(' ');
-                    }
-                    prev.name.push_str(&el.name);
-                    let min_x = prev.rect.x.min(el.rect.x);
-                    let min_y = prev.rect.y.min(el.rect.y);
-                    let max_r = (prev.rect.x + prev.rect.w).max(el.rect.x + el.rect.w);
-                    let max_b = (prev.rect.y + prev.rect.h).max(el.rect.y + el.rect.h);
-                    prev.rect = ScreenRect {
-                        x: min_x,
-                        y: min_y,
-                        w: (max_r - min_x).max(0),
-                        h: (max_b - min_y).max(0),
-                    };
-                    if !el.text_snippet.is_empty() && prev.text_snippet != prev.name {
-                        prev.text_snippet = prev.name.clone();
-                    }
-                    continue;
-                }
-            }
-        }
-        merged.push(el);
-    }
-    merged
-}
-
-#[allow(clippy::too_many_arguments)]
-fn build_blue_element_group_capsule(
-    n: usize,
-    gesture: BlueGestureKind,
-    win_title: &str,
-    win_class: &str,
-    proc_meta: &process::ProcessMetadata,
-    elements: &[UiaElementInfo],
-    adapter_outputs: &[adapters::AdapterOutput],
-    grounding_lines: &[String],
-) -> CapsulePayload {
-    let badge = circled_badge(n);
-    let count = elements.len();
-    let gesture_tag = match gesture {
-        BlueGestureKind::Box => "box",
-        BlueGestureKind::Lasso => "lasso",
-    };
-    let gesture_zh = match gesture {
-        BlueGestureKind::Box => "蓝线框选",
-        BlueGestureKind::Lasso => "蓝线圈选",
-    };
-    let app_display = if !proc_meta.product_name.is_empty() {
-        proc_meta.product_name.as_str()
-    } else if !proc_meta.exe_name.is_empty() {
-        proc_meta.exe_name.as_str()
-    } else {
-        "App"
-    };
-
-    let preview_names: Vec<String> = elements
-        .iter()
-        .take(4)
-        .map(|e| {
-            if !e.name.is_empty() {
-                truncate_chars(&e.name, 16)
-            } else if !e.value.is_empty() && e.value != "[PASSWORD_REDACTED]" {
-                truncate_chars(&e.value, 16)
-            } else {
-                e.control_type.clone()
-            }
-        })
-        .collect();
-    let body_preview = if count > 4 {
-        format!("{} 等 {} 项前景元素", preview_names.join("、"), count)
-    } else {
-        preview_names.join("、")
-    };
-
-    let mut lines = Vec::new();
-    lines.push(format!(
-        "[DSB-PICK #{n} badge={badge} kind=element_group gesture={gesture_tag} count={count} app=\"{}\"]",
-        proc_meta.exe_name
-    ));
-    lines.push(format!("window_title: {}", win_title.trim()));
-    lines.push(format!("window_class: {win_class}"));
-    lines.push(format!(
-        "process: pid={} exe=\"{}\" framework=\"{}\"",
-        proc_meta.pid, proc_meta.exe_path, proc_meta.framework_guess
-    ));
-    lines.extend(grounding_lines.iter().cloned());
-    lines.push(format!("element_group ({count} foreground items):"));
-    for (idx, el) in elements.iter().enumerate() {
-        let mut desc = format!(
-            "  [{}] type={} rect=({},{},{}x{})",
-            idx + 1,
-            el.control_type,
-            el.rect.x,
-            el.rect.y,
-            el.rect.w,
-            el.rect.h
-        );
-        if !el.name.is_empty() {
-            desc.push_str(&format!(" name=\"{}\"", truncate_chars(&el.name, 80)));
-        }
-        if !el.value.is_empty() && el.value != "[PASSWORD_REDACTED]" && el.value != el.name {
-            desc.push_str(&format!(" value=\"{}\"", truncate_chars(&el.value, 80)));
-        }
-        if !el.automation_id.is_empty() {
-            desc.push_str(&format!(" id=\"{}\"", el.automation_id));
-        }
-        lines.push(desc);
-    }
-
-    for out in adapter_outputs {
-        for detail in &out.lines {
-            lines.push(detail.clone());
-        }
-        for p in out.paths.iter().take(12) {
-            if let Some(meta) = inspect_path_metadata(Path::new(p), 600) {
-                append_fs_meta_lines(&mut lines, &meta);
-            }
-        }
-    }
-    lines.push("[/DSB-PICK]".to_string());
-
-    CapsulePayload {
-        summary: CapsuleQuoteSummary {
-            label: badge.clone(),
-            title: format!("{badge} 元素组 ({count}项)"),
-            detail: format!("{app_display} · {gesture_zh}"),
-            body: body_preview,
-        },
-        text: lines.join("\n"),
-    }
-}
-
-fn is_wps_exe(exe_name: &str) -> bool {
-    matches!(exe_name, "wps.exe" | "wpsoffice.exe" | "et.exe" | "wpp.exe")
-}
-
-fn office_app_display_name(exe_name: &str, kind: OfficeAppKind) -> &'static str {
-    let is_wps = is_wps_exe(exe_name);
-    match (is_wps, kind) {
-        (true, OfficeAppKind::Word) => "WPS 文字",
-        (true, OfficeAppKind::Excel) => "WPS 表格",
-        (true, OfficeAppKind::PowerPoint) => "WPS 演示",
-        (false, OfficeAppKind::Word) => "Word",
-        (false, OfficeAppKind::Excel) => "Excel",
-        (false, OfficeAppKind::PowerPoint) => "PowerPoint",
-    }
-}
-
-fn try_execute_solidworks_tap_pick(
+fn try_execute_external_plugin_tap_override(
     app: &AppHandle,
     shared: &AppShared,
     x: i32,
     y: i32,
     pre_capture: Option<&RawScreenCapture>,
 ) -> bool {
-    let Some(hit) = solidworks::detect_solidworks_at(x, y) else {
-        return false;
-    };
-
-    // Inspect UIA at (x, y) so we:
-    // 1. Let toolbar/menu/ribbon buttons fall through to normal UIA picking
-    // 2. Capture exact FeatureManager TreeItem label & rect when clicking the feature tree
-    let uia_info = UIAutomation::new().ok().and_then(|auto| {
-        let walker = auto.get_control_view_walker().ok()?;
-        let el = find_target_uia_element(&auto, &walker, hit.root_hwnd, hit.pid, x, y)?;
-        Some(extract_uia_element_info(&el, &walker, false))
-    });
-
-    if let Some(ref info) = uia_info {
-        let ct = info.control_type.as_str();
-        // Keep SolidWorks CommandManager / Menu / Dialog controls on the standard UIA path
-        if matches!(
-            ct,
-            "Button"
-                | "MenuItem"
-                | "TabItem"
-                | "SplitButton"
-                | "ComboBox"
-                | "CheckBox"
-                | "RadioButton"
-                | "Edit"
-                | "Spinner"
-        ) {
-            return false;
-        }
-    }
-
-    let uia_label = uia_info
-        .as_ref()
-        .filter(|info| {
-            matches!(info.control_type.as_str(), "TreeItem" | "Text" | "ListItem")
-                && !info.name.trim().is_empty()
-        })
-        .map(|info| info.name.clone());
-
-    let Some(sw) = solidworks::pick_solidworks_feature_com(
-        &shared.broker,
-        x,
-        y,
-        uia_label.as_deref(),
-    ) else {
-        return false;
-    };
-
-    if sw.items.is_empty() && sw.doc_title.is_empty() {
+    let (root_hwnd, target_pid, win_title, win_class) = resolve_root_window_at(x, y);
+    if target_pid == 0 {
         return false;
     }
-
     let cfg = shared.config.lock().map(|c| c.clone()).unwrap_or_default();
+    let proc_meta = inspect_process(target_pid, &cfg.app_source_map);
+    let ctx = AdapterContext {
+        hwnd: root_hwnd.0 as isize,
+        window_title: win_title.clone(),
+        window_class: win_class,
+        proc_meta,
+        primary_element: None,
+        tap_point: Some((x, y)),
+        broker: shared.broker.clone(),
+    };
+    let Some(res) = adapter_plugins::try_run_external_tap_override(&ctx) else {
+        return false;
+    };
+
     let n = shared.allocate_pick_number();
     let badge = circled_badge(n);
-
-    // Highlight the TreeItem rect if picked from FeatureManager, else a crisp 52x52 reticle at the 3D click point
-    let pick_rect = uia_info
-        .as_ref()
-        .filter(|info| info.control_type == "TreeItem" && info.rect.w > 12 && info.rect.h > 8)
-        .map(|info| info.rect)
-        .unwrap_or(ScreenRect {
-            x: x - 26,
-            y: y - 26,
-            w: 52,
-            h: 52,
-        });
-
+    let pick_rect = ScreenRect {
+        x: x - 18,
+        y: y - 18,
+        w: 36,
+        h: 36,
+    };
     if let Some(ov) = app.get_webview_window("overlay") {
-        let _ = ov.emit(
-            "pen:picked",
-            serde_json::json!({ "n": n, "rect": pick_rect }),
-        );
+        let _ = ov.emit("pen:picked", serde_json::json!({ "n": n, "rect": pick_rect }));
     }
-
     let owned_cap;
     let raw_ref = match pre_capture {
         Some(r) => Some(r),
         None => {
-            owned_cap = capture_target_window_bitblt(hit.root_hwnd, x, y).ok();
+            owned_cap = capture_target_window_bitblt(root_hwnd, x, y).ok();
             owned_cap.as_ref()
         }
     };
@@ -2456,739 +1904,41 @@ fn try_execute_solidworks_tap_pick(
             .map(|p| p.to_string_lossy().to_string())
     });
 
-    let proc_meta = inspect_process(hit.pid, &cfg.app_source_map);
-    let (chip_title, chip_detail) = solidworks::build_solidworks_chip_title(&badge, &sw);
-
-    let mut lines = vec![
-        format!("[DSB-PICK #{n} | kind=solidworks_feature]"),
-        format!(
-            "app: SolidWorks ({}) | window=\"{}\"",
-            proc_meta.exe_name,
-            hit.win_title.trim()
-        ),
-    ];
-    lines.extend(solidworks::format_solidworks_capsule_lines(&sw));
-
-    let win_rect = get_window_screen_rect(hit.root_hwnd);
-    let mon = MonitorSpace::for_point(x, y, hit.root_hwnd);
-    let target_ct = uia_info
-        .as_ref()
-        .map(|i| i.control_type.as_str())
-        .unwrap_or("SolidWorksViewport");
-    lines.extend(grounding::format_tap_grounding(
-        hit.root_hwnd,
-        win_rect,
-        &mon,
-        (x, y),
-        pick_rect,
-        target_ct,
-        uia_info.as_ref().and_then(|i| i.affordance.as_ref()),
-    ));
+    let mut lines = vec![format!("[DSB-PICK #{n} | kind=adapter_plugin | plugin={}]", res.plugin_id)];
+    lines.extend(res.lines.iter().cloned());
+    for p in &res.paths {
+        lines.push(format!("path: {p}"));
+    }
+    if !win_title.trim().is_empty() {
+        lines.push(format!("window: \"{}\"", win_title.trim()));
+    }
     if let Some(sp) = screenshot_path.as_deref() {
-        lines.push(format!(
-            "debug_screenshot_path: {sp} (仅当以上信息不足或可疑时再打开查看)"
-        ));
+        lines.push(format!("screenshot_path: {sp}"));
     }
     lines.push("[/DSB-PICK]".to_string());
 
-    let body_preview = sw
-        .items
+    let body_preview = res
+        .lines
         .first()
-        .map(|it| {
-            if !it.dimensions.is_empty() {
-                it.dimensions
-                    .iter()
-                    .take(3)
-                    .map(|d| format!("{}={}{}", d.name, d.value, d.unit))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            } else if !it.entity_geometry.is_empty() {
-                it.entity_geometry.clone()
-            } else {
-                format!("{} ({})", it.feature_name, it.feature_type)
-            }
-        })
-        .unwrap_or_else(|| format!("SolidWorks · {}", sw.doc_title));
-
+        .cloned()
+        .unwrap_or_else(|| res.title.clone());
     let capsule = CapsulePayload {
         summary: CapsuleQuoteSummary {
-            label: badge,
-            title: truncate_chars(&chip_title, 44),
-            detail: truncate_chars(&chip_detail, 44),
+            label: badge.clone(),
+            title: truncate_chars(&format!("{badge} {}", res.title), 44),
+            detail: truncate_chars(&res.detail, 44),
             body: truncate_chars(&body_preview, 110),
         },
         text: lines.join("\n"),
     };
-    log::info!(
-        "Committed SolidWorks Feature Pick #{n}: tier={} items={} title='{}' screenshot={:?}",
-        sw.pick_tier,
-        sw.items.len(),
-        chip_title,
-        screenshot_path
-    );
     inject_capsule_into_bar(app, &capsule);
     true
 }
 
-fn try_execute_office_tap_pick(
-    app: &AppHandle,
-    shared: &AppShared,
-    x: i32,
-    y: i32,
-    pre_capture: Option<&RawScreenCapture>,
-) -> bool {
-    let Some(hit) = office::detect_office_canvas_at(x, y) else {
-        return false;
-    };
-    if !hit.in_canvas {
-        return false;
-    }
-
-    match hit.kind {
-        OfficeAppKind::Excel => {
-            let Some(ex) = office::pick_excel_cell_com(
-                &shared.broker,
-                hit.root_hwnd,
-                x,
-                y,
-                hit.dpi_scale,
-            ) else {
-                return false;
-            };
-            let cfg = shared.config.lock().map(|c| c.clone()).unwrap_or_default();
-            let n = shared.allocate_pick_number();
-            let badge = circled_badge(n);
-            let rect = ex.screen_rect.unwrap_or(ScreenRect {
-                x: x - 42,
-                y: y - 13,
-                w: 84,
-                h: 26,
-            });
-            if let Some(ov) = app.get_webview_window("overlay") {
-                let _ = ov.emit(
-                    "pen:picked",
-                    serde_json::json!({ "n": n, "rect": rect, "mode": "excel_cell" }),
-                );
-            }
-            let owned_cap;
-            let raw_ref = match pre_capture {
-                Some(r) => Some(r),
-                None => {
-                    owned_cap = capture_target_window_bitblt(hit.root_hwnd, x, y).ok();
-                    owned_cap.as_ref()
-                }
-            };
-            let screenshot_path = raw_ref.and_then(|raw| {
-                save_annotated_capture(app, raw, Some(rect), &[], n, &cfg)
-                    .ok()
-                    .map(|p| p.to_string_lossy().to_string())
-            });
-            let proc_meta = inspect_process(hit.pid, &cfg.app_source_map);
-            let app_label = office_app_display_name(&proc_meta.exe_name, OfficeAppKind::Excel);
-            let cell_ref = if ex.sheet.is_empty() {
-                ex.address.clone()
-            } else {
-                format!("{}!{}", ex.sheet, ex.address)
-            };
-            let disp_short = truncate_chars(ex.display_text.trim(), 16);
-            let chip_title = if disp_short.is_empty() {
-                format!("{badge} {cell_ref}")
-            } else {
-                format!("{badge} {cell_ref} · {disp_short}")
-            };
-            let wb_badge = if !ex.workbook_name.is_empty() {
-                ex.workbook_name.as_str()
-            } else {
-                hit.win_title.trim()
-            };
-            let chip_detail = format!("{app_label} · {}", truncate_chars(wb_badge, 26));
-
-            let mut lines = Vec::new();
-            lines.push(format!(
-                "[DSB-PICK #{n} badge={badge} kind=office_excel_cell app=\"{}\"]",
-                proc_meta.exe_name
-            ));
-            lines.push(format!("office_app: {app_label}"));
-            if !ex.prog_id.is_empty() {
-                lines.push(format!("office_prog_id: {}", ex.prog_id));
-            }
-            lines.push(format!("window_hwnd: {}", hit.root_hwnd.0 as isize));
-            if !ex.full_name.is_empty() {
-                lines.push(format!("office_document_path: {}", ex.full_name));
-            }
-            lines.push(format!("office_workbook: {}", ex.workbook_name));
-            lines.push(format!("excel_sheet: {}", ex.sheet));
-            lines.push(format!("excel_address: {}", ex.address));
-            if !ex.col_header.is_empty() {
-                lines.push(format!("excel_col_header: {}", ex.col_header));
-            }
-            if !ex.row_header.is_empty() {
-                lines.push(format!("excel_row_header: {}", ex.row_header));
-            }
-            if !ex.display_text.is_empty() {
-                lines.push(format!("excel_display_text: {}", ex.display_text));
-            }
-            if !ex.value.is_empty() && ex.value != ex.display_text {
-                lines.push(format!("excel_raw_value: {}", ex.value));
-            }
-            if !ex.formula.is_empty() {
-                lines.push(format!("excel_formula: {}", ex.formula));
-            }
-            let target_locator = if ex.full_name.is_empty() {
-                format!("{} | {cell_ref}", ex.workbook_name)
-            } else {
-                format!("{} | {cell_ref}", ex.full_name)
-            };
-            lines.extend(office::format_live_edit_guidance(
-                "excel",
-                is_wps_exe(&proc_meta.exe_name),
-                &target_locator,
-            ));
-            let win_rect = get_window_screen_rect(hit.root_hwnd);
-            let mon = MonitorSpace::for_point(x, y, hit.root_hwnd);
-            lines.extend(grounding::format_tap_grounding(
-                hit.root_hwnd,
-                win_rect,
-                &mon,
-                (x, y),
-                rect,
-                "ExcelCell",
-                None,
-            ));
-            if let Some(sp) = screenshot_path.as_deref() {
-                lines.push(format!(
-                    "debug_screenshot_path: {sp} (仅当以上信息不足或可疑时再打开查看)"
-                ));
-            }
-            lines.push("[/DSB-PICK]".to_string());
-
-            let capsule = CapsulePayload {
-                summary: CapsuleQuoteSummary {
-                    label: badge,
-                    title: chip_title,
-                    detail: chip_detail,
-                    body: format!("{cell_ref} = {}", ex.display_text),
-                },
-                text: lines.join("\n"),
-            };
-            log::info!(
-                "Committed Excel Cell Pick #{n}: ref='{cell_ref}' val='{}' screenshot={:?}",
-                truncate_chars(&ex.display_text, 40),
-                screenshot_path
-            );
-            inject_capsule_into_bar(app, &capsule);
-            true
-        }
-        OfficeAppKind::PowerPoint => {
-            let Some(ppt) = office::pick_ppt_element_com(
-                &shared.broker,
-                hit.root_hwnd,
-                x,
-                y,
-                hit.dpi_scale,
-            ) else {
-                return false;
-            };
-            let cfg = shared.config.lock().map(|c| c.clone()).unwrap_or_default();
-            let n = shared.allocate_pick_number();
-            let badge = circled_badge(n);
-            let rect = ppt.screen_rect.unwrap_or(ScreenRect {
-                x: x - 48,
-                y: y - 24,
-                w: 96,
-                h: 48,
-            });
-            if let Some(ov) = app.get_webview_window("overlay") {
-                let _ = ov.emit(
-                    "pen:picked",
-                    serde_json::json!({ "n": n, "rect": rect, "mode": "ppt_element" }),
-                );
-            }
-            let owned_cap;
-            let raw_ref = match pre_capture {
-                Some(r) => Some(r),
-                None => {
-                    owned_cap = capture_target_window_bitblt(hit.root_hwnd, x, y).ok();
-                    owned_cap.as_ref()
-                }
-            };
-            let screenshot_path = raw_ref.and_then(|raw| {
-                save_annotated_capture(app, raw, Some(rect), &[], n, &cfg)
-                    .ok()
-                    .map(|p| p.to_string_lossy().to_string())
-            });
-            let proc_meta = inspect_process(hit.pid, &cfg.app_source_map);
-            let app_label = office_app_display_name(&proc_meta.exe_name, OfficeAppKind::PowerPoint);
-            let first_line = ppt
-                .text
-                .lines()
-                .map(str::trim)
-                .find(|l| !l.is_empty())
-                .unwrap_or("");
-            let elem_label = if !first_line.is_empty() {
-                truncate_chars(first_line, 20)
-            } else if !ppt.shape_name.is_empty() {
-                truncate_chars(&ppt.shape_name, 22)
-            } else {
-                ppt.shape_type.clone()
-            };
-            let chip_title = format!("{badge} Slide {} · {elem_label}", ppt.slide_index);
-            let pres_badge = if !ppt.pres_name.is_empty() {
-                ppt.pres_name.as_str()
-            } else {
-                hit.win_title.trim()
-            };
-            let chip_detail = format!(
-                "{app_label} · {} ({})",
-                truncate_chars(pres_badge, 22),
-                ppt.shape_type
-            );
-
-            let mut lines = Vec::new();
-            lines.push(format!(
-                "[DSB-PICK #{n} badge={badge} kind=office_ppt_element app=\"{}\"]",
-                proc_meta.exe_name
-            ));
-            lines.push(format!("office_app: {app_label}"));
-            if !ppt.prog_id.is_empty() {
-                lines.push(format!("office_prog_id: {}", ppt.prog_id));
-            }
-            lines.push(format!("window_hwnd: {}", hit.root_hwnd.0 as isize));
-            if !ppt.full_name.is_empty() {
-                lines.push(format!("office_document_path: {}", ppt.full_name));
-            }
-            lines.push(format!("ppt_presentation: {}", ppt.pres_name));
-            lines.push(format!(
-                "ppt_slide: {} / {}",
-                ppt.slide_index, ppt.slide_count
-            ));
-            lines.push(format!(
-                "ppt_shape: id={} name=\"{}\" type={}",
-                ppt.shape_id, ppt.shape_name, ppt.shape_type
-            ));
-            if let Some(gid) = ppt.parent_group_id {
-                lines.push(format!(
-                    "ppt_parent_group: id={gid} name=\"{}\"",
-                    ppt.parent_group_name
-                ));
-            }
-            if !ppt.geometry.is_empty() {
-                lines.push(format!("ppt_geometry: {}", ppt.geometry));
-            }
-            if !ppt.style.is_empty() {
-                lines.push(format!("ppt_style: {}", ppt.style));
-            }
-            if !ppt.text.is_empty() {
-                lines.push(format!("ppt_shape_text:\n{}", ppt.text));
-            }
-            let mut target_locator = format!(
-                "{} | slide={} shape_id={} shape_name=\"{}\"",
-                if ppt.full_name.is_empty() {
-                    ppt.pres_name.as_str()
-                } else {
-                    ppt.full_name.as_str()
-                },
-                ppt.slide_index,
-                ppt.shape_id,
-                ppt.shape_name
-            );
-            if let Some(gid) = ppt.parent_group_id {
-                target_locator.push_str(&format!(" parent_group_id={gid}"));
-            }
-            lines.extend(office::format_live_edit_guidance(
-                "ppt",
-                is_wps_exe(&proc_meta.exe_name),
-                &target_locator,
-            ));
-            let win_rect = get_window_screen_rect(hit.root_hwnd);
-            let mon = MonitorSpace::for_point(x, y, hit.root_hwnd);
-            lines.extend(grounding::format_tap_grounding(
-                hit.root_hwnd,
-                win_rect,
-                &mon,
-                (x, y),
-                rect,
-                &ppt.shape_type,
-                None,
-            ));
-            if let Some(sp) = screenshot_path.as_deref() {
-                lines.push(format!(
-                    "debug_screenshot_path: {sp} (仅当以上信息不足或可疑时再打开查看)"
-                ));
-            }
-            lines.push("[/DSB-PICK]".to_string());
-
-            let capsule = CapsulePayload {
-                summary: CapsuleQuoteSummary {
-                    label: badge,
-                    title: chip_title,
-                    detail: chip_detail,
-                    body: if ppt.text.is_empty() {
-                        format!("{} ({})", ppt.shape_name, ppt.shape_type)
-                    } else {
-                        truncate_chars(&ppt.text, 120)
-                    },
-                },
-                text: lines.join("\n"),
-            };
-            log::info!(
-                "Committed PPT Element Pick #{n}: slide={} shape='{}' (id={}) screenshot={:?}",
-                ppt.slide_index,
-                ppt.shape_name,
-                ppt.shape_id,
-                screenshot_path
-            );
-            inject_capsule_into_bar(app, &capsule);
-            true
-        }
-        OfficeAppKind::Word => false,
-    }
-}
-
-fn try_execute_office_drag_pick(
-    app: &AppHandle,
-    shared: &AppShared,
-    points: &[(i32, i32)],
-    pre_capture: Option<&RawScreenCapture>,
-) -> bool {
-    if points.len() < 2 {
-        return false;
-    }
-    let start = points[0];
-    let end = *points.last().unwrap_or(&start);
-    let Some(hit) = office::detect_office_canvas_at(start.0, start.1) else {
-        return false;
-    };
-    if !hit.in_canvas {
-        return false;
-    }
-
-    let bbox = ScreenRect {
-        x: start.0.min(end.0),
-        y: start.1.min(end.1),
-        w: (start.0 - end.0).abs().max(24),
-        h: (start.1 - end.1).abs().max(18),
-    };
-
-    match hit.kind {
-        OfficeAppKind::PowerPoint => {
-            // PowerPoint / WPS Presentation drag MUST keep drawing the red freehand stroke unchanged!
-            false
-        }
-        OfficeAppKind::Word => {
-            let uia_text = office::select_word_text_uia(hit.root_hwnd, start, end, true);
-            let com_res = office::pick_word_text_com(
-                &shared.broker,
-                start.0,
-                start.1,
-                end.0,
-                end.1,
-                hit.dpi_scale,
-            );
-            let selected_text = com_res
-                .as_ref()
-                .map(|r| r.selected_text.trim())
-                .filter(|s| !s.is_empty())
-                .map(str::to_string)
-                .or(uia_text)
-                .unwrap_or_default();
-
-            let cfg = shared.config.lock().map(|c| c.clone()).unwrap_or_default();
-            let n = shared.allocate_pick_number();
-            let badge = circled_badge(n);
-            if let Some(ov) = app.get_webview_window("overlay") {
-                let _ = ov.emit(
-                    "pen:picked",
-                    serde_json::json!({ "n": n, "rect": bbox, "mode": "word_text" }),
-                );
-            }
-            let owned_cap;
-            let raw_ref = match pre_capture {
-                Some(r) => Some(r),
-                None => {
-                    owned_cap = capture_target_window_bitblt(
-                        hit.root_hwnd,
-                        bbox.x + bbox.w / 2,
-                        bbox.y + bbox.h / 2,
-                    )
-                    .ok();
-                    owned_cap.as_ref()
-                }
-            };
-            // Save clean rectangular box screenshot (NO red freehand squiggle!)
-            let screenshot_path = raw_ref.and_then(|raw| {
-                save_annotated_capture(app, raw, Some(bbox), &[], n, &cfg)
-                    .ok()
-                    .map(|p| p.to_string_lossy().to_string())
-            });
-            let proc_meta = inspect_process(hit.pid, &cfg.app_source_map);
-            let app_label = office_app_display_name(&proc_meta.exe_name, OfficeAppKind::Word);
-
-            let (prog_id, full_name, doc_name, page_num, para_text, range_start, range_end) =
-                match com_res {
-                    Some(r) => (
-                        r.prog_id,
-                        r.full_name,
-                        r.doc_name,
-                        r.page_number,
-                        r.paragraph_text,
-                        r.range_start,
-                        r.range_end,
-                    ),
-                    None => (
-                        String::new(),
-                        String::new(),
-                        hit.win_title.trim().to_string(),
-                        String::new(),
-                        String::new(),
-                        None,
-                        None,
-                    ),
-                };
-
-            let single_line = selected_text
-                .replace(['\r', '\n'], " ")
-                .split_whitespace()
-                .collect::<Vec<_>>()
-                .join(" ");
-            let chip_title = if !single_line.is_empty() {
-                format!("{badge} 「{}」", truncate_chars(&single_line, 20))
-            } else {
-                format!("{badge} {} 选区", truncate_chars(&doc_name, 18))
-            };
-            let doc_badge = if !doc_name.is_empty() {
-                doc_name.as_str()
-            } else {
-                hit.win_title.trim()
-            };
-            let chip_detail = if !page_num.is_empty() {
-                format!(
-                    "{app_label} · {} · P{page_num}",
-                    truncate_chars(doc_badge, 20)
-                )
-            } else {
-                format!("{app_label} · {}", truncate_chars(doc_badge, 24))
-            };
-
-            let mut lines = Vec::new();
-            lines.push(format!(
-                "[DSB-PICK #{n} badge={badge} kind=office_word_text app=\"{}\"]",
-                proc_meta.exe_name
-            ));
-            lines.push(format!("office_app: {app_label}"));
-            if !prog_id.is_empty() {
-                lines.push(format!("office_prog_id: {prog_id}"));
-            }
-            lines.push(format!("window_hwnd: {}", hit.root_hwnd.0 as isize));
-            if !full_name.is_empty() {
-                lines.push(format!("office_document_path: {full_name}"));
-            }
-            lines.push(format!("word_document: {doc_name}"));
-            if !page_num.is_empty() {
-                lines.push(format!("word_page: {page_num}"));
-            }
-            if let (Some(rs), Some(re)) = (range_start, range_end) {
-                lines.push(format!("word_range_offsets: {rs}..{re}"));
-            }
-            if !selected_text.is_empty() {
-                lines.push(format!("word_selected_text:\n{selected_text}"));
-            } else {
-                lines.push(
-                    "word_selected_text: (未读取到文本字符，可能划选在空白/图片区域，请参考截图)"
-                        .to_string(),
-                );
-            }
-            if !para_text.is_empty() && para_text != selected_text {
-                lines.push(format!("word_paragraph_context:\n{para_text}"));
-            }
-            let doc_id = if full_name.is_empty() {
-                doc_name.as_str()
-            } else {
-                full_name.as_str()
-            };
-            let target_locator = match (range_start, range_end) {
-                (Some(rs), Some(re)) => format!("{doc_id} | range={rs}..{re}"),
-                _ => doc_id.to_string(),
-            };
-            lines.extend(office::format_live_edit_guidance(
-                "word",
-                is_wps_exe(&proc_meta.exe_name),
-                &target_locator,
-            ));
-            let win_rect = get_window_screen_rect(hit.root_hwnd);
-            let mon = MonitorSpace::for_point(start.0, start.1, hit.root_hwnd);
-            lines.extend(grounding::format_drag_grounding(
-                hit.root_hwnd,
-                win_rect,
-                &mon,
-                start,
-                end,
-                bbox,
-            ));
-            if let Some(sp) = screenshot_path.as_deref() {
-                lines.push(format!(
-                    "debug_screenshot_path: {sp} (仅当以上信息不足或可疑时再打开查看)"
-                ));
-            }
-            lines.push("[/DSB-PICK]".to_string());
-
-            let capsule = CapsulePayload {
-                summary: CapsuleQuoteSummary {
-                    label: badge,
-                    title: chip_title,
-                    detail: chip_detail,
-                    body: if !single_line.is_empty() {
-                        truncate_chars(&single_line, 120)
-                    } else {
-                        format!("{app_label} — {}", truncate_chars(doc_badge, 80))
-                    },
-                },
-                text: lines.join("\n"),
-            };
-            log::info!(
-                "Committed Word Text Pick #{n}: chars={} range={:?}..{:?} screenshot={:?}",
-                selected_text.chars().count(),
-                range_start,
-                range_end,
-                screenshot_path
-            );
-            inject_capsule_into_bar(app, &capsule);
-            true
-        }
-        OfficeAppKind::Excel => {
-            let Some(ex) = office::pick_excel_range_com(
-                &shared.broker,
-                hit.root_hwnd,
-                start.0,
-                start.1,
-                end.0,
-                end.1,
-                hit.dpi_scale,
-            ) else {
-                return false;
-            };
-            let cfg = shared.config.lock().map(|c| c.clone()).unwrap_or_default();
-            let n = shared.allocate_pick_number();
-            let badge = circled_badge(n);
-            let rect = ex.screen_rect.unwrap_or(bbox);
-            if let Some(ov) = app.get_webview_window("overlay") {
-                let _ = ov.emit(
-                    "pen:picked",
-                    serde_json::json!({ "n": n, "rect": rect, "mode": "excel_box" }),
-                );
-            }
-            let owned_cap;
-            let raw_ref = match pre_capture {
-                Some(r) => Some(r),
-                None => {
-                    owned_cap = capture_target_window_bitblt(
-                        hit.root_hwnd,
-                        rect.x + rect.w / 2,
-                        rect.y + rect.h / 2,
-                    )
-                    .ok();
-                    owned_cap.as_ref()
-                }
-            };
-            // Save clean rectangular box screenshot (NO red freehand squiggle!)
-            let screenshot_path = raw_ref.and_then(|raw| {
-                save_annotated_capture(app, raw, Some(rect), &[], n, &cfg)
-                    .ok()
-                    .map(|p| p.to_string_lossy().to_string())
-            });
-            let proc_meta = inspect_process(hit.pid, &cfg.app_source_map);
-            let app_label = office_app_display_name(&proc_meta.exe_name, OfficeAppKind::Excel);
-            let range_ref = if ex.sheet.is_empty() {
-                ex.address.clone()
-            } else {
-                format!("{}!{}", ex.sheet, ex.address)
-            };
-            let chip_title = if ex.is_range {
-                format!("{badge} {range_ref} ({}×{})", ex.rows, ex.cols)
-            } else {
-                format!("{badge} {range_ref}")
-            };
-            let wb_badge = if !ex.workbook_name.is_empty() {
-                ex.workbook_name.as_str()
-            } else {
-                hit.win_title.trim()
-            };
-            let chip_detail = format!("{app_label} · {}", truncate_chars(wb_badge, 26));
-
-            let mut lines = Vec::new();
-            lines.push(format!(
-                "[DSB-PICK #{n} badge={badge} kind=office_excel_range app=\"{}\"]",
-                proc_meta.exe_name
-            ));
-            lines.push(format!("office_app: {app_label}"));
-            if !ex.prog_id.is_empty() {
-                lines.push(format!("office_prog_id: {}", ex.prog_id));
-            }
-            lines.push(format!("window_hwnd: {}", hit.root_hwnd.0 as isize));
-            if !ex.full_name.is_empty() {
-                lines.push(format!("office_document_path: {}", ex.full_name));
-            }
-            lines.push(format!("office_workbook: {}", ex.workbook_name));
-            lines.push(format!("excel_sheet: {}", ex.sheet));
-            lines.push(format!(
-                "excel_address: {} ({} rows × {} cols)",
-                ex.address, ex.rows, ex.cols
-            ));
-            if !ex.table_preview.is_empty() {
-                lines.push(format!("excel_table_preview:\n{}", ex.table_preview));
-            }
-            if !ex.formulas_preview.is_empty() {
-                lines.push(format!("excel_formulas: {}", ex.formulas_preview));
-            }
-            let target_locator = if ex.full_name.is_empty() {
-                format!("{} | {range_ref}", ex.workbook_name)
-            } else {
-                format!("{} | {range_ref}", ex.full_name)
-            };
-            lines.extend(office::format_live_edit_guidance(
-                "excel",
-                is_wps_exe(&proc_meta.exe_name),
-                &target_locator,
-            ));
-            let win_rect = get_window_screen_rect(hit.root_hwnd);
-            let mon = MonitorSpace::for_point(start.0, start.1, hit.root_hwnd);
-            lines.extend(grounding::format_drag_grounding(
-                hit.root_hwnd,
-                win_rect,
-                &mon,
-                start,
-                end,
-                rect,
-            ));
-            if let Some(sp) = screenshot_path.as_deref() {
-                lines.push(format!(
-                    "debug_screenshot_path: {sp} (仅当以上信息不足或可疑时再打开查看)"
-                ));
-            }
-            lines.push("[/DSB-PICK]".to_string());
-
-            let capsule = CapsulePayload {
-                summary: CapsuleQuoteSummary {
-                    label: badge,
-                    title: chip_title,
-                    detail: chip_detail,
-                    body: format!("{range_ref} ({}×{})", ex.rows, ex.cols),
-                },
-                text: lines.join("\n"),
-            };
-            log::info!(
-                "Committed Excel Range Pick #{n}: ref='{range_ref}' ({}x{}) screenshot={:?}",
-                ex.rows,
-                ex.cols,
-                screenshot_path
-            );
-            inject_capsule_into_bar(app, &capsule);
-            true
-        }
-    }
-}
-
 pub fn maybe_auto_attach_explorer_selection(app: &AppHandle, fg_hwnd_raw: isize) {
+    if !adapter_plugins::is_builtin_adapter_enabled("explorer") {
+        return;
+    }
     if fg_hwnd_raw == 0 {
         return;
     }
@@ -3266,6 +2016,9 @@ fn sample_uia_grid_in_rect(
     cap: usize,
 ) -> Vec<UiaElementInfo> {
     let mut out = Vec::new();
+    if expected_pid != 0 && solidworks::is_solidworks_exe(&office::fast_exe_basename_for_pid(expected_pid)) {
+        return out;
+    }
     let Ok(auto) = UIAutomation::new() else {
         return out;
     };
@@ -3580,6 +2333,15 @@ fn emit_pick_toast(app: &AppHandle, text: &str) {
 }
 
 fn inject_capsule_into_bar(app: &AppHandle, capsule: &CapsulePayload) {
+    inject_capsule_into_bar_with_meta(app, capsule, None, None);
+}
+
+pub(super) fn inject_capsule_into_bar_with_meta(
+    app: &AppHandle,
+    capsule: &CapsulePayload,
+    capsule_id: Option<&str>,
+    meta: Option<serde_json::Value>,
+) {
     let target = app
         .try_state::<AppShared>()
         .and_then(|s| s.config.lock().ok().map(|c| c.output_target))
@@ -3605,7 +2367,17 @@ fn inject_capsule_into_bar(app: &AppHandle, capsule: &CapsulePayload) {
     }
 
     if let Some(bar_win) = app.get_webview_window("bar") {
-        if let Ok(json_arg) = serde_json::to_string(capsule) {
+        let mut wire = serde_json::json!({
+            "summary": capsule.summary,
+            "text": capsule.text,
+        });
+        if let Some(id) = capsule_id {
+            wire["id"] = serde_json::Value::String(id.to_string());
+        }
+        if let Some(m) = meta {
+            wire["meta"] = m;
+        }
+        if let Ok(json_arg) = serde_json::to_string(&wire) {
             let script = format!(
                 "(function(){{ const b = window.__DSB_BRIDGE__; if (b && typeof b.insertCapsule === 'function') {{ b.insertCapsule({json_arg}); }} }})();"
             );
@@ -3613,6 +2385,22 @@ fn inject_capsule_into_bar(app: &AppHandle, capsule: &CapsulePayload) {
         }
     }
     dispatch_state_event(app, StateEvent::PickInserted);
+}
+
+pub(super) fn patch_capsule_in_bar(app: &AppHandle, capsule_id: &str, patched: &CapsulePayload) {
+    if let Some(bar_win) = app.get_webview_window("bar") {
+        let wire = serde_json::json!({
+            "id": capsule_id,
+            "summary": patched.summary,
+            "text": patched.text,
+        });
+        if let Ok(json_arg) = serde_json::to_string(&wire) {
+            let script = format!(
+                "(function(){{ const b = window.__DSB_BRIDGE__; if (b && typeof b.patchCapsule === 'function') {{ b.patchCapsule({json_arg}); }} }})();"
+            );
+            let _ = bar_win.eval(&script);
+        }
+    }
 }
 
 fn truncate_chars(s: &str, max_chars: usize) -> String {
@@ -3806,33 +2594,45 @@ mod tests {
     }
 
     #[test]
-    fn ignores_background_selection_in_office_wps_and_canvas_editor_apps() {
-        assert!(should_ignore_background_for_app("winword.exe", "OpusApp"));
-        assert!(should_ignore_background_for_app("excel.exe", "XLMAIN"));
+    fn ignores_background_selection_only_in_solidworks_and_cad_apps() {
+        // SolidWorks & CAD apps strictly ignore empty canvas background
         assert!(should_ignore_background_for_app(
+            "SLDWORKS.exe",
+            "Afx:0000000140000000:8:00010003:00000000:00000000"
+        ));
+        assert!(should_ignore_background_for_app("acad.exe", "AfxMDIFrame"));
+        assert!(should_ignore_background_for_app("zwcad.exe", "AfxMDIFrame"));
+        assert!(should_ignore_background_for_app("ugraf.exe", "AfxFrame"));
+        assert!(should_ignore_background_for_app("inventor.exe", "AfxFrame"));
+        assert!(should_ignore_background_for_app("rhino.exe", "Rhino"));
+        assert!(should_ignore_background_for_app("cnext.exe", "AfxFrame"));
+
+        // Office / WPS / IDEs / Design / Desktop / Browsers do NOT suppress background
+        assert!(!should_ignore_background_for_app("winword.exe", "OpusApp"));
+        assert!(!should_ignore_background_for_app("excel.exe", "XLMAIN"));
+        assert!(!should_ignore_background_for_app(
             "powerpnt.exe",
             "PPTFrameClass"
         ));
-        assert!(should_ignore_background_for_app("wps.exe", "Qt5QWindow"));
-        assert!(should_ignore_background_for_app("et.exe", "XLMAIN"));
-        assert!(should_ignore_background_for_app("wpp.exe", "WPPMain"));
-        assert!(should_ignore_background_for_app(
+        assert!(!should_ignore_background_for_app("wps.exe", "Qt5QWindow"));
+        assert!(!should_ignore_background_for_app("et.exe", "XLMAIN"));
+        assert!(!should_ignore_background_for_app("wpp.exe", "WPPMain"));
+        assert!(!should_ignore_background_for_app(
             "Code.exe",
             "Chrome_WidgetWin_1"
         ));
-        assert!(should_ignore_background_for_app(
+        assert!(!should_ignore_background_for_app(
             "photoshop.exe",
             "Photoshop"
         ));
-        assert!(should_ignore_background_for_app(
+        assert!(!should_ignore_background_for_app(
             "figma.exe",
             "Chrome_WidgetWin_1"
         ));
-        assert!(should_ignore_background_for_app(
+        assert!(!should_ignore_background_for_app(
             "obsidian.exe",
             "Chrome_WidgetWin_1"
         ));
-        // Desktop & regular apps still allow background picking
         assert!(!should_ignore_background_for_app("explorer.exe", "Progman"));
         assert!(!should_ignore_background_for_app(
             "msedge.exe",

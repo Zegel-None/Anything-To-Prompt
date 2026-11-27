@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-adapter-plugins-test"
+description = "Enables the adapter_plugins_test command without any pre-configured scope."
+commands.allow = ["adapter_plugins_test"]
+
+[[permission]]
+identifier = "deny-adapter-plugins-test"
+description = "Denies the adapter_plugins_test command without any pre-configured scope."
+commands.deny = ["adapter_plugins_test"]

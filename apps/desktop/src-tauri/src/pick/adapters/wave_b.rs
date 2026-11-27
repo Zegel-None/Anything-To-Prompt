@@ -45,17 +45,21 @@ const CHAT_EXES: &[&str] = &[
 
 pub fn run_all_wave_b(ctx: &AdapterContext) -> Vec<AdapterOutput> {
     let mut results = Vec::new();
-    for func in [
-        try_pdf_adapter,
-        try_chat_adapter,
-        try_outlook_adapter,
-        try_notes_adapter,
-        try_cad_adapter,
-        try_engine_adapter,
-        try_dev_design_adapter,
-        try_media_adapter,
-        try_sys_tools_adapter,
-    ] {
+    let table: [(&str, fn(&AdapterContext) -> Option<AdapterOutput>); 9] = [
+        ("pdf", try_pdf_adapter),
+        ("chat", try_chat_adapter),
+        ("outlook", try_outlook_adapter),
+        ("notes", try_notes_adapter),
+        ("cad", try_cad_adapter),
+        ("engine", try_engine_adapter),
+        ("dev_design", try_dev_design_adapter),
+        ("media", try_media_adapter),
+        ("sys_tools", try_sys_tools_adapter),
+    ];
+    for (plugin_id, func) in table {
+        if !crate::pick::adapter_plugins::is_builtin_adapter_enabled(plugin_id) {
+            continue;
+        }
         if let Some(out) = func(ctx) {
             results.push(out);
         }

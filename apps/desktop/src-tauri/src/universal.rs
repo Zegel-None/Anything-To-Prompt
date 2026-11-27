@@ -15,7 +15,7 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     VK_RETURN, VK_V,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    BringWindowToTop, GetClassNameW, GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindow,
+    BringWindowToTop, GetClassNameW, GetWindowThreadProcessId, IsIconic, IsWindow,
     IsWindowVisible, SetForegroundWindow, ShowWindow, SW_RESTORE,
 };
 
@@ -40,12 +40,7 @@ fn now_ms() -> i64 {
 }
 
 fn get_window_title(hwnd: HWND) -> String {
-    let mut buf = [0u16; 512];
-    let len = unsafe { GetWindowTextW(hwnd, &mut buf) };
-    if len <= 0 {
-        return String::new();
-    }
-    String::from_utf16_lossy(&buf[..len as usize]).trim().to_string()
+    crate::win32_util::window_title_text(hwnd).trim().to_string()
 }
 
 fn get_window_class(hwnd: HWND) -> String {

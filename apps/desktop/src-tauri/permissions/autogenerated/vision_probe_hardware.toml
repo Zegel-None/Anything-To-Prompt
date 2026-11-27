@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-vision-probe-hardware"
+description = "Enables the vision_probe_hardware command without any pre-configured scope."
+commands.allow = ["vision_probe_hardware"]
+
+[[permission]]
+identifier = "deny-vision-probe-hardware"
+description = "Denies the vision_probe_hardware command without any pre-configured scope."
+commands.deny = ["vision_probe_hardware"]

@@ -1,6 +1,4 @@
 use anyhow::{anyhow, Context, Result};
-use std::ffi::OsStr;
-use std::os::windows::ffi::OsStrExt;
 use std::os::windows::process::CommandExt;
 use std::path::Path;
 use std::process::Command;
@@ -21,12 +19,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     GetShellWindow, GetWindowThreadProcessId, SW_HIDE, SW_SHOWNORMAL,
 };
 
-pub fn to_wide(s: &str) -> Vec<u16> {
-    OsStr::new(s)
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect()
-}
+pub use crate::win32_util::to_wide;
 
 pub fn is_elevated() -> bool {
     unsafe {

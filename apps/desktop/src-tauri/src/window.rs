@@ -23,7 +23,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     GetWindowLongPtrW, GetWindowRect, GetWindowThreadProcessId, IsWindowVisible,
     SetForegroundWindow, SetWindowDisplayAffinity, SetWindowLongPtrW, SetWindowPos, ShowWindow,
     WindowFromPoint, GA_ROOT, GWL_EXSTYLE, GWL_STYLE, HWND_TOPMOST, SC_KEYMENU, STYLESTRUCT,
-    SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOCOPYBITS, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SW_HIDE,
+    SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SW_HIDE,
     SW_SHOW,
     SW_SHOWNOACTIVATE, WDA_EXCLUDEFROMCAPTURE, WDA_NONE, WINDOWPOS, WINDOW_DISPLAY_AFFINITY,
     WM_ERASEBKGND, WM_NCACTIVATE, WM_NCCALCSIZE, WM_NCDESTROY, WM_NCPAINT, WM_STYLECHANGING,
@@ -40,9 +40,16 @@ pub const DEFAULT_LIP_HEIGHT_DIP: i32 = 56;
 /// unread toasts, and history sheets NEVER calls SetWindowPos / WM_SIZE on WebView2 (zero flash!).
 /// Everything outside the active `SetWindowRgn` rounded-rect shapes is 100% transparent & click-through.
 pub const BAR_STAGE_HEIGHT_DIP: i32 = 680;
-/// QQ-style collapsed edge peek thickness in DIP (~10px edge strip visible on screen).
-pub const DOCK_PEEK_DIP: i32 = 10;
-/// Width of the floating rounded Edge/Arc vertical side panel when docked Left or Right.
+/// Constant backing stage width (DIP) matching the maximum allowed bar/side width so switching
+/// Horizontal <-> Vertical or dragging width (360..=960dip) NEVER resizes the WebView2 swapchain!
+pub const BAR_STAGE_MAX_WIDTH_DIP: i32 = 960;
+/// Unread wallet-card pop-out peek thickness in DIP for Left/Right/Top edges (~9px glowing card edge).
+pub const DOCK_PEEK_DIP: i32 = 9;
+/// Invisible edge-trigger hotzone width (physical px) for Left/Right/Top when idle (0px visible bleed).
+pub const DOCK_INVISIBLE_HOTZONE_PX: i32 = 4;
+/// Bottom dock handle-only hover zone height (DIP) right above the taskbar seam.
+pub const DOCK_BOTTOM_HANDLE_ZONE_DIP: i32 = 20;
+/// Width of the floating rounded Edge/Arc vertical side panel (both side-docked and free-floating vertical).
 pub const SIDE_DOCK_WIDTH_DIP: i32 = 420;
 /// Height ratio of the floating rounded vertical side panel relative to monitor work area height.
 pub const SIDE_DOCK_HEIGHT_RATIO: f64 = 0.84;
@@ -56,6 +63,8 @@ pub const UNDOCK_PULL_THRESHOLD_PX: i32 = 50;
 pub struct DockStateSnapshot {
     pub edge: DockEdge,
     pub collapsed: bool,
+    pub vertical: bool,
+    pub unread: bool,
     pub snap_preview: DockEdge,
 }
 
@@ -63,18 +72,47 @@ pub struct DockStateSnapshot {
 struct ActiveDockRuntime {
     edge: DockEdge,
     collapsed: bool,
+    vertical_mode: bool,
+    unread: bool,
+    last_slid_edge: DockEdge,
+    last_slid_collapsed: bool,
     work_bounds: (i32, i32, i32, i32), // (left, top, right, bottom) phys px of docked monitor
     composer_height_dip: i32,
+    bar_width_dip: i32,
+    side_width_dip: i32,
 }
 
 static ACTIVE_DOCK: Mutex<ActiveDockRuntime> = Mutex::new(ActiveDockRuntime {
     edge: DockEdge::None,
     collapsed: false,
+    vertical_mode: false,
+    unread: false,
+    last_slid_edge: DockEdge::None,
+    last_slid_collapsed: false,
     work_bounds: (0, 0, 1920, 1032),
     composer_height_dip: 92,
+    bar_width_dip: 760,
+    side_width_dip: SIDE_DOCK_WIDTH_DIP,
 });
+type ScaledShapeTuple = (i32, i32, i32, i32, i32);
 static SLIDE_ANIM_GEN: AtomicU64 = AtomicU64::new(0);
-static LAST_SCALED_SHAPES: Mutex<Vec<(i32, i32, i32, i32, i32)>> = Mutex::new(Vec::new());
+static SLIDE_ANIM_ACTIVE: AtomicBool = AtomicBool::new(false);
+static RGN_ANIM_LOCK: Mutex<()> = Mutex::new(());
+static LAST_SCALED_SHAPES: Mutex<Vec<ScaledShapeTuple>> = Mutex::new(Vec::new());
+static LAST_EXPANDED_SHAPES: Mutex<Vec<ScaledShapeTuple>> = Mutex::new(Vec::new());
+
+pub fn is_slide_anim_active() -> bool {
+    SLIDE_ANIM_ACTIVE.load(Ordering::Acquire)
+}
+
+pub fn cancel_slide_anim() {
+    SLIDE_ANIM_GEN.fetch_add(1, Ordering::AcqRel);
+    SLIDE_ANIM_ACTIVE.store(false, Ordering::Release);
+}
+
+pub fn is_bar_dragging() -> bool {
+    BAR_DRAG_SESSION.lock().ok().and_then(|g| *g).is_some()
+}
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ShapeRectDip {
@@ -170,10 +208,10 @@ static CUSTOM_BAR_ANCHOR: Mutex<Option<CustomBarAnchor>> = Mutex::new(None);
 static BAR_DRAG_SESSION: Mutex<Option<BarDragSession>> = Mutex::new(None);
 
 pub fn get_dock_runtime_snapshot() -> DockStateSnapshot {
-    let (edge, collapsed) = ACTIVE_DOCK
+    let (edge, collapsed, vertical, unread) = ACTIVE_DOCK
         .lock()
-        .map(|d| (d.edge, d.collapsed))
-        .unwrap_or((DockEdge::None, false));
+        .map(|d| (d.edge, d.collapsed, d.vertical_mode, d.unread))
+        .unwrap_or((DockEdge::None, false, false, false));
     let snap_preview = BAR_DRAG_SESSION
         .lock()
         .ok()
@@ -182,7 +220,51 @@ pub fn get_dock_runtime_snapshot() -> DockStateSnapshot {
     DockStateSnapshot {
         edge,
         collapsed,
+        vertical,
+        unread,
         snap_preview,
+    }
+}
+
+pub fn set_dock_vertical_mode(vertical: bool) {
+    if let Ok(mut guard) = ACTIVE_DOCK.lock() {
+        guard.vertical_mode = vertical;
+    }
+}
+
+pub fn set_dock_side_width_dip(width_dip: i32) {
+    if let Ok(mut guard) = ACTIVE_DOCK.lock() {
+        guard.side_width_dip = width_dip.clamp(360, 960);
+    }
+}
+
+pub fn set_dock_bar_width_dip(width_dip: i32) {
+    if let Ok(mut guard) = ACTIVE_DOCK.lock() {
+        guard.bar_width_dip = width_dip.clamp(420, 960);
+    }
+}
+
+pub fn compute_constant_stage_phys(work_bounds: (i32, i32, i32, i32), scale: f64) -> (i32, i32) {
+    let (wl, wt, wr, wb) = work_bounds;
+    let avail_w = (wr - wl).max(360);
+    let avail_h = (wb - wt).max(420);
+    let stage_w = (((BAR_STAGE_MAX_WIDTH_DIP as f64) * scale).round() as i32).clamp(360, avail_w);
+    let side_h = ((avail_h as f64) * SIDE_DOCK_HEIGHT_RATIO).round() as i32;
+    let min_stage_h = ((BAR_STAGE_HEIGHT_DIP as f64) * scale).round() as i32;
+    let stage_h = side_h.max(min_stage_h).clamp(420, avail_h);
+    (stage_w, stage_h)
+}
+
+pub fn get_dock_side_width_dip() -> i32 {
+    ACTIVE_DOCK
+        .lock()
+        .map(|d| d.side_width_dip.clamp(360, 960))
+        .unwrap_or(SIDE_DOCK_WIDTH_DIP)
+}
+
+pub fn set_dock_unread(unread: bool) {
+    if let Ok(mut guard) = ACTIVE_DOCK.lock() {
+        guard.unread = unread;
     }
 }
 
@@ -199,8 +281,14 @@ pub fn set_active_dock_state(edge: DockEdge, collapsed: bool, monitor_pt: Option
     if let Ok(mut guard) = ACTIVE_DOCK.lock() {
         guard.edge = edge;
         guard.collapsed = collapsed;
+        if !collapsed {
+            guard.unread = false;
+        }
         if edge.is_docked() {
             guard.work_bounds = bounds;
+        } else {
+            guard.last_slid_edge = DockEdge::None;
+            guard.last_slid_collapsed = false;
         }
     }
     if edge.is_docked() {
@@ -220,75 +308,99 @@ pub fn update_dock_composer_height_dip(composer_h_dip: i32) {
 
 pub fn compute_docked_bar_rect(
     edge: DockEdge,
-    collapsed: bool,
+    _collapsed: bool,
+    _unread: bool,
+    _vertical_mode: bool,
     work_bounds: (i32, i32, i32, i32),
-    bar_width_dip: i32,
-    composer_h_dip: i32,
+    _bar_width_dip: i32,
+    _composer_h_dip: i32,
     scale: f64,
 ) -> (i32, i32, i32, i32) {
     let (wl, wt, wr, wb) = work_bounds;
-    let avail_w = (wr - wl).max(320);
-    let avail_h = (wb - wt).max(200);
-    let peek = ((DOCK_PEEK_DIP as f64) * scale).round().max(8.0) as i32;
-    let comp_h = ((composer_h_dip.clamp(68, 260) as f64) * scale).round() as i32;
+    let avail_w = (wr - wl).max(360);
+    let avail_h = (wb - wt).max(420);
+    let (stage_w, stage_h) = compute_constant_stage_phys(work_bounds, scale);
+    let phys_margin = ((BOTTOM_MARGIN_DIP as f64) * scale).round() as i32;
 
+    // Constant-size backing stage (`960dip × max(680dip, 84% work_h)`) across ALL 4 dock edges
+    // AND free-floating horizontal/vertical! Switching Horizontal <-> Vertical, switching edges,
+    // or resizing width NEVER triggers WM_SIZE / WebView2 swapchain reallocation (zero half-width tear!).
     match edge {
         DockEdge::Bottom => {
-            let phys_w = (((bar_width_dip as f64) * scale).round() as i32).clamp(320, avail_w);
-            let phys_h = (((BAR_STAGE_HEIGHT_DIP as f64) * scale).round() as i32).clamp(120, avail_h);
-            let x = wl + (avail_w - phys_w) / 2;
-            let y_expanded = wb - phys_h;
-            let y = if collapsed {
-                y_expanded + (comp_h - peek).max(0)
-            } else {
-                y_expanded
-            };
-            (x, y, phys_w, phys_h)
+            let x = wl + (avail_w - stage_w) / 2;
+            let y = wb - stage_h;
+            (x, y, stage_w, stage_h)
         }
         DockEdge::Top => {
-            let phys_w = (((bar_width_dip as f64) * scale).round() as i32).clamp(320, avail_w);
-            let phys_h = (((BAR_STAGE_HEIGHT_DIP as f64) * scale).round() as i32).clamp(120, avail_h);
-            let x = wl + (avail_w - phys_w) / 2;
-            let y = if collapsed {
-                wt - (comp_h - peek).max(0)
-            } else {
-                wt
-            };
-            (x, y, phys_w, phys_h)
+            let x = wl + (avail_w - stage_w) / 2;
+            (x, wt, stage_w, stage_h)
         }
         DockEdge::Left => {
-            let phys_w = (((SIDE_DOCK_WIDTH_DIP as f64) * scale).round() as i32)
-                .clamp(340, (avail_w - 40).max(340));
-            let phys_h = (((avail_h as f64) * SIDE_DOCK_HEIGHT_RATIO).round() as i32)
-                .clamp(420, avail_h);
-            let y = wt + (avail_h - phys_h) / 2;
-            let x = if collapsed {
-                wl - (phys_w - peek).max(0)
-            } else {
-                wl
-            };
-            (x, y, phys_w, phys_h)
+            let y = wt + (avail_h - stage_h) / 2;
+            (wl, y, stage_w, stage_h)
         }
         DockEdge::Right => {
-            let phys_w = (((SIDE_DOCK_WIDTH_DIP as f64) * scale).round() as i32)
-                .clamp(340, (avail_w - 40).max(340));
-            let phys_h = (((avail_h as f64) * SIDE_DOCK_HEIGHT_RATIO).round() as i32)
-                .clamp(420, avail_h);
-            let y = wt + (avail_h - phys_h) / 2;
-            let x = if collapsed {
-                wr - peek
-            } else {
-                wr - phys_w
-            };
-            (x, y, phys_w, phys_h)
+            let y = wt + (avail_h - stage_h) / 2;
+            (wr - stage_w, y, stage_w, stage_h)
         }
-        DockEdge::None => compute_bottom_anchored_rect(
-            work_bounds,
-            bar_width_dip,
-            BAR_STAGE_HEIGHT_DIP,
-            BOTTOM_MARGIN_DIP,
-            scale,
-        ),
+        DockEdge::None => {
+            let x = wl + (avail_w - stage_w) / 2;
+            let y = (wb - phys_margin - stage_h).max(wt);
+            (x, y, stage_w, stage_h)
+        }
+    }
+}
+
+/// Computes the exact local physical `SetWindowRgn` shape for a collapsed docked Bar:
+/// - Left/Right/Top idle -> `None` (1x1 transparent keepalive bezel pixel, 0px visible!)
+/// - Left/Right/Top unread -> `Some((l, t, r, b, diam))` (~9dip glowing wallet-card edge)
+/// - Bottom -> `Some((l, t, r, b, diam))` (centered minimal handle pill)
+pub fn compute_dock_collapsed_shape_phys(
+    edge: DockEdge,
+    unread: bool,
+    phys_w: i32,
+    phys_h: i32,
+    scale: f64,
+) -> Option<(i32, i32, i32, i32, i32)> {
+    let peek = ((DOCK_PEEK_DIP as f64) * scale).round().max(8.0) as i32;
+    let r_edge = (16.0 * scale).round() as i32;
+    let bar_w_dip = ACTIVE_DOCK
+        .lock()
+        .map(|d| d.bar_width_dip.clamp(420, 960))
+        .unwrap_or(760);
+    let bar_w_phys = (((bar_w_dip as f64) * scale).round() as i32).min(phys_w);
+    match edge {
+        DockEdge::Left => {
+            if unread {
+                Some((0, 0, peek.min(phys_w), phys_h, r_edge))
+            } else {
+                None
+            }
+        }
+        DockEdge::Right => {
+            if unread {
+                Some(((phys_w - peek).max(0), 0, phys_w, phys_h, r_edge))
+            } else {
+                None
+            }
+        }
+        DockEdge::Top => {
+            if unread {
+                let l = ((phys_w - bar_w_phys) / 2).max(0);
+                Some((l, 0, (l + bar_w_phys).min(phys_w), peek.min(phys_h), r_edge))
+            } else {
+                None
+            }
+        }
+        DockEdge::Bottom => {
+            let hw = (76.0 * scale).round() as i32;
+            let hh = (20.0 * scale).round() as i32;
+            let l = ((phys_w - hw) / 2).max(0);
+            let t = (phys_h - hh).max(0);
+            let diam = (16.0 * scale).round() as i32;
+            Some((l, t, (l + hw).min(phys_w), phys_h, diam))
+        }
+        DockEdge::None => None,
     }
 }
 
@@ -317,7 +429,7 @@ pub fn detect_snap_edge_for_cursor(
     if cur.y <= wt + EDGE_SNAP_THRESHOLD_PX && d_top < best.1 {
         best = (DockEdge::Top, d_top);
     }
-    if cur.y >= wb - (EDGE_SNAP_THRESHOLD_PX - 4) && d_bottom < best.1 {
+    if cur.y >= wb - (EDGE_SNAP_THRESHOLD_PX + 12) && d_bottom < best.1 {
         best = (DockEdge::Bottom, d_bottom);
     }
     best.0
@@ -337,7 +449,9 @@ pub fn should_undock_on_inward_pull(
     }
 }
 
-/// Checks if the physical cursor point lies inside the ~10px peeking edge strip of a collapsed dock.
+/// Checks if the physical cursor point lies inside the dock wakeup trigger zone:
+/// - Left / Right / Top: ultra-thin 4px invisible screen-edge hotzone when idle, or ~13dip wallet strip when unread
+/// - Bottom: centered minimal handle pill zone right above the taskbar seam
 pub fn is_cursor_in_dock_peek_zone(bar_win: &WebviewWindow) -> bool {
     let Some(hwnd) = hwnd_of(bar_win) else {
         return false;
@@ -350,7 +464,13 @@ pub fn is_cursor_in_dock_peek_zone(bar_win: &WebviewWindow) -> bool {
         return false;
     }
     let scale = dpi_scale_for_hwnd(hwnd);
-    let peek = (((DOCK_PEEK_DIP + 4) as f64) * scale).round() as i32;
+    let edge_zone = if dock.unread {
+        (((DOCK_PEEK_DIP + 4) as f64) * scale).round() as i32
+    } else {
+        DOCK_INVISIBLE_HOTZONE_PX
+    };
+    let bottom_zone = ((DOCK_BOTTOM_HANDLE_ZONE_DIP as f64) * scale).round() as i32;
+    let bottom_half_w = (72.0 * scale).round() as i32;
     unsafe {
         let mut pt = POINT::default();
         let mut rc = RECT::default();
@@ -360,16 +480,20 @@ pub fn is_cursor_in_dock_peek_zone(bar_win: &WebviewWindow) -> bool {
         let (wl, wt, wr, wb) = dock.work_bounds;
         match dock.edge {
             DockEdge::Bottom => {
-                pt.x >= rc.left && pt.x <= rc.right && pt.y >= wb - peek && pt.y <= wb + 2
+                let cx = wl + (wr - wl) / 2;
+                pt.x >= cx - bottom_half_w
+                    && pt.x <= cx + bottom_half_w
+                    && pt.y >= wb - bottom_zone
+                    && pt.y <= wb + 2
             }
             DockEdge::Top => {
-                pt.x >= rc.left && pt.x <= rc.right && pt.y >= wt - 2 && pt.y <= wt + peek
+                pt.x >= rc.left && pt.x <= rc.right && pt.y >= wt - 2 && pt.y <= wt + edge_zone
             }
             DockEdge::Left => {
-                pt.y >= rc.top && pt.y <= rc.bottom && pt.x >= wl - 2 && pt.x <= wl + peek
+                pt.y >= rc.top && pt.y <= rc.bottom && pt.x >= wl - 2 && pt.x <= wl + edge_zone
             }
             DockEdge::Right => {
-                pt.y >= rc.top && pt.y <= rc.bottom && pt.x >= wr - peek && pt.x <= wr + 2
+                pt.y >= rc.top && pt.y <= rc.bottom && pt.x >= wr - edge_zone && pt.x <= wr + 2
             }
             DockEdge::None => false,
         }
@@ -532,18 +656,59 @@ pub fn step_bar_drag(bar_win: &WebviewWindow) -> DragStepResult {
         }
         let w = (sess.start_rect.right - sess.start_rect.left).max(320);
         let h = (sess.start_rect.bottom - sess.start_rect.top).max(40);
+        let scale = dpi_scale_for_hwnd(hwnd);
+        let (comp_h_dip, is_vert, bar_w_dip, side_w_dip) = ACTIVE_DOCK
+            .lock()
+            .map(|d| {
+                (
+                    d.composer_height_dip,
+                    d.vertical_mode || d.edge.is_side(),
+                    d.bar_width_dip,
+                    d.side_width_dip,
+                )
+            })
+            .unwrap_or((92, false, 760, SIDE_DOCK_WIDTH_DIP));
+        let comp_h = ((comp_h_dip.clamp(68, 260) as f64) * scale).round() as i32;
+        let panel_w = (((if is_vert { side_w_dip } else { bar_w_dip } as f64) * scale).round() as i32)
+            .clamp(320, w);
+        // Horizontal offset of the visible panel inside the constant 960dip stage HWND
+        let panel_off_x = match sess.started_edge {
+            DockEdge::Left => 0,
+            DockEdge::Right => (w - panel_w).max(0),
+            _ => ((w - panel_w) / 2).max(0),
+        };
         let work_bounds = query_monitor_work_bounds_at(cur);
         let (ml, mt, mr, mb) = work_bounds;
-        let snap_preview = detect_snap_edge_for_cursor(cur, work_bounds, sess.moved_enough);
-        sess.snap_preview = snap_preview;
+        let mut snap_preview = detect_snap_edge_for_cursor(cur, work_bounds, sess.moved_enough);
 
-        // Allow free movement across the monitor while keeping the composer reachable
-        let min_x = ml - w + 120.min(w);
-        let max_x = mr - 120.min(w);
-        let min_y = mt - (h - 140).max(0);
-        let max_y = (mb - h).max(min_y);
+        // Allow free movement of the visible panel across the entire monitor:
+        let min_x = ml - panel_off_x - panel_w + 120.min(panel_w);
+        let max_x = mr - panel_off_x - 120.min(panel_w);
+        let (min_y, max_y) = if sess.started_edge == DockEdge::Top && !is_vert {
+            (mt, (mb - comp_h.min(h)).max(mt))
+        } else if is_vert {
+            (mt - 32, (mb - 120.min(h)).max(mt - 32))
+        } else {
+            let top_allow = mt - (h - comp_h.min(h)).max(0);
+            (top_allow, (mb - h).max(top_allow))
+        };
+        let raw_y = sess.start_rect.top + dy;
         let x = (sess.start_rect.left + dx).clamp(min_x, max_x.max(min_x));
-        let y = (sess.start_rect.top + dy).clamp(min_y, max_y);
+        let y = raw_y.clamp(min_y, max_y);
+
+        // When dragging a horizontal bar downward by its top handle, pushing the composer bottom
+        // hard past the taskbar seam also snaps cleanly to Bottom dock (no need to push cursor 100px deeper).
+        if sess.moved_enough && snap_preview == DockEdge::None && !is_vert {
+            let composer_bottom_raw = if sess.started_edge == DockEdge::Top {
+                raw_y + comp_h
+            } else {
+                raw_y + h
+            };
+            if composer_bottom_raw >= mb + 24 {
+                snap_preview = DockEdge::Bottom;
+            }
+        }
+        sess.snap_preview = snap_preview;
 
         let _ = SetWindowPos(
             hwnd,
@@ -554,10 +719,18 @@ pub fn step_bar_drag(bar_win: &WebviewWindow) -> DragStepResult {
             0,
             SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
         );
+        // Save the panel's true visual center_x & bottom_y so undocking from Left/Right/Top -> Free
+        // keeps the panel pixel-exact under the user's cursor!
+        let visual_center_x = x + panel_off_x + panel_w / 2;
+        let visual_bottom_y = if sess.started_edge == DockEdge::Top && !is_vert {
+            (y + comp_h).clamp(mt + comp_h, mb)
+        } else {
+            y + h
+        };
         if let Ok(mut anchor) = CUSTOM_BAR_ANCHOR.lock() {
             *anchor = Some(CustomBarAnchor {
-                center_x: x + w / 2,
-                bottom_y: y + h,
+                center_x: visual_center_x,
+                bottom_y: visual_bottom_y,
             });
         }
         if let Ok(mut guard) = BAR_DRAG_SESSION.lock() {
@@ -827,9 +1000,19 @@ pub fn init_bar_window(bar_win: &WebviewWindow, exclude_from_capture: bool, widt
     let Some(hwnd) = hwnd_of(bar_win) else {
         return;
     };
+    let scale = dpi_scale_for_hwnd(hwnd);
+    let mon = query_cursor_monitor_geometry(Some(hwnd));
+    let (stage_w, stage_h) = compute_constant_stage_phys(
+        (mon.anchor_left, mon.anchor_top, mon.anchor_right, mon.anchor_bottom),
+        scale,
+    );
+    // Sync Tauri / WebView2 ICoreWebView2Controller bounds ONCE to the constant 960dip stage size
+    let _ = bar_win.set_size(tauri::PhysicalSize::new(stage_w as u32, stage_h as u32));
     unsafe {
         let _ = SetWindowSubclass(hwnd, Some(bar_borderless_subclass_proc), BAR_SUBCLASS_ID, 0);
         let _ = enforce_borderless_popup_style(hwnd, true);
+        // Ensure ZERO legacy GDI SetWindowRgn is ever installed on the DirectComposition WebView2 window!
+        let _ = SetWindowRgn(hwnd, None, false);
         let _ = SetWindowPos(
             hwnd,
             Some(HWND_TOPMOST),
@@ -843,7 +1026,7 @@ pub fn init_bar_window(bar_win: &WebviewWindow, exclude_from_capture: bool, widt
     }
 
     let default_shape = ShapeRectDip {
-        x: 0,
+        x: ((BAR_STAGE_MAX_WIDTH_DIP - width_dip).max(0)) / 2,
         y: BAR_STAGE_HEIGHT_DIP - 90,
         w: width_dip,
         h: 90,
@@ -903,6 +1086,21 @@ pub fn apply_capture_affinity(hwnd: HWND, exclude: bool) {
 type ScaledRgnKey = (i32, i32, Option<(i32, i32, i32, i32)>, Vec<(i32, i32, i32, i32, i32)>);
 static LAST_BAR_RGN_KEY: Mutex<Option<ScaledRgnKey>> = Mutex::new(None);
 static LAST_BAR_SHAPES_PHYS: Mutex<Vec<(i32, i32, i32, i32)>> = Mutex::new(Vec::new());
+
+/// Temporarily removes `SetWindowRgn` (unclipped full DirectComposition surface!) during a
+/// 240ms GPU animation so ZERO pixels are ever chopped half-way ("先出左边/先出右边") and DWM
+/// performs ZERO GDI region validation per frame. Restored cleanly once the animation settles.
+unsafe fn clear_window_rgn_for_anim(hwnd: HWND, keep_shapes_phys: Option<Vec<(i32, i32, i32, i32)>>) {
+    if let Ok(mut slot) = LAST_BAR_RGN_KEY.lock() {
+        *slot = None;
+    }
+    if let Some(boxes) = keep_shapes_phys {
+        if let Ok(mut slot) = LAST_BAR_SHAPES_PHYS.lock() {
+            *slot = boxes;
+        }
+    }
+    let _ = SetWindowRgn(hwnd, None, false);
+}
 
 unsafe fn apply_shapes_region_clipped(
     hwnd: HWND,
@@ -983,11 +1181,105 @@ unsafe fn apply_shapes_region_clipped(
         let _ = DeleteObject(clip_rgn.into());
     }
 
-    let _ = SetWindowRgn(hwnd, Some(master_rgn), b_redraw);
+    if SetWindowRgn(hwnd, Some(master_rgn), b_redraw) == 0 {
+        // On Win32 failure, caller retains HRGN ownership and MUST free it to avoid GDI leak.
+        let _ = DeleteObject(master_rgn.into());
+    }
 }
 
-/// Smoothly slides the docked Bar between its expanded and ~10px collapsed positions
-/// with work-area seam clipping so zero pixels ever bleed over the taskbar or adjacent monitors.
+unsafe fn apply_empty_window_rgn(hwnd: HWND, edge: DockEdge, phys_w: i32, phys_h: i32) {
+    let keepalive = match edge {
+        DockEdge::Right => ((phys_w - 1).max(0), 0, phys_w.max(1), 1),
+        _ => (0, 0, 1, 1),
+    };
+    let empty_key: ScaledRgnKey = (phys_w, phys_h, Some(keepalive), Vec::new());
+    let changed = LAST_BAR_RGN_KEY
+        .lock()
+        .map(|mut slot| {
+            if slot.as_ref() == Some(&empty_key) {
+                false
+            } else {
+                *slot = Some(empty_key);
+                true
+            }
+        })
+        .unwrap_or(true);
+    if !changed {
+        return;
+    }
+    if let Ok(mut slot) = LAST_BAR_SHAPES_PHYS.lock() {
+        slot.clear();
+    }
+    // 1x1 transparent bezel pixel keeps DWM non-occluded (0 visible pixels since DOM is translated off-screen).
+    let rgn = CreateRectRgn(keepalive.0, keepalive.1, keepalive.2, keepalive.3);
+    if SetWindowRgn(hwnd, Some(rgn), false) == 0 {
+        let _ = DeleteObject(rgn.into());
+    }
+}
+
+unsafe fn apply_collapsed_dock_rgn(
+    hwnd: HWND,
+    edge: DockEdge,
+    unread: bool,
+    phys_w: i32,
+    phys_h: i32,
+    scale: f64,
+    clip: Option<(i32, i32, i32, i32)>,
+) {
+    if let Some(shape) = compute_dock_collapsed_shape_phys(edge, unread, phys_w, phys_h, scale) {
+        apply_shapes_region_clipped(hwnd, phys_w, phys_h, scale, &[shape], clip, false);
+    } else {
+        apply_empty_window_rgn(hwnd, edge, phys_w, phys_h);
+    }
+}
+
+/// Computes the tight physical shape band for a docked panel inside the constant 960dip stage.
+fn compute_dock_band_shape_phys(
+    edge: DockEdge,
+    phys_w: i32,
+    phys_h: i32,
+    bar_w_phys: i32,
+    side_w_phys: i32,
+    comp_h_phys: i32,
+    scale: f64,
+) -> (i32, i32, i32, i32, i32) {
+    let diam = (36.0 * scale).round() as i32;
+    let bw = bar_w_phys.min(phys_w);
+    let sw = side_w_phys.min(phys_w);
+    match edge {
+        DockEdge::Bottom => {
+            let l = ((phys_w - bw) / 2).max(0);
+            (l, (phys_h - comp_h_phys - 24).max(0), (l + bw).min(phys_w), phys_h, diam)
+        }
+        DockEdge::Top => {
+            let l = ((phys_w - bw) / 2).max(0);
+            (l, 0, (l + bw).min(phys_w), (comp_h_phys + 24).min(phys_h), diam)
+        }
+        DockEdge::Left => (0, 0, sw, phys_h, diam),
+        DockEdge::Right => ((phys_w - sw).max(0), 0, phys_w, phys_h, diam),
+        DockEdge::None => {
+            let l = ((phys_w - bw) / 2).max(0);
+            (l, (phys_h - comp_h_phys - 24).max(0), (l + bw).min(phys_w), phys_h, diam)
+        }
+    }
+}
+
+/// Immediately opens `SetWindowRgn` to the union of the centered horizontal composer band AND
+/// centered vertical panel band inside the constant 960dip stage so an in-place Horizontal <-> Vertical
+/// GPU morph has 100% unclipped canvas on Frame 0 (with ZERO `SetWindowPos` / `WM_SIZE`!).
+pub fn open_orientation_morph_rgn(bar_win: &WebviewWindow, _bar_width_dip: i32) {
+    let Some(hwnd) = hwnd_of(bar_win) else {
+        return;
+    };
+    // Clear SetWindowRgn completely during the 250ms GPU orientation morph so ZERO pixels are
+    // ever clipped half-way ("先出左边/先出右边"); React restores tight RGN at t = 270ms!
+    unsafe {
+        clear_window_rgn_for_anim(hwnd, None);
+    }
+}
+
+/// GPU-composited dock slide coordinator: keeps the docked HWND at a constant 960dip stage size
+/// flush against its screen edge (ZERO `WM_SIZE` / swapchain resize stalls!).
 pub fn slide_docked_bar(
     bar_win: &WebviewWindow,
     edge: DockEdge,
@@ -1002,27 +1294,45 @@ pub fn slide_docked_bar(
         return;
     };
     let scale = dpi_scale_for_hwnd(hwnd);
-    let (work_bounds, composer_h_dip) = {
+    let (work_bounds, composer_h_dip, unread, vertical_mode, side_w_dip, prev_slid_edge, prev_slid_collapsed) = {
         let Ok(mut guard) = ACTIVE_DOCK.lock() else {
             return;
         };
+        let prev_e = guard.last_slid_edge;
+        let prev_c = guard.last_slid_collapsed;
         guard.edge = edge;
         guard.collapsed = collapsed;
-        (guard.work_bounds, guard.composer_height_dip)
+        guard.bar_width_dip = bar_width_dip.clamp(420, 960);
+        guard.last_slid_edge = edge;
+        guard.last_slid_collapsed = collapsed;
+        if !collapsed {
+            guard.unread = false;
+        }
+        (
+            guard.work_bounds,
+            guard.composer_height_dip,
+            guard.unread,
+            guard.vertical_mode,
+            guard.side_width_dip,
+            prev_e,
+            prev_c,
+        )
     };
     let (target_x, target_y, phys_w, phys_h) = compute_docked_bar_rect(
         edge,
         collapsed,
+        unread,
+        vertical_mode,
         work_bounds,
         bar_width_dip,
         composer_h_dip,
         scale,
     );
     let (wl, wt, wr, wb) = work_bounds;
-    let scaled_shapes = LAST_SCALED_SHAPES
-        .lock()
-        .map(|g| g.clone())
-        .unwrap_or_default();
+    let clip = Some((wl - target_x, wt - target_y, wr - target_x, wb - target_y));
+    let comp_h_phys = ((composer_h_dip.clamp(68, 260) as f64) * scale).round() as i32;
+    let bar_w_phys = ((bar_width_dip.clamp(420, 960) as f64) * scale).round() as i32;
+    let side_w_phys = ((side_w_dip.clamp(360, 960) as f64) * scale).round() as i32;
 
     let mut start_rc = RECT::default();
     let was_visible = unsafe {
@@ -1031,15 +1341,29 @@ pub fn slide_docked_bar(
     let same_size = was_visible
         && (start_rc.right - start_rc.left) == phys_w
         && (start_rc.bottom - start_rc.top) == phys_h;
+    let same_rect = same_size && start_rc.left == target_x && start_rc.top == target_y;
+    let edge_changed = prev_slid_edge != edge;
 
     let anim_gen = SLIDE_ANIM_GEN.fetch_add(1, Ordering::AcqRel) + 1;
 
-    if !same_size {
-        // First time entering/switching dock edge (e.g. horizontal <-> 420px side panel): snap size + pos immediately
-        let clip = Some((wl - target_x, wt - target_y, wr - target_x, wb - target_y));
-        unsafe {
-            let _ = enforce_borderless_popup_style(hwnd, !activate_and_focus);
+    if edge_changed {
+        if let Ok(mut slot) = LAST_SCALED_SHAPES.lock() {
+            slot.clear();
+        }
+        if let Ok(mut slot) = LAST_EXPANDED_SHAPES.lock() {
+            slot.clear();
+        }
+    }
+
+    // Move-only (`SWP_NOSIZE`) whenever constant stage size already matches — ZERO WebView2 swapchain resize!
+    unsafe {
+        let _ = enforce_borderless_popup_style(hwnd, !activate_and_focus);
+        if !same_rect {
             let insert_after = bar_z_insert_after();
+            let mut flags = SWP_NOACTIVATE;
+            if same_size {
+                flags |= SWP_NOSIZE;
+            }
             let _ = SetWindowPos(
                 hwnd,
                 Some(insert_after),
@@ -1047,30 +1371,10 @@ pub fn slide_docked_bar(
                 target_y,
                 phys_w,
                 phys_h,
-                SWP_NOACTIVATE | SWP_NOCOPYBITS,
-            );
-            apply_shapes_region_clipped(hwnd, phys_w, phys_h, scale, &scaled_shapes, clip, false);
-            if activate_and_focus {
-                let _ = ShowWindow(hwnd, SW_SHOW);
-            } else {
-                let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
-            }
-        }
-        if activate_and_focus {
-            focus_hwnd_without_sendinput(hwnd);
-            let _ = bar_win.set_focus();
-            raise_overlay_topmost_if_visible();
-            let _ = bar_win.eval(
-                "if (window.__DSB_BRIDGE__) { window.__DSB_BRIDGE__.focusComposer(); setTimeout(() => window.__DSB_BRIDGE__ && window.__DSB_BRIDGE__.focusComposer(), 60); }",
+                flags,
             );
         }
-        return;
-    }
-
-    // Ensure window is visible before animating
-    unsafe {
-        let _ = enforce_borderless_popup_style(hwnd, !activate_and_focus);
-        if !IsWindowVisible(hwnd).as_bool() {
+        if !was_visible {
             let _ = ShowWindow(
                 hwnd,
                 if activate_and_focus {
@@ -1082,62 +1386,119 @@ pub fn slide_docked_bar(
         }
     }
 
-    let start_x = start_rc.left;
-    let start_y = start_rc.top;
-    if start_x == target_x && start_y == target_y {
-        let clip = Some((wl - target_x, wt - target_y, wr - target_x, wb - target_y));
+    if !collapsed {
+        let band_shape = compute_dock_band_shape_phys(
+            edge,
+            phys_w,
+            phys_h,
+            bar_w_phys,
+            side_w_phys,
+            comp_h_phys,
+            scale,
+        );
+        let final_shapes: Vec<(i32, i32, i32, i32, i32)> = if edge_changed || !same_rect {
+            vec![band_shape]
+        } else {
+            let cached = LAST_EXPANDED_SHAPES
+                .lock()
+                .map(|g| g.clone())
+                .unwrap_or_default();
+            if !cached.is_empty() {
+                cached
+            } else {
+                vec![band_shape]
+            }
+        };
+        let final_boxes: Vec<(i32, i32, i32, i32)> = final_shapes
+            .iter()
+            .map(|&(l, t, r, b, _)| (l, t, r, b))
+            .collect();
+        // Clear GDI SetWindowRgn completely during the 260ms GPU slide/morph (unclipped DirectComposition!),
+        // while keeping `LAST_BAR_SHAPES_PHYS` tight to `final_boxes` so OutsideClick works on click #1!
         unsafe {
-            apply_shapes_region_clipped(hwnd, phys_w, phys_h, scale, &scaled_shapes, clip, true);
+            clear_window_rgn_for_anim(hwnd, Some(final_boxes));
         }
+
+        // Restore tight resting SetWindowRgn once the 250ms GPU animation finishes!
+        SLIDE_ANIM_ACTIVE.store(true, Ordering::Release);
+        let hwnd_raw = hwnd.0 as isize;
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(260));
+            let _rgn_guard = RGN_ANIM_LOCK.lock();
+            if SLIDE_ANIM_GEN.load(Ordering::Acquire) != anim_gen {
+                return;
+            }
+            let hwnd = HWND(hwnd_raw as *mut std::ffi::c_void);
+            if unsafe { !windows::Win32::UI::WindowsAndMessaging::IsWindow(Some(hwnd)).as_bool() } {
+                SLIDE_ANIM_ACTIVE.store(false, Ordering::Release);
+                return;
+            }
+            let raw_live = LAST_EXPANDED_SHAPES
+                .lock()
+                .ok()
+                .filter(|g| !g.is_empty())
+                .map(|g| g.clone())
+                .unwrap_or_default();
+            let has_visible_shape = raw_live.iter().any(|&(l, t, r, b, _)| {
+                let il = l.max(0);
+                let it = t.max(0);
+                let ir = r.min(phys_w);
+                let ib = b.min(phys_h);
+                (ir - il) >= 32 && (ib - it) >= 24
+            });
+            let live_shapes = if has_visible_shape {
+                raw_live
+            } else {
+                final_shapes
+            };
+            unsafe {
+                apply_shapes_region_clipped(hwnd, phys_w, phys_h, scale, &live_shapes, clip, false);
+            }
+            SLIDE_ANIM_ACTIVE.store(false, Ordering::Release);
+        });
+
         if activate_and_focus {
             focus_hwnd_without_sendinput(hwnd);
             let _ = bar_win.set_focus();
+            raise_overlay_topmost_if_visible();
             let _ = bar_win.eval(
-                "if (window.__DSB_BRIDGE__) { window.__DSB_BRIDGE__.focusComposer(); }",
+                "if (window.__DSB_BRIDGE__) { window.__DSB_BRIDGE__.focusComposer(); setTimeout(() => window.__DSB_BRIDGE__ && window.__DSB_BRIDGE__.focusComposer(), 60); }",
             );
         }
         return;
     }
 
-    // Silky 126ms cubic ease-out slide (9 steps × 14ms) on a tiny worker thread so UI never blocks
-    let win_clone = bar_win.clone();
+    // COLLAPSING (or toggling unread while already collapsed):
+    if edge_changed || !same_rect || (prev_slid_collapsed && unread) {
+        SLIDE_ANIM_ACTIVE.store(false, Ordering::Release);
+        unsafe {
+            apply_collapsed_dock_rgn(hwnd, edge, unread, phys_w, phys_h, scale, clip);
+        }
+        return;
+    }
+
+    // Normal smooth collapse: clear GDI SetWindowRgn during the 260ms GPU glide (zero mid-air chop!),
+    // THEN seal to 1x1 keepalive / 9dip unread / bottom handle pill!
+    SLIDE_ANIM_ACTIVE.store(true, Ordering::Release);
+    unsafe {
+        clear_window_rgn_for_anim(hwnd, Some(Vec::new()));
+    }
     let hwnd_raw = hwnd.0 as isize;
     std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(265));
+        let _rgn_guard = RGN_ANIM_LOCK.lock();
+        if SLIDE_ANIM_GEN.load(Ordering::Acquire) != anim_gen {
+            return;
+        }
         let hwnd = HWND(hwnd_raw as *mut std::ffi::c_void);
-        let steps = 9i32;
-        for step in 1..=steps {
-            if SLIDE_ANIM_GEN.load(Ordering::Acquire) != anim_gen {
-                return;
-            }
-            let t = (step as f64) / (steps as f64);
-            let ease = 1.0 - (1.0 - t).powi(3);
-            let cx = start_x + (((target_x - start_x) as f64) * ease).round() as i32;
-            let cy = start_y + (((target_y - start_y) as f64) * ease).round() as i32;
-            let clip = Some((wl - cx, wt - cy, wr - cx, wb - cy));
-            unsafe {
-                let _ = SetWindowPos(
-                    hwnd,
-                    None,
-                    cx,
-                    cy,
-                    0,
-                    0,
-                    SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
-                );
-                apply_shapes_region_clipped(hwnd, phys_w, phys_h, scale, &scaled_shapes, clip, true);
-            }
-            if step < steps {
-                std::thread::sleep(std::time::Duration::from_millis(14));
-            }
+        if unsafe { !windows::Win32::UI::WindowsAndMessaging::IsWindow(Some(hwnd)).as_bool() } {
+            SLIDE_ANIM_ACTIVE.store(false, Ordering::Release);
+            return;
         }
-        if activate_and_focus && SLIDE_ANIM_GEN.load(Ordering::Acquire) == anim_gen {
-            focus_hwnd_without_sendinput(hwnd);
-            let _ = win_clone.set_focus();
-            raise_overlay_topmost_if_visible();
-            let _ = win_clone.eval(
-                "if (window.__DSB_BRIDGE__) { window.__DSB_BRIDGE__.focusComposer(); }",
-            );
+        unsafe {
+            apply_collapsed_dock_rgn(hwnd, edge, unread, phys_w, phys_h, scale, clip);
         }
+        SLIDE_ANIM_ACTIVE.store(false, Ordering::Release);
     });
 }
 
@@ -1168,6 +1529,13 @@ pub fn is_point_inside_bar_shapes(pt: POINT, hwnd: HWND) -> bool {
             if !guard.is_empty() {
                 return point_hits_any_phys_rect(rx, ry, &guard);
             }
+            // When docked & collapsed with an empty shape list (invisible 1x1 keepalive on L/R/T),
+            // NEVER treat the invisible 960x900 backing stage as "on the Bar"!
+            if let Ok(dock) = ACTIVE_DOCK.try_lock() {
+                if dock.edge.is_docked() && dock.collapsed {
+                    return false;
+                }
+            }
         }
         true
     }
@@ -1178,7 +1546,7 @@ pub fn is_point_inside_bar_shapes(pt: POINT, hwnd: HWND) -> bool {
 pub fn apply_bar_layout(
     bar_win: &WebviewWindow,
     width_dip: i32,
-    height_dip: i32,
+    _height_dip: i32,
     shapes: &[ShapeRectDip],
 ) {
     let Some(hwnd) = hwnd_of(bar_win) else {
@@ -1194,6 +1562,8 @@ pub fn apply_bar_layout(
         let (dx, dy, dw, dh) = compute_docked_bar_rect(
             d.edge,
             d.collapsed,
+            d.unread,
+            d.vertical_mode,
             d.work_bounds,
             width_dip,
             d.composer_height_dip,
@@ -1202,36 +1572,56 @@ pub fn apply_bar_layout(
         let (wl, wt, wr, wb) = d.work_bounds;
         (dx, dy, dw, dh, Some((wl - dx, wt - dy, wr - dx, wb - dy)))
     } else {
+        // Free-floating (BOTH Horizontal and Vertical) ALWAYS shares the exact same constant
+        // `960dip × stage_h` backing stage so toggling Horizontal <-> Vertical or resizing width
+        // NEVER resizes the WebView2 HWND or triggers swapchain reallocation!
+        let is_vert = dock_rt.map(|d| d.vertical_mode).unwrap_or(false);
         let custom_anchor = CUSTOM_BAR_ANCHOR.lock().ok().and_then(|g| *g);
-        if let Some(anchor) = custom_anchor {
-            let bounds = query_monitor_work_bounds_at(POINT {
+        let bounds = if let Some(anchor) = custom_anchor {
+            query_monitor_work_bounds_at(POINT {
                 x: anchor.center_x,
                 y: anchor.bottom_y - 24,
-            });
-            let avail_w = (bounds.2 - bounds.0).max(320);
-            let avail_h = (bounds.3 - bounds.1).max(120);
-            let clamped_w = (((width_dip as f64) * scale).round() as i32).clamp(320, avail_w);
-            let clamped_h = (((height_dip as f64) * scale).round() as i32).clamp(40, avail_h);
-            let (cx, cy) =
-                compute_custom_anchored_rect(anchor.center_x, anchor.bottom_y, clamped_w, clamped_h, bounds);
-            (cx, cy, clamped_w, clamped_h, None)
+            })
         } else {
             let mon = query_cursor_monitor_geometry(Some(hwnd));
-            let (bx, by, bw, bh) = compute_bottom_anchored_rect(
-                (
-                    mon.anchor_left,
-                    mon.anchor_top,
-                    mon.anchor_right,
-                    mon.anchor_bottom,
-                ),
-                width_dip,
-                height_dip,
-                BOTTOM_MARGIN_DIP,
-                scale,
-            );
-            (bx, by, bw, bh, None)
-        }
+            (mon.anchor_left, mon.anchor_top, mon.anchor_right, mon.anchor_bottom)
+        };
+        let (stage_w, stage_h) = compute_constant_stage_phys(bounds, scale);
+        let (wl, wt, wr, wb) = bounds;
+        let avail_w = (wr - wl).max(360);
+        let avail_h = (wb - wt).max(420);
+        let (cx, cy) = if let Some(anchor) = custom_anchor {
+            let comp_h_dip = dock_rt.map(|d| d.composer_height_dip).unwrap_or(92);
+            let comp_h_phys = ((comp_h_dip.clamp(68, 260) as f64) * scale).round() as i32;
+            let bar_w_dip = dock_rt.map(|d| d.bar_width_dip).unwrap_or(width_dip);
+            let side_w_dip = dock_rt.map(|d| d.side_width_dip).unwrap_or(SIDE_DOCK_WIDTH_DIP);
+            let panel_w = (((if is_vert { side_w_dip } else { bar_w_dip } as f64) * scale).round() as i32)
+                .clamp(320, stage_w);
+            let pad_x = ((stage_w - panel_w) / 2).max(0);
+            let top_pad = if is_vert {
+                0
+            } else {
+                (stage_h - comp_h_phys.min(stage_h)).max(0)
+            };
+            let stage_bounds = (wl - pad_x, wt - top_pad, wr + pad_x, wb);
+            compute_custom_anchored_rect(anchor.center_x, anchor.bottom_y, stage_w, stage_h, stage_bounds)
+        } else if is_vert {
+            (wl + (avail_w - stage_w) / 2, wt + (avail_h - stage_h) / 2)
+        } else {
+            let phys_margin = ((BOTTOM_MARGIN_DIP as f64) * scale).round() as i32;
+            (wl + (avail_w - stage_w) / 2, (wb - phys_margin - stage_h).max(wt))
+        };
+        (cx, cy, stage_w, stage_h, None)
     };
+
+    // Never overwrite SetWindowRgn while a GPU dock slide is in flight, or while any docked edge is collapsed
+    // (Rust owns the collapsed RGN / centered bottom handle pill cleanly!).
+    if SLIDE_ANIM_ACTIVE.load(Ordering::Acquire) {
+        return;
+    }
+    if dock_rt.is_some_and(|d| d.edge.is_docked() && d.collapsed) {
+        return;
+    }
 
     let scaled_shapes: Vec<(i32, i32, i32, i32, i32)> = shapes
         .iter()
@@ -1241,45 +1631,52 @@ pub fn apply_bar_layout(
     if let Ok(mut slot) = LAST_SCALED_SHAPES.lock() {
         *slot = scaled_shapes.clone();
     }
+    // Never poison LAST_EXPANDED_SHAPES with mid-slide or off-screen collapsed DOM rects!
+    let has_onscreen_shape = scaled_shapes.iter().any(|&(l, t, r, b, _)| {
+        let il = l.max(0);
+        let it = t.max(0);
+        let ir = r.min(phys_w);
+        let ib = b.min(phys_h);
+        (ir - il) >= 32 && (ib - it) >= 24
+    });
+    if has_onscreen_shape
+        && !SLIDE_ANIM_ACTIVE.load(Ordering::Acquire)
+        && !dock_rt.map(|d| d.collapsed).unwrap_or(false)
+    {
+        if let Ok(mut slot) = LAST_EXPANDED_SHAPES.lock() {
+            *slot = scaled_shapes.clone();
+        }
+    }
 
     unsafe {
         let overlay_vis = visible_overlay_hwnd();
         let already_topmost = (GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as u32 & WS_EX_TOPMOST.0) != 0;
         let mut cur_rc = RECT::default();
-        let same_rect = GetWindowRect(hwnd, &mut cur_rc).is_ok()
-            && cur_rc.left == x
-            && cur_rc.top == y
+        let got_rc = GetWindowRect(hwnd, &mut cur_rc).is_ok();
+        let same_size = got_rc
             && (cur_rc.right - cur_rc.left) == phys_w
             && (cur_rc.bottom - cur_rc.top) == phys_h;
+        let same_rect = same_size && cur_rc.left == x && cur_rc.top == y;
         let pos_changed = !same_rect;
 
         if overlay_vis.is_none() && already_topmost {
             if pos_changed {
-                let _ = SetWindowPos(
-                    hwnd,
-                    None,
-                    x,
-                    y,
-                    phys_w,
-                    phys_h,
-                    SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOCOPYBITS,
-                );
+                let mut flags = SWP_NOZORDER | SWP_NOACTIVATE;
+                if same_size {
+                    flags |= SWP_NOSIZE;
+                }
+                let _ = SetWindowPos(hwnd, None, x, y, phys_w, phys_h, flags);
             }
         } else {
             let insert_after = overlay_vis.unwrap_or(HWND_TOPMOST);
             let mut flags = SWP_NOACTIVATE;
-            if pos_changed {
-                flags |= SWP_NOCOPYBITS;
+            if same_size {
+                flags |= SWP_NOSIZE;
             }
-            let _ = SetWindowPos(
-                hwnd,
-                Some(insert_after),
-                x,
-                y,
-                phys_w,
-                phys_h,
-                flags,
-            );
+            if !pos_changed {
+                flags |= SWP_NOMOVE;
+            }
+            let _ = SetWindowPos(hwnd, Some(insert_after), x, y, phys_w, phys_h, flags);
         }
 
         apply_shapes_region_clipped(
@@ -1705,56 +2102,58 @@ mod tests {
     #[test]
     fn docked_bar_rect_computes_all_four_edges_expanded_and_collapsed() {
         let work = (0, 0, 1920, 1040);
-        // Bottom dock: expanded sits flush at work_bottom; collapsed peeks 10px above taskbar seam
+        let (stage_w, stage_h) = compute_constant_stage_phys(work, 1.0);
+        assert_eq!(stage_w, BAR_STAGE_MAX_WIDTH_DIP);
+        assert_eq!(stage_h, (1040.0 * SIDE_DOCK_HEIGHT_RATIO).round() as i32);
+
+        // Bottom dock: constant 960dip stage flush at work_bottom
         let (bx, by, bw, bh) =
-            compute_docked_bar_rect(DockEdge::Bottom, false, work, 760, 104, 1.0);
-        assert_eq!((bw, bh), (760, BAR_STAGE_HEIGHT_DIP));
-        assert_eq!(bx, (1920 - 760) / 2);
+            compute_docked_bar_rect(DockEdge::Bottom, false, false, false, work, 760, 104, 1.0);
+        assert_eq!((bw, bh), (stage_w, stage_h));
+        assert_eq!(bx, (1920 - stage_w) / 2);
         assert_eq!(by + bh, 1040);
 
         let (bcx, bcy, bcw, bch) =
-            compute_docked_bar_rect(DockEdge::Bottom, true, work, 760, 104, 1.0);
-        assert_eq!((bcx, bcw, bch), (bx, bw, bh));
-        // Composer occupies bottom 104px of 680px stage -> composer top is at bcy + (680 - 104) = 1040 - 10
-        assert_eq!(bcy + (BAR_STAGE_HEIGHT_DIP - 104), 1040 - DOCK_PEEK_DIP);
+            compute_docked_bar_rect(DockEdge::Bottom, true, false, false, work, 760, 104, 1.0);
+        assert_eq!((bcx, bcy, bcw, bch), (bx, by, bw, bh));
 
-        // Top dock: expanded sits flush at work_top; collapsed peeks 10px down from top edge
+        // Top dock: constant stage flush at top; collapsed RGN is None idle / 9dip unread
         let (tx, ty, tw, th) =
-            compute_docked_bar_rect(DockEdge::Top, false, work, 760, 104, 1.0);
-        assert_eq!((tw, th), (760, BAR_STAGE_HEIGHT_DIP));
-        assert_eq!(tx, (1920 - 760) / 2);
+            compute_docked_bar_rect(DockEdge::Top, false, false, false, work, 760, 104, 1.0);
+        assert_eq!((tw, th), (stage_w, stage_h));
+        assert_eq!(tx, (1920 - stage_w) / 2);
         assert_eq!(ty, 0);
+        assert_eq!(compute_dock_collapsed_shape_phys(DockEdge::Top, false, tw, th, 1.0), None);
+        assert_eq!(
+            compute_dock_collapsed_shape_phys(DockEdge::Top, true, tw, th, 1.0).map(|s| s.3),
+            Some(DOCK_PEEK_DIP)
+        );
 
-        let (tcx, tcy, _, _) =
-            compute_docked_bar_rect(DockEdge::Top, true, work, 760, 104, 1.0);
-        assert_eq!(tcx, tx);
-        // Composer occupies top 104px of stage -> composer bottom is at tcy + 104 = 10
-        assert_eq!(tcy + 104, DOCK_PEEK_DIP);
-
-        // Left dock: 420px wide x 84% work height, vertically centered
+        // Left dock: constant stage flush at left; collapsed RGN is None idle / 9dip unread
         let (lx, ly, lw, lh) =
-            compute_docked_bar_rect(DockEdge::Left, false, work, 760, 104, 1.0);
-        assert_eq!(lw, SIDE_DOCK_WIDTH_DIP);
+            compute_docked_bar_rect(DockEdge::Left, false, false, true, work, 760, 104, 1.0);
+        assert_eq!((lw, lh), (stage_w, stage_h));
         assert_eq!(lx, 0);
-        assert_eq!(lh, (1040.0 * SIDE_DOCK_HEIGHT_RATIO).round() as i32);
-        assert_eq!(ly, (1040 - lh) / 2);
+        assert_eq!(ly, (1040 - stage_h) / 2);
+        assert_eq!(compute_dock_collapsed_shape_phys(DockEdge::Left, false, lw, lh, 1.0), None);
+        assert_eq!(
+            compute_dock_collapsed_shape_phys(DockEdge::Left, true, lw, lh, 1.0).map(|s| s.2),
+            Some(DOCK_PEEK_DIP)
+        );
 
-        let (lcx, lcy, _, _) =
-            compute_docked_bar_rect(DockEdge::Left, true, work, 760, 104, 1.0);
-        assert_eq!(lcy, ly);
-        assert_eq!(lcx + lw, DOCK_PEEK_DIP);
-
-        // Right dock: 420px wide x 84% work height, flush right; collapsed peeks 10px from right edge
+        // Right dock: constant stage flush at right; collapsed RGN is None idle / 9dip unread
         let (rx, ry, rw, rh) =
-            compute_docked_bar_rect(DockEdge::Right, false, work, 760, 104, 1.0);
-        assert_eq!((rw, rh), (lw, lh));
+            compute_docked_bar_rect(DockEdge::Right, false, false, true, work, 760, 104, 1.0);
+        assert_eq!((rw, rh), (stage_w, stage_h));
         assert_eq!(rx + rw, 1920);
         assert_eq!(ry, ly);
-
-        let (rcx, rcy, _, _) =
-            compute_docked_bar_rect(DockEdge::Right, true, work, 760, 104, 1.0);
-        assert_eq!(rcy, ry);
-        assert_eq!(rcx, 1920 - DOCK_PEEK_DIP);
+        assert_eq!(compute_dock_collapsed_shape_phys(DockEdge::Right, false, rw, rh, 1.0), None);
+        assert_eq!(
+            compute_dock_collapsed_shape_phys(DockEdge::Right, true, rw, rh, 1.0).map(|s| (s.0, s.2)),
+            Some((rw - DOCK_PEEK_DIP, rw))
+        );
+        // Bottom collapsed RGN is centered handle pill
+        assert!(compute_dock_collapsed_shape_phys(DockEdge::Bottom, false, bw, bh, 1.0).is_some());
     }
 
     #[test]

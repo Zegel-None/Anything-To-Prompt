@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 1,
+  "id": "kicad-eda-deep",
+  "name": "KiCad 原理图/PCB 深度追踪",
+  "version": "1.0.0",
+  "author": "Anything-to-Prompt Community",
+  "description": "自动识别 KiCad 原理图/PCB 工程路径与当前图纸名，并优化工具栏找框策略",
+  "homepage": "https://github.com/Zegel-None/Anything-To-Prompt/tree/main/adapter-registry/plugins/kicad-eda-deep",
+  "category": "cad_3d",
+  "match": {
+    "exes": ["kicad.exe", "pcbnew.exe", "eeschema.exe"]
+  },
+  "capabilities": ["enrich_pick", "ui_profile"],
+  "priority": 110,
+  "timeoutMs": 600,
+  "uiProfile": {
+    "uiaPolicy": "watchdog_only",
+    "preferredLayers": ["static_visual_hit_map", "msaa_hit_map"],
+    "ignoreBackground": true
+  },
+  "runtime": {
+    "kind": "declarative",
+    "rules": [
+      { "field": "cmdline", "op": "file_ext", "arg1": ".kicad_pcb", "outputKey": "kicad_pcb_path", "isPath": true, "setBadge": true },
+      { "field": "cmdline", "op": "file_ext", "arg1": ".kicad_sch", "outputKey": "kicad_sch_path", "isPath": true, "setBadge": true },
+      { "field": "cmdline", "op": "file_ext", "arg1": ".kicad_pro", "outputKey": "kicad_project_path", "isPath": true, "setBadge": false },
+      { "field": "window_title", "op": "split", "arg1": "—", "index": 0, "outputKey": "kicad_document", "isPath": false, "setBadge": true }
+    ]
+  }
+}

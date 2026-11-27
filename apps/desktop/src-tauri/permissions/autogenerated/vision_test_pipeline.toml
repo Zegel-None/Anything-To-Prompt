@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-vision-test-pipeline"
+description = "Enables the vision_test_pipeline command without any pre-configured scope."
+commands.allow = ["vision_test_pipeline"]
+
+[[permission]]
+identifier = "deny-vision-test-pipeline"
+description = "Denies the vision_test_pipeline command without any pre-configured scope."
+commands.deny = ["vision_test_pipeline"]

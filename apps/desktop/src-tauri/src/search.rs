@@ -1041,9 +1041,31 @@ pub fn build_quick_search_capsule(
         .unwrap_or_default();
 
     if matches!(ext.as_str(), "sldprt" | "sldasm" | "slddrw") {
-        lines.push(format!(
-            "[SW-TARGET] doc=\"{path_str}\" kind=DOCUMENT | 可调用 Zegel-SWE MCP [solidworks] 打开或读取特征树"
-        ));
+        let doc_type = match ext.as_str() {
+            "sldprt" => "Part",
+            "sldasm" => "Assembly",
+            "slddrw" => "Drawing",
+            _ => "Unknown",
+        };
+        let payload = crate::pick::adapters::solidworks::SwTargetV2Payload {
+            schema: crate::pick::adapters::solidworks::SW_SCHEMA_V2.to_string(),
+            pick_mode: "document_only".to_string(),
+            doc_context: crate::pick::adapters::solidworks::SwDocContext {
+                doc: crate::pick::adapters::solidworks::SwDocInfo {
+                    title: name.to_string(),
+                    path: path_str.to_string(),
+                    doc_type: doc_type.to_string(),
+                    active_config: String::new(),
+                    config_names: Vec::new(),
+                    is_dirty: false,
+                },
+                ..Default::default()
+            },
+            targets: Vec::new(),
+        };
+        if let Ok(compact) = serde_json::to_string(&payload) {
+            lines.push(format!("[SW-TARGET v2] {compact}"));
+        }
     } else if matches!(
         ext.as_str(),
         "md" | "txt" | "json" | "yaml" | "yml" | "toml" | "rs" | "py" | "ts" | "tsx" | "js" | "jsx" | "ps1" | "csv" | "ini" | "cfg"
@@ -1205,7 +1227,8 @@ mod tests {
         assert_eq!(cap.summary_label, "①");
         assert_eq!(cap.summary_title, "① 支架.SLDPRT");
         assert!(cap.text.contains("[DSB-PICK #1 | kind=quick_search_file]"));
-        assert!(cap.text.contains("[SW-TARGET]"));
+        assert!(cap.text.contains("[SW-TARGET v2] "));
+        assert!(!cap.text.contains("Zegel-SWE MCP"));
     }
 
     #[test]
@@ -1247,12 +1270,14 @@ mod tests {
         // 2. SolidWorks COM non-crash smoke check
         let broker = crate::broker::BrokerClient::new();
         let sw_t0 = Instant::now();
-        let sw_res = crate::pick::adapters::solidworks::pick_solidworks_feature_com(
-            &broker, 500, 500, None,
+        let sw_res = crate::pick::adapters::solidworks::pick_solidworks_v2(
+            &broker,
+            Some((500, 500)),
+            crate::pick::adapters::solidworks::SwPickMode::CurrentSelectionOnly,
         );
         eprintln!(
-            "[LIVE] SolidWorks COM smoke returned is_some={} in {}ms",
-            sw_res.is_some(),
+            "[LIVE] SolidWorks COM v2 smoke returned {:?} in {}ms",
+            std::mem::discriminant(&sw_res),
             sw_t0.elapsed().as_millis()
         );
 

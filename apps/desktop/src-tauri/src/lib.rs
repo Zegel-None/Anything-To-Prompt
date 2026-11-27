@@ -19,6 +19,7 @@ pub mod search;
 pub mod state;
 pub mod tray;
 pub mod universal;
+pub mod win32_util;
 pub mod window;
 
 use crate::broker::BrokerClient;
@@ -68,6 +69,8 @@ pub struct CliOptions {
     pub dev_pick_tap: Option<(i32, i32)>,
     pub dev_pick_stroke: Option<(i32, i32, i32, i32)>,
     pub dev_pick_lasso: Option<Vec<(i32, i32)>>,
+    pub probe_window: Option<String>,
+    pub probe_out: Option<String>,
     pub passthrough_args: Vec<String>,
 }
 
@@ -113,6 +116,18 @@ impl CliOptions {
                 }
                 "--antigravity-sidecar" => {
                     out.antigravity_sidecar = true;
+                }
+                "--probe-window" => {
+                    if i + 1 < vec.len() {
+                        out.probe_window = Some(vec[i + 1].clone());
+                        i += 1;
+                    }
+                }
+                "--out" => {
+                    if i + 1 < vec.len() {
+                        out.probe_out = Some(vec[i + 1].clone());
+                        i += 1;
+                    }
                 }
                 "--harness" => {
                     if i + 1 < vec.len() {
@@ -306,6 +321,7 @@ pub struct AppShared {
     pub last_outside_hide_at: Mutex<Option<std::time::Instant>>,
     pub live_sync_enabled: Arc<AtomicBool>,
     pub last_target_window: Mutex<Option<universal::TargetWindowInfo>>,
+    pub attached_sw_entities: Mutex<std::collections::HashSet<String>>,
 }
 
 impl AppShared {
@@ -348,6 +364,7 @@ pub struct BarReportPayload {
     pub composer_focused: bool,
     pub capsule_count: usize,
     pub after_insert: bool,
+    pub sw_entity_keys: Option<Vec<String>>,
     pub detail: String,
 }
 
@@ -359,15 +376,30 @@ fn bar_report(app: AppHandle, payload: BarReportPayload) {
 
     match payload.kind.as_str() {
         "layout" => {
-            let width = payload.width.clamp(480, 1200);
-            let height = payload.target_height.clamp(DEFAULT_LIP_HEIGHT_DIP, 900);
-
-            if let Ok(mut cfg) = shared.config.lock() {
-                if cfg.bar_width != width {
-                    cfg.bar_width = width;
-                    let _ = cfg.save();
+            let dock_snap = window::get_dock_runtime_snapshot();
+            let is_vertical = dock_snap.edge.is_side() || dock_snap.vertical;
+            let width = if is_vertical {
+                let sw = payload.width.clamp(360, 960);
+                window::set_dock_side_width_dip(sw);
+                if let Ok(mut cfg) = shared.config.lock() {
+                    if cfg.side_width != sw {
+                        cfg.side_width = sw;
+                        let _ = cfg.save();
+                    }
                 }
-            }
+                sw
+            } else {
+                let hw = payload.width.clamp(480, 960);
+                window::set_dock_bar_width_dip(hw);
+                if let Ok(mut cfg) = shared.config.lock() {
+                    if cfg.bar_width != hw {
+                        cfg.bar_width = hw;
+                        let _ = cfg.save();
+                    }
+                }
+                hw
+            };
+            let height = payload.target_height.clamp(DEFAULT_LIP_HEIGHT_DIP, 1400);
 
             let mut prev_h = 0i32;
             if let Ok(mut cached) = shared.last_layout.lock() {
@@ -437,10 +469,25 @@ fn bar_report(app: AppHandle, payload: BarReportPayload) {
         }
 
         "submitted" => {
+            if let Ok(mut set) = shared.attached_sw_entities.lock() {
+                set.clear();
+            }
             dispatch_state_event(&app, StateEvent::Submitted);
         }
 
         "capsules" => {
+            if let Ok(mut set) = shared.attached_sw_entities.lock() {
+                if payload.capsule_count == 0 {
+                    set.clear();
+                } else if let Some(keys) = payload.sw_entity_keys {
+                    set.clear();
+                    for k in keys {
+                        if !k.is_empty() {
+                            set.insert(k);
+                        }
+                    }
+                }
+            }
             if let Ok(mut st) = shared.pick_counter.lock() {
                 st.sync_from_composer(payload.capsule_count, payload.after_insert);
                 log::info!(
@@ -488,10 +535,250 @@ fn bar_report(app: AppHandle, payload: BarReportPayload) {
             log::info!("[WEBVIEW-DIAG] {}", payload.detail);
         }
 
+        "capsule_rejected" => {
+            if !payload.detail.trim().is_empty() {
+                pick::self_heal::record_user_rejection(Some(&app), payload.detail.trim());
+            }
+        }
+
         other => {
             log::debug!("Unhandled bar_report kind: {other}");
         }
     }
+}
+
+#[tauri::command]
+fn pick_list_profiles() -> serde_json::Value {
+    serde_json::json!({
+        "profiles": pick::profile::list_all_profiles(),
+        "visualBoxProvider": pick::hitmap::active_visual_box_provider_name(),
+    })
+}
+
+#[tauri::command]
+fn pick_reset_profile(exe_name: String) -> Result<bool, String> {
+    pick::self_heal::clear_runtime_health(&exe_name);
+    pick::hitmap::invalidate_all_hitmaps();
+    pick::profile::reset_learned_profile(&exe_name).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn pick_export_profile(exe_name: String) -> Result<String, String> {
+    pick::profile::export_profile_json(&exe_name).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn pick_import_profile(raw_json: String) -> Result<pick::profile::AppUiProfile, String> {
+    let saved = pick::profile::import_profile_json(&raw_json).map_err(|e| e.to_string())?;
+    pick::self_heal::clear_runtime_health(&saved.exe_name);
+    pick::hitmap::invalidate_all_hitmaps();
+    Ok(saved)
+}
+
+#[tauri::command]
+fn adapter_plugins_list() -> pick::adapter_plugins::AdapterPluginsOverview {
+    pick::adapter_plugins::list_plugins()
+}
+
+#[tauri::command]
+fn adapter_plugins_reload() -> pick::adapter_plugins::AdapterPluginsOverview {
+    pick::hitmap::invalidate_all_hitmaps();
+    pick::adapter_plugins::reload_from_disk()
+}
+
+#[tauri::command]
+fn adapter_plugins_set_enabled(
+    id: String,
+    enabled: bool,
+) -> Result<pick::adapter_plugins::AdapterPluginItem, String> {
+    let item = pick::adapter_plugins::set_plugin_enabled(&id, enabled).map_err(|e| e.to_string())?;
+    pick::hitmap::invalidate_all_hitmaps();
+    Ok(item)
+}
+
+#[tauri::command]
+async fn adapter_plugins_install_url(
+    url: String,
+    trust_command: Option<bool>,
+) -> Result<pick::adapter_plugins::AdapterPluginItem, String> {
+    let trust = trust_command.unwrap_or(false);
+    let item = tauri::async_runtime::spawn_blocking(move || {
+        pick::adapter_plugins::install_from_url(&url, trust)
+    })
+    .await
+    .map_err(|e| format!("task join error: {e}"))?
+    .map_err(|e| e.to_string())?;
+    pick::hitmap::invalidate_all_hitmaps();
+    Ok(item)
+}
+
+#[tauri::command]
+fn adapter_plugins_install_json(
+    raw_json: String,
+    source_hint: Option<String>,
+    trust_command: Option<bool>,
+) -> Result<pick::adapter_plugins::AdapterPluginItem, String> {
+    let item = pick::adapter_plugins::install_from_json(
+        &raw_json,
+        source_hint.as_deref(),
+        trust_command.unwrap_or(false),
+    )
+    .map_err(|e| e.to_string())?;
+    pick::hitmap::invalidate_all_hitmaps();
+    Ok(item)
+}
+
+#[tauri::command]
+async fn adapter_plugins_install_file(
+    path: String,
+    trust_command: Option<bool>,
+) -> Result<pick::adapter_plugins::AdapterPluginItem, String> {
+    let trust = trust_command.unwrap_or(false);
+    let item = tauri::async_runtime::spawn_blocking(move || {
+        pick::adapter_plugins::install_from_local_path(&path, trust)
+    })
+    .await
+    .map_err(|e| format!("task join error: {e}"))?
+    .map_err(|e| e.to_string())?;
+    pick::hitmap::invalidate_all_hitmaps();
+    Ok(item)
+}
+
+#[tauri::command]
+fn adapter_plugins_uninstall(id: String) -> Result<bool, String> {
+    let removed = pick::adapter_plugins::uninstall_plugin(&id).map_err(|e| e.to_string())?;
+    pick::hitmap::invalidate_all_hitmaps();
+    Ok(removed)
+}
+
+#[tauri::command]
+fn adapter_plugins_export(id: String) -> Result<String, String> {
+    pick::adapter_plugins::export_plugin_json(&id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn adapter_plugins_fetch_registry(
+    registry_url: Option<String>,
+) -> Result<pick::adapter_plugins::RegistryFetchResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        pick::adapter_plugins::fetch_registry(registry_url.as_deref())
+    })
+    .await
+    .map_err(|e| format!("task join error: {e}"))
+}
+
+#[tauri::command]
+async fn adapter_plugins_test(
+    id: String,
+) -> Result<pick::adapter_plugins::PluginTestReport, String> {
+    tauri::async_runtime::spawn_blocking(move || pick::adapter_plugins::test_plugin_dry_run(&id))
+        .await
+        .map_err(|e| format!("task join error: {e}"))?
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn adapter_plugins_open_dir() -> Result<String, String> {
+    let dir = pick::adapter_plugins::plugins_dir();
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let path_str = dir.to_string_lossy().to_string();
+    let _ = std::process::Command::new("explorer.exe")
+        .arg(&path_str)
+        .spawn();
+    Ok(path_str)
+}
+
+#[tauri::command]
+async fn vision_get_config(state: tauri::State<'_, AppShared>) -> Result<serde_json::Value, String> {
+    let vcfg = state
+        .config
+        .lock()
+        .map(|c| c.vision.clone())
+        .unwrap_or_default();
+    let probe_cfg = vcfg.clone();
+    let hw = tauri::async_runtime::spawn_blocking(move || {
+        pick::vision::probe_local_hardware(&probe_cfg)
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    Ok(serde_json::json!({
+        "config": vcfg,
+        "hardware": hw,
+    }))
+}
+
+#[tauri::command]
+async fn vision_probe_hardware(
+    state: tauri::State<'_, AppShared>,
+) -> Result<pick::vision::HardwareProbeReport, String> {
+    let vcfg = state
+        .config
+        .lock()
+        .map(|c| c.vision.clone())
+        .unwrap_or_default();
+    tauri::async_runtime::spawn_blocking(move || pick::vision::probe_local_hardware(&vcfg))
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn vision_update_config(
+    state: tauri::State<'_, AppShared>,
+    patch: serde_json::Value,
+    apply_preset: Option<bool>,
+) -> Result<config::VisionConfig, String> {
+    let mut cfg = state
+        .config
+        .lock()
+        .map_err(|_| "config lock poisoned".to_string())?;
+    let mut current = serde_json::to_value(&cfg.vision).map_err(|e| e.to_string())?;
+    if let (Some(dst), Some(src)) = (current.as_object_mut(), patch.as_object()) {
+        for (k, v) in src {
+            dst.insert(k.clone(), v.clone());
+        }
+    }
+    let mut next: config::VisionConfig =
+        serde_json::from_value(current).map_err(|e| format!("无效的视觉配置: {e}"))?;
+    if apply_preset.unwrap_or(false) {
+        let p = next.preset;
+        next.apply_preset(p);
+    }
+    next.clamp();
+    cfg.vision = next.clone();
+    cfg.save().map_err(|e| e.to_string())?;
+    drop(cfg);
+    pick::hitmap::register_visual_box_provider(
+        pick::vision::sidecar_client::maybe_build_omniparser_provider(),
+    );
+    Ok(next)
+}
+
+#[tauri::command]
+async fn vision_test_pipeline(
+    state: tauri::State<'_, AppShared>,
+) -> Result<serde_json::Value, String> {
+    let vcfg = state
+        .config
+        .lock()
+        .map(|c| c.vision.clone())
+        .unwrap_or_default();
+    tauri::async_runtime::spawn_blocking(move || pick::vision::test_active_pipeline(&vcfg))
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn vision_unload_models(
+    state: tauri::State<'_, AppShared>,
+) -> Result<serde_json::Value, String> {
+    let vcfg = state
+        .config
+        .lock()
+        .map(|c| c.vision.clone())
+        .unwrap_or_default();
+    tauri::async_runtime::spawn_blocking(move || pick::vision::unload_all_local_models(&vcfg))
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -500,56 +787,156 @@ fn bar_reconnect(app: AppHandle) {
 }
 
 fn push_dock_state_to_bar(app: &AppHandle, edge: config::DockEdge, collapsed: bool) {
+    let snap = window::get_dock_runtime_snapshot();
+    let vertical = snap.vertical || edge.is_side();
     if let Some(bar_win) = app.get_webview_window("bar") {
         let js = format!(
-            "(function(){{ if (typeof window.__DSB_DOCK_STATE__ === 'function') {{ window.__DSB_DOCK_STATE__({{\"edge\":\"{}\",\"collapsed\":{}}}); }} }})();",
+            "(function(){{ if (typeof window.__DSB_DOCK_STATE__ === 'function') {{ window.__DSB_DOCK_STATE__({{\"edge\":\"{}\",\"collapsed\":{},\"vertical\":{},\"unread\":{}}}); }} }})();",
             edge.as_str(),
-            if collapsed { "true" } else { "false" }
+            if collapsed { "true" } else { "false" },
+            if vertical { "true" } else { "false" },
+            if snap.unread { "true" } else { "false" }
         );
         let _ = bar_win.eval(&js);
     }
 }
 
 pub fn apply_dock_edge(app: &AppHandle, edge: config::DockEdge, start_collapsed: bool) {
+    apply_dock_edge_inner(app, edge, start_collapsed, false);
+}
+
+fn apply_dock_edge_inner(
+    app: &AppHandle,
+    edge: config::DockEdge,
+    start_collapsed: bool,
+    from_drag: bool,
+) {
     let Some(shared) = app.try_state::<AppShared>() else {
         return;
     };
-    let bar_width = if let Ok(mut cfg) = shared.config.lock() {
+    let (bar_width, next_vertical) = if let Ok(mut cfg) = shared.config.lock() {
+        let mut changed = false;
         if cfg.dock_edge != edge {
             cfg.dock_edge = edge;
+            changed = true;
+        }
+        // Strict edge-orientation coupling:
+        // - Left / Right dock MUST always be Vertical
+        // - Top / Bottom dock MUST always be Horizontal
+        // - Free floating (`None`) preserves current horizontal/vertical orientation!
+        let desired_vertical = match edge {
+            config::DockEdge::Left | config::DockEdge::Right => true,
+            config::DockEdge::Top | config::DockEdge::Bottom => false,
+            config::DockEdge::None => cfg.vertical_mode,
+        };
+        if cfg.vertical_mode != desired_vertical {
+            cfg.vertical_mode = desired_vertical;
+            changed = true;
+        }
+        if changed {
+            let _ = cfg.save();
+        }
+        (cfg.bar_width, cfg.vertical_mode)
+    } else {
+        (760, edge.is_side())
+    };
+    window::set_dock_vertical_mode(next_vertical);
+    window::set_active_dock_state(edge, start_collapsed, None);
+    let state_ev = if from_drag && !start_collapsed {
+        StateEvent::SetDockEdgeFromDrag { edge }
+    } else {
+        StateEvent::SetDockEdge {
+            edge,
+            start_collapsed,
+        }
+    };
+    dispatch_state_event(app, state_ev);
+    // Note: when `edge.is_docked()`, `dispatch_state_event` ALREADY called `push_dock_state_to_bar`!
+    // Never push a duplicate `__DSB_DOCK_STATE__` 0.1ms later (which would cancel active morph animations).
+    if !edge.is_docked() {
+        push_dock_state_to_bar(app, edge, start_collapsed);
+        let target_w = if next_vertical {
+            window::get_dock_side_width_dip()
+        } else {
+            bar_width
+        };
+        if let Some(bar_win) = app.get_webview_window("bar") {
+            apply_bar_layout(&bar_win, target_w, window::BAR_STAGE_HEIGHT_DIP, &[]);
+        }
+    }
+}
+
+pub fn apply_vertical_mode(app: &AppHandle, vertical: bool) {
+    let Some(shared) = app.try_state::<AppShared>() else {
+        return;
+    };
+    let current_snap = window::get_dock_runtime_snapshot();
+    // Enforce edge-orientation invariant when toggling orientation via the button:
+    // - Switching to Horizontal while docked Left/Right -> undock to free Horizontal bar
+    // - Switching to Vertical while docked Top/Bottom -> undock to free Vertical panel
+    // - Free floating (`None`) stays free floating in the chosen orientation!
+    let next_edge = if (!vertical && current_snap.edge.is_side())
+        || (vertical && matches!(current_snap.edge, config::DockEdge::Top | config::DockEdge::Bottom))
+    {
+        config::DockEdge::None
+    } else {
+        current_snap.edge
+    };
+    let bar_width = if let Ok(mut cfg) = shared.config.lock() {
+        let mut changed = false;
+        if cfg.vertical_mode != vertical {
+            cfg.vertical_mode = vertical;
+            changed = true;
+        }
+        if cfg.dock_edge != next_edge {
+            cfg.dock_edge = next_edge;
+            changed = true;
+        }
+        if changed {
             let _ = cfg.save();
         }
         cfg.bar_width
     } else {
         760
     };
-    window::set_active_dock_state(edge, start_collapsed, None);
-    dispatch_state_event(
-        app,
-        StateEvent::SetDockEdge {
-            edge,
-            start_collapsed,
-        },
-    );
-    push_dock_state_to_bar(app, edge, start_collapsed);
-    if !edge.is_docked() {
-        let cached = shared
-            .last_layout
-            .lock()
-            .map(|c| c.clone())
-            .unwrap_or_else(|_| CachedLayout {
-                width_dip: bar_width,
-                height_dip: window::BAR_STAGE_HEIGHT_DIP,
-                shapes: Vec::new(),
-            });
-        if let Some(bar_win) = app.get_webview_window("bar") {
-            apply_bar_layout(&bar_win, cached.width_dip, window::BAR_STAGE_HEIGHT_DIP, &cached.shapes);
+    window::set_dock_vertical_mode(vertical);
+    let mut pushed_by_state = false;
+    if next_edge != current_snap.edge {
+        window::set_active_dock_state(next_edge, false, None);
+        // When undocking to `None`, `SetDockEdge` returns `none()` if already Summon, so we push once below.
+        let was_collapsed = current_snap.collapsed;
+        dispatch_state_event(
+            app,
+            StateEvent::SetDockEdge {
+                edge: next_edge,
+                start_collapsed: false,
+            },
+        );
+        pushed_by_state = next_edge.is_docked() || was_collapsed;
+    }
+    let collapsed = next_edge.is_docked() && current_snap.collapsed;
+    if let Some(bar_win) = app.get_webview_window("bar") {
+        if next_edge.is_docked() {
+            window::slide_docked_bar(&bar_win, next_edge, collapsed, bar_width, !collapsed);
+        } else {
+            // Keep the constant 960dip stage unmoved (ZERO WM_SIZE / swapchain resize!)
+            // and immediately open the union RGN of horizontal + vertical bands for the 260ms in-place GPU morph!
+            window::open_orientation_morph_rgn(&bar_win, bar_width);
         }
+    }
+    if !pushed_by_state {
+        push_dock_state_to_bar(app, next_edge, collapsed);
     }
 }
 
 #[tauri::command]
 fn bar_drag_begin(app: AppHandle) -> bool {
+    window::cancel_slide_anim();
+    if let Some(shared) = app.try_state::<AppShared>() {
+        if let Ok(mut sm) = shared.state_machine.lock() {
+            sm.dock_locked_open = true;
+        }
+    }
     app.get_webview_window("bar")
         .map(|w| window::begin_bar_drag(&w))
         .unwrap_or(false)
@@ -570,9 +957,16 @@ fn bar_drag_step(app: AppHandle) -> window::DragStepResult {
 fn bar_drag_end(app: AppHandle) -> window::DragEndResult {
     let res = window::end_bar_drag();
     if res.snapped_edge.is_docked() {
-        apply_dock_edge(&app, res.snapped_edge, false);
+        apply_dock_edge_inner(&app, res.snapped_edge, false, true);
     } else if res.undocked {
-        apply_dock_edge(&app, config::DockEdge::None, false);
+        apply_dock_edge_inner(&app, config::DockEdge::None, false, true);
+    } else if let Some(shared) = app.try_state::<AppShared>() {
+        // Release the drag lock when dropping back on the same docked edge so hover auto-collapse resumes
+        if let Ok(mut sm) = shared.state_machine.lock() {
+            if sm.dock_edge.is_docked() {
+                sm.dock_locked_open = false;
+            }
+        }
     }
     res
 }
@@ -607,6 +1001,30 @@ fn bar_set_dock_edge(app: AppHandle, edge: String, start_collapsed: Option<bool>
     let parsed = config::DockEdge::parse(&edge);
     apply_dock_edge(&app, parsed, start_collapsed.unwrap_or(false));
     window::get_dock_runtime_snapshot()
+}
+
+#[tauri::command]
+fn bar_set_vertical_mode(app: AppHandle, vertical: bool) -> window::DockStateSnapshot {
+    apply_vertical_mode(&app, vertical);
+    window::get_dock_runtime_snapshot()
+}
+
+#[tauri::command]
+fn bar_set_dock_unread(app: AppHandle, unread: bool) {
+    let prev = window::get_dock_runtime_snapshot();
+    if prev.unread == unread {
+        return;
+    }
+    window::set_dock_unread(unread);
+    if prev.edge.is_docked() && prev.collapsed {
+        let bar_width = app
+            .try_state::<AppShared>()
+            .and_then(|s| s.config.lock().ok().map(|c| c.bar_width))
+            .unwrap_or(760);
+        if let Some(bar_win) = app.get_webview_window("bar") {
+            window::slide_docked_bar(&bar_win, prev.edge, true, bar_width, false);
+        }
+    }
 }
 
 #[tauri::command]
@@ -824,6 +1242,16 @@ fn harness_send_message(app: AppHandle, payload: HarnessSendPayload) -> Result<(
         return Err("应用状态未就绪".to_string());
     };
     let norm = normalize_harness_route(&payload.harness);
+    log::info!(
+        "[HARNESS_SEND] harness={} turn_id={} session={:?} project={:?} cwd={:?} prompt_chars={} atts={}",
+        norm,
+        payload.turn_id,
+        payload.session_id,
+        payload.project_id,
+        payload.cwd,
+        payload.prompt.chars().count(),
+        payload.attachments.len()
+    );
 
     if norm == "universal" {
         let mode = payload
@@ -1183,7 +1611,7 @@ fn pick_folder_dialog_blocking(initial_dir: Option<String>) -> Option<String> {
         .as_deref()
         .map(|s| s.trim())
         .filter(|s| !s.is_empty())
-        .map(|s| PathBuf::from(s))
+        .map(PathBuf::from)
         .and_then(|p| {
             if p.is_dir() {
                 Some(p)
@@ -1847,25 +2275,14 @@ pub fn dispatch_state_event(app: &AppHandle, event: StateEvent) {
         VisibilityState::Summon => "summon",
     };
 
-    if fx.window_action.is_some() || fx.bridge_mode.is_some() {
-        if let Some(bar_win) = app.get_webview_window("bar") {
-            let js = format!(
-                "window.__DSB_BRIDGE__ && window.__DSB_BRIDGE__.setVisibility && window.__DSB_BRIDGE__.setVisibility('{vis_js_str}');"
-            );
-            let _ = bar_win.eval(&js);
-        }
-        push_dock_state_to_bar(
-            app,
-            dock_edge_snapshot,
-            vis_snapshot == VisibilityState::DockedCollapsed,
-        );
-    }
-
+    // Execute WindowAction BEFORE pushing JS dock state so `SLIDE_ANIM_ACTIVE` is armed
+    // before the WebView can emit a racing `bar_report(layout)` frame!
     if let Some(win_act) = fx.window_action {
         let bar_width = shared.config.lock().map(|c| c.bar_width).unwrap_or(760);
         if let Some(bar_win) = app.get_webview_window("bar") {
             match win_act {
                 WindowAction::Hide => {
+                    window::cancel_slide_anim();
                     hide_bar(&bar_win);
                 }
                 WindowAction::ShowNoActivate => {
@@ -1890,6 +2307,20 @@ pub fn dispatch_state_event(app: &AppHandle, event: StateEvent) {
             vis_snapshot,
             dock_edge_snapshot,
             win_act
+        );
+    }
+
+    if fx.window_action.is_some() || fx.bridge_mode.is_some() {
+        if let Some(bar_win) = app.get_webview_window("bar") {
+            let js = format!(
+                "window.__DSB_BRIDGE__ && window.__DSB_BRIDGE__.setVisibility && window.__DSB_BRIDGE__.setVisibility('{vis_js_str}');"
+            );
+            let _ = bar_win.eval(&js);
+        }
+        push_dock_state_to_bar(
+            app,
+            dock_edge_snapshot,
+            vis_snapshot == VisibilityState::DockedCollapsed,
         );
     }
 }
@@ -2049,7 +2480,8 @@ fn start_hook_event_router(app: AppHandle, rx: mpsc::Receiver<HookEvent>) {
                     }
 
                     last_query_at = std::time::Instant::now();
-                    let hov = pick::inspect_hover_at_with_uia(
+                    let hov = pick::inspect_hover_at_with_context(
+                        Some(&uia_app),
                         cached_uia.as_ref().map(|(a, w)| (a, w)),
                         x,
                         y,
@@ -2141,6 +2573,24 @@ fn start_hook_event_router(app: AppHandle, rx: mpsc::Receiver<HookEvent>) {
                 }
             };
 
+            // Hoisted once outside the event loop — zero per-hover Arc allocation!
+            let scout_refresh_cb: Arc<dyn Fn(i32, i32) + Send + Sync> = {
+                let hs = hover_slot.clone();
+                let pg = pen_gen.clone();
+                let pa = pen_active.clone();
+                Arc::new(move |rx: i32, ry: i32| {
+                    if !pa.load(Ordering::Acquire) {
+                        return;
+                    }
+                    let g = pg.load(Ordering::Acquire);
+                    let (lock, cv) = &*hs;
+                    if let Ok(mut guard) = lock.lock() {
+                        *guard = Some((g, rx, ry));
+                        cv.notify_one();
+                    }
+                })
+            };
+
             while let Ok(ev) = rx.recv() {
                 match ev {
                     HookEvent::SingleCtrlClose => {
@@ -2177,10 +2627,17 @@ fn start_hook_event_router(app: AppHandle, rx: mpsc::Receiver<HookEvent>) {
                                     &auto_app,
                                     foreground_hwnd,
                                 );
+                                pick::maybe_auto_attach_solidworks_selection(
+                                    &auto_app,
+                                    foreground_hwnd,
+                                );
                             });
                         }
                     }
                     HookEvent::OutsideClick { x, y } => {
+                        if window::is_bar_dragging() {
+                            continue;
+                        }
                         let click_pt = windows::Win32::Foundation::POINT { x, y };
                         if window::is_ime_or_voice_helper_at_point(click_pt) {
                             log::info!(
@@ -2214,7 +2671,30 @@ fn start_hook_event_router(app: AppHandle, rx: mpsc::Receiver<HookEvent>) {
                         if let Ok(mut d) = bg_dwell.lock() {
                             *d = None;
                         }
+                        // Capture SolidWorks target HWND before Bar activates so double-tap-hold Ctrl
+                        // immediately ingests any pre-selected SolidWorks features/faces/edges.
+                        let sw_auto_hwnd: isize = pick::adapters::solidworks::detect_solidworks_at(
+                            cursor_x, cursor_y,
+                        )
+                        .map(|h| h.root_hwnd.0 as isize)
+                        .or_else(|| {
+                            let fg = unsafe {
+                                windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow()
+                            };
+                            pick::adapters::solidworks::detect_solidworks_hwnd(fg)
+                                .map(|h| h.root_hwnd.0 as isize)
+                        })
+                        .unwrap_or(0);
                         dispatch_state_event(&app, StateEvent::PenStarted);
+                        if sw_auto_hwnd != 0 {
+                            let auto_app = app.clone();
+                            std::thread::spawn(move || {
+                                pick::maybe_auto_attach_solidworks_selection(
+                                    &auto_app,
+                                    sw_auto_hwnd,
+                                );
+                            });
+                        }
                         cursor::enable_tech_cursor();
                         if let Some(hit) =
                             pick::adapters::office::detect_office_canvas_at(cursor_x, cursor_y)
@@ -2226,6 +2706,7 @@ fn start_hook_event_router(app: AppHandle, rx: mpsc::Receiver<HookEvent>) {
                                 hover_ibeam_active = true;
                             }
                         }
+                        pick::scout::on_session_start(cursor_x, cursor_y);
                         if let Some(ov) = app.get_webview_window("overlay") {
                             let (mon, scale) = position_and_show_overlay(&ov);
                             let _ = ov.emit(
@@ -2281,6 +2762,7 @@ fn start_hook_event_router(app: AppHandle, rx: mpsc::Receiver<HookEvent>) {
                         if let Some(ov) = app.get_webview_window("overlay") {
                             let _ = ov.emit("pen:cursor", serde_json::json!({ "x": x, "y": y }));
                         }
+                        pick::scout::on_hover_point(&app, x, y, own_pid, scout_refresh_cb.clone());
                         push_hover(cur_gen, x, y);
                     }
                     HookEvent::PenMouseDown { x, y, button } => {
@@ -2417,10 +2899,18 @@ fn start_hook_event_router(app: AppHandle, rx: mpsc::Receiver<HookEvent>) {
                             pick::execute_stroke_pick(&stroke_app, points, button, pre);
                         });
                     }
+                    HookEvent::PenWheelScroll => {
+                        pick::scout::on_scroll_invalidate(&app);
+                    }
+                    HookEvent::ScanAbort => {
+                        pick::brush_scan::trigger_abort();
+                    }
                     HookEvent::PenEnd {
                         picked_any,
                         cancelled_by_other_key,
                     } => {
+                        pick::scout::on_session_end();
+                        pick::hover_diff::on_selection_session_end();
                         pen_active.store(false, Ordering::Release);
                         pen_gen.fetch_add(1, Ordering::AcqRel);
                         log::info!(
@@ -2493,7 +2983,7 @@ fn start_dock_watcher(app: AppHandle) {
 
                 // Periodic fullscreen detection (~400ms cadence) to auto-hide 10px edge strip over videos/games
                 fs_check_tick = fs_check_tick.wrapping_add(1);
-                if fs_check_tick % 8 == 0 {
+                if fs_check_tick.is_multiple_of(8) {
                     let is_fs = window::is_fullscreen_on_dock_monitor(hwnd_of(&bar_win));
                     dispatch_state_event(&app, StateEvent::FullscreenChanged { active: is_fs });
                 }
@@ -2513,7 +3003,15 @@ fn start_dock_watcher(app: AppHandle) {
                     }
                     VisibilityState::Summon => {
                         hover_enter_at = None;
-                        if !locked_open && !pinned && !popup_open && !modal && !composer_focused && !pen_active {
+                        if !locked_open
+                            && !pinned
+                            && !popup_open
+                            && !modal
+                            && !composer_focused
+                            && !pen_active
+                            && !window::is_bar_dragging()
+                            && !window::is_slide_anim_active()
+                        {
                             if window::is_cursor_inside_bar_now(&bar_win) {
                                 leave_start_at = None;
                             } else {
@@ -2609,6 +3107,12 @@ pub fn run() {
     // 0b2. Official Antigravity Plugin Sidecar for silent background `agentapi` messaging
     if cli.antigravity_sidecar {
         harness_sync::run_antigravity_sidecar_cli();
+        return;
+    }
+
+    // 0b3. Universal read-only UI capability probe CLI (`--probe-window <exe|hwnd>`)
+    if let Some(ref target) = cli.probe_window {
+        pick::probe::run_probe_window_cli(target, cli.probe_out.as_deref());
         return;
     }
 
@@ -2743,6 +3247,7 @@ pub fn run() {
         last_outside_hide_at: Mutex::new(None),
         live_sync_enabled,
         last_target_window: Mutex::new(None),
+        attached_sw_entities: Mutex::new(std::collections::HashSet::new()),
     };
 
     let startup_dev_state = cli.dev_state;
@@ -2937,13 +3442,16 @@ pub fn run() {
                         VisibilityState::DockedCollapsed => "docked_collapsed",
                         VisibilityState::Summon => "summon",
                     };
+                    let dock_snap = window::get_dock_runtime_snapshot();
                     let js = format!(
-                        "window.__DSB_BRIDGE__ && window.__DSB_BRIDGE__.setMode('{}'); window.__DSB_BRIDGE__ && window.__DSB_BRIDGE__.setVisibility && window.__DSB_BRIDGE__.setVisibility('{}'); window.__DSB_BRIDGE__ && window.__DSB_BRIDGE__.setHarness && window.__DSB_BRIDGE__.setHarness('{}'); window.__DSB_DOCK_STATE__ && window.__DSB_DOCK_STATE__({{\"edge\":\"{}\",\"collapsed\":{}}});",
+                        "window.__DSB_BRIDGE__ && window.__DSB_BRIDGE__.setMode('{}'); window.__DSB_BRIDGE__ && window.__DSB_BRIDGE__.setVisibility && window.__DSB_BRIDGE__.setVisibility('{}'); window.__DSB_BRIDGE__ && window.__DSB_BRIDGE__.setHarness && window.__DSB_BRIDGE__.setHarness('{}'); window.__DSB_DOCK_STATE__ && window.__DSB_DOCK_STATE__({{\"edge\":\"{}\",\"collapsed\":{},\"vertical\":{},\"unread\":{}}});",
                         mode.as_str(),
                         vis_str,
                         normalize_harness_route(&active_harness),
                         dock_edge.as_str(),
-                        if vis == VisibilityState::DockedCollapsed { "true" } else { "false" }
+                        if vis == VisibilityState::DockedCollapsed { "true" } else { "false" },
+                        if dock_snap.vertical || dock_edge.is_side() { "true" } else { "false" },
+                        if dock_snap.unread { "true" } else { "false" }
                     );
                     let _ = webview.eval(&js);
 
@@ -3005,6 +3513,8 @@ pub fn run() {
             bar_drag_reset,
             bar_get_dock_state,
             bar_set_dock_edge,
+            bar_set_vertical_mode,
+            bar_set_dock_unread,
             bar_dock_expand,
             overlay_compose_done,
             harness_get_active,
@@ -3034,10 +3544,33 @@ pub fn run() {
             quick_search_status,
             quick_search_build_capsule,
             quick_search_open_path,
-            quick_search_refresh
+            quick_search_refresh,
+            pick_list_profiles,
+            pick_reset_profile,
+            pick_export_profile,
+            pick_import_profile,
+            adapter_plugins_list,
+            adapter_plugins_reload,
+            adapter_plugins_set_enabled,
+            adapter_plugins_install_url,
+            adapter_plugins_install_json,
+            adapter_plugins_install_file,
+            adapter_plugins_uninstall,
+            adapter_plugins_export,
+            adapter_plugins_fetch_registry,
+            adapter_plugins_test,
+            adapter_plugins_open_dir,
+            vision_get_config,
+            vision_probe_hardware,
+            vision_update_config,
+            vision_test_pipeline,
+            vision_unload_models
         ])
         .setup(move |app| {
             let app_handle = app.handle().clone();
+            pick::hitmap::register_visual_box_provider(
+                pick::vision::sidecar_client::maybe_build_omniparser_provider(),
+            );
             let tier = if elevation::is_elevated() {
                 "admin"
             } else {
@@ -3115,10 +3648,12 @@ pub fn run() {
             start_dock_watcher(app_handle.clone());
             search_engine_for_setup.spawn_background_indexer();
 
-            let initial_dock = app_handle
+            let (initial_dock, initial_vertical, initial_side_width) = app_handle
                 .try_state::<AppShared>()
-                .and_then(|s| s.config.lock().ok().map(|c| c.dock_edge))
-                .unwrap_or(config::DockEdge::None);
+                .and_then(|s| s.config.lock().ok().map(|c| (c.dock_edge, c.vertical_mode, c.side_width)))
+                .unwrap_or((config::DockEdge::None, false, window::SIDE_DOCK_WIDTH_DIP));
+            window::set_dock_side_width_dip(initial_side_width);
+            window::set_dock_vertical_mode(initial_vertical || initial_dock.is_side());
             if let Some(target) = startup_dev_state {
                 dispatch_state_event(&app_handle, StateEvent::DevForceState(target));
             } else {
@@ -3146,8 +3681,13 @@ pub fn run() {
 
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("error while running Anything-to-Prompt");
+        .build(tauri::generate_context!())
+        .expect("error while building Anything-to-Prompt")
+        .run(|_app_handle, event| {
+            if matches!(event, tauri::RunEvent::Exit | tauri::RunEvent::ExitRequested { .. }) {
+                pick::vision::sidecar_client::shutdown_sidecar();
+            }
+        });
 }
 
 #[cfg(test)]

@@ -71,6 +71,129 @@ pub struct CustomAcpHarness {
     pub default_cwd: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VisionHardwarePreset {
+    /// Tier 0: Lightweight office laptop (0 VRAM; Cloud VLM + optional CPU MobileSAM ONNX)
+    #[default]
+    LiteOffice,
+    /// Tier 1: Balanced all-rounder (6-8 GB VRAM; SAM 2.1 Tiny + Florence-2-base / Ollama 7B)
+    BalancedUniversal,
+    /// Tier 2: High-end gaming / AI workstation (>= 12 GB VRAM; SAM 2.1 Small + Florence-2-large / Qwen2.5-VL)
+    ProAiWorkstation,
+    /// Tier 3: Custom mix of segmentation engine x VLM backend
+    CustomHybrid,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SegmentationBackend {
+    #[default]
+    Disabled,
+    OnnxMobileSamCpu,
+    GpuSam2Tiny,
+    GpuSam2Small,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VlmBackend {
+    #[default]
+    Disabled,
+    CloudOpenAiCompat,
+    CloudGemini,
+    LocalOllama,
+    SidecarFlorence2,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct VisionConfig {
+    pub preset: VisionHardwarePreset,
+    pub segmentation_backend: SegmentationBackend,
+    pub vlm_backend: VlmBackend,
+    pub auto_photo_matting: bool,
+    pub rebrush_vlm_audit: bool,
+    pub rebrush_pass2_threshold: u8,
+    pub rebrush_pass3_threshold: u8,
+    pub idle_unload_seconds: u64,
+    pub cloud_provider_hint: String,
+    pub cloud_base_url: String,
+    pub cloud_model: String,
+    pub cloud_api_key: String,
+    pub ollama_base_url: String,
+    pub ollama_model: String,
+    pub sidecar_python_path: Option<String>,
+    pub sidecar_port: u16,
+}
+
+impl Default for VisionConfig {
+    fn default() -> Self {
+        Self {
+            preset: VisionHardwarePreset::LiteOffice,
+            segmentation_backend: SegmentationBackend::Disabled,
+            vlm_backend: VlmBackend::Disabled,
+            auto_photo_matting: true,
+            rebrush_vlm_audit: true,
+            rebrush_pass2_threshold: 2,
+            rebrush_pass3_threshold: 3,
+            idle_unload_seconds: 180,
+            cloud_provider_hint: "openai".to_string(),
+            cloud_base_url: "https://api.openai.com/v1".to_string(),
+            cloud_model: "gpt-4o-mini".to_string(),
+            cloud_api_key: String::new(),
+            ollama_base_url: "http://127.0.0.1:11434".to_string(),
+            ollama_model: "qwen2.5vl:7b".to_string(),
+            sidecar_python_path: None,
+            sidecar_port: 18765,
+        }
+    }
+}
+
+impl VisionConfig {
+    pub fn apply_preset(&mut self, preset: VisionHardwarePreset) {
+        self.preset = preset;
+        match preset {
+            VisionHardwarePreset::LiteOffice => {
+                self.segmentation_backend = SegmentationBackend::OnnxMobileSamCpu;
+                self.vlm_backend = if !self.cloud_api_key.trim().is_empty() {
+                    if self.cloud_provider_hint == "gemini" {
+                        VlmBackend::CloudGemini
+                    } else {
+                        VlmBackend::CloudOpenAiCompat
+                    }
+                } else {
+                    VlmBackend::Disabled
+                };
+            }
+            VisionHardwarePreset::BalancedUniversal => {
+                self.segmentation_backend = SegmentationBackend::GpuSam2Tiny;
+                self.vlm_backend = VlmBackend::SidecarFlorence2;
+            }
+            VisionHardwarePreset::ProAiWorkstation => {
+                self.segmentation_backend = SegmentationBackend::GpuSam2Small;
+                self.vlm_backend = VlmBackend::LocalOllama;
+            }
+            VisionHardwarePreset::CustomHybrid => {}
+        }
+    }
+
+    pub fn clamp(&mut self) {
+        self.rebrush_pass2_threshold = self.rebrush_pass2_threshold.clamp(2, 5);
+        self.rebrush_pass3_threshold = self
+            .rebrush_pass3_threshold
+            .max(self.rebrush_pass2_threshold + 1)
+            .clamp(3, 7);
+        self.idle_unload_seconds = self.idle_unload_seconds.clamp(30, 3600);
+        if self.sidecar_port < 1024 {
+            self.sidecar_port = 18765;
+        }
+        if self.ollama_base_url.trim().is_empty() {
+            self.ollama_base_url = "http://127.0.0.1:11434".to_string();
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct AppConfig {
@@ -104,6 +227,19 @@ pub struct AppConfig {
     /// Persisted QQ-style screen edge dock (`none` | `top` | `bottom` | `left` | `right`).
     #[serde(default)]
     pub dock_edge: DockEdge,
+    /// Independent vertical side-panel layout flag (works both free-floating and docked).
+    #[serde(default)]
+    pub vertical_mode: bool,
+    /// User-resized width (DIP) of the vertical side panel (360..=960, independent of horizontal `bar_width`).
+    #[serde(default = "default_side_width")]
+    pub side_width: i32,
+    /// Multi-tier visual audit & natural-photo semantic matting engine settings.
+    #[serde(default)]
+    pub vision: VisionConfig,
+}
+
+fn default_side_width() -> i32 {
+    420
 }
 
 impl Default for AppConfig {
@@ -129,6 +265,9 @@ impl Default for AppConfig {
             app_source_map: HashMap::new(),
             custom_acp_harnesses: Vec::new(),
             dock_edge: DockEdge::None,
+            vertical_mode: false,
+            side_width: 420,
+            vision: VisionConfig::default(),
         }
     }
 }
@@ -148,6 +287,18 @@ impl AppConfig {
         dirs::data_local_dir()
             .unwrap_or_else(|| PathBuf::from("."))
             .join("AnythingToPrompt")
+    }
+
+    pub fn vision_env_dir() -> PathBuf {
+        Self::local_data_dir().join("vision-env")
+    }
+
+    pub fn vision_models_dir() -> PathBuf {
+        Self::local_data_dir().join("models")
+    }
+
+    pub fn vision_sidecar_dir() -> PathBuf {
+        Self::local_data_dir().join("vision-sidecar")
     }
 
     pub fn logs_dir() -> PathBuf {
@@ -218,5 +369,6 @@ impl AppConfig {
         if self.capture_orphan_ttl_minutes == 0 {
             self.capture_orphan_ttl_minutes = 60;
         }
+        self.vision.clamp();
     }
 }

@@ -32,7 +32,153 @@
     pickedItems: [],
     toastTimer: null,
     rafId: 0,
+    scoutPulse: null, // { tier: 1|2, x, y, startTs } — subtle cursor wake ripple (no yellow water!)
+    scan: {
+      active: false, // True when Dose 2 revealed photo cutouts or expanded submenu items
+      revealed: [], // [{ key, rect, polygon, semanticKind, revealedAt, label, isExpandable }]
+      revealedSet: new Set(),
+    },
   };
+
+  let lastScanSnapshotForCompose = null; // Preserved briefly across pen:hide so red-doodle captures active cutouts
+
+  function snapshotScanForCompose() {
+    if (!state.scan.active || state.scan.revealed.length === 0) return;
+    lastScanSnapshotForCompose = {
+      ts: performance.now(),
+      monX: state.monX,
+      monY: state.monY,
+      scale: state.scale || window.devicePixelRatio || 1,
+      revealed: state.scan.revealed.map((it) => ({
+        rect: it.rect,
+        polygon: it.polygon || null,
+        label: it.label || '',
+        semanticKind: it.semanticKind || 'ui',
+        isExpandable: Boolean(it.isExpandable),
+      })),
+    };
+  }
+
+  function clearScanLayer() {
+    if (state.scan.active) {
+      snapshotScanForCompose();
+    }
+    state.scan.active = false;
+    state.scan.revealed = [];
+    state.scan.revealedSet = new Set();
+  }
+
+  function drawScanInspectionLayer(now) {
+    if (!state.scan.active || state.scan.revealed.length === 0) return;
+
+    // Draw Dose 2 revealed organic photo cutouts & expanded submenu items
+    for (const item of state.scan.revealed) {
+      const elapsed = now - item.revealedAt;
+      if (elapsed < 0) continue;
+      const rawT = Math.min(1, elapsed / 340);
+      const c1 = 1.70158;
+      const c3 = c1 + 1;
+      const ease = 1 + c3 * Math.pow(rawT - 1, 3) + c1 * Math.pow(rawT - 1, 2);
+      const scale = 0.92 + 0.08 * ease;
+
+      const isPhoto = item.semanticKind === 'photo_object';
+      const isVlmFixed = item.semanticKind === 'ui_vlm_fixed';
+      const isMenu = item.semanticKind === 'menu_item';
+
+      if (Array.isArray(item.polygon) && item.polygon.length >= 3) {
+        const cssPts = item.polygon.map((pt) => toCssPt(pt[0], pt[1]));
+        let minY = cssPts[0].y;
+        let topX = cssPts[0].x;
+        ctx.save();
+        ctx.beginPath();
+        ctx.moveTo(cssPts[0].x, cssPts[0].y);
+        for (let i = 1; i < cssPts.length; i += 1) {
+          ctx.lineTo(cssPts[i].x, cssPts[i].y);
+          if (cssPts[i].y < minY) {
+            minY = cssPts[i].y;
+            topX = cssPts[i].x;
+          }
+        }
+        ctx.closePath();
+        const whiteAlpha = 0.22 * (1 - rawT * 0.65);
+        ctx.fillStyle = `rgba(224, 242, 254, ${whiteAlpha.toFixed(3)})`;
+        ctx.strokeStyle = '#22d3ee';
+        ctx.shadowColor = 'rgba(14, 165, 233, 0.92)';
+        ctx.shadowBlur = 12 + 6 * (1 - rawT);
+        ctx.lineWidth = 2.1;
+        ctx.lineJoin = 'round';
+        ctx.fill();
+        ctx.stroke();
+        ctx.restore();
+
+        if (item.label) {
+          drawCompactSemanticTag(topX, Math.max(10, minY - 22), item.label, '#0284c7');
+        }
+        continue;
+      }
+
+      const r = toCssRect(item.rect);
+      if (!r || r.w <= 2 || r.h <= 2) continue;
+      const cx = r.x + r.w / 2;
+      const cy = r.y + r.h / 2;
+      const bw = Math.max(4, r.w * scale);
+      const bh = Math.max(4, r.h * scale);
+      const bx = cx - bw / 2;
+      const by = cy - bh / 2;
+
+      const rippleT = Math.min(1, elapsed / 440);
+      if (rippleT < 1) {
+        const expand = 12 * rippleT;
+        ctx.save();
+        ctx.strokeStyle = isVlmFixed
+          ? `rgba(192, 132, 252, ${(0.72 * (1 - rippleT)).toFixed(3)})`
+          : `rgba(125, 211, 252, ${(0.68 * (1 - rippleT)).toFixed(3)})`;
+        ctx.lineWidth = Math.max(0.8, 2.0 * (1 - rippleT));
+        ctx.beginPath();
+        ctx.roundRect(bx - expand, by - expand, bw + expand * 2, bh + expand * 2, 7 + expand * 0.5);
+        ctx.stroke();
+        ctx.restore();
+      }
+
+      ctx.save();
+      const whiteAlpha = 0.22 * (1 - rawT * 0.65);
+      ctx.fillStyle = `rgba(255, 255, 255, ${whiteAlpha.toFixed(3)})`;
+      ctx.strokeStyle = isVlmFixed ? '#818cf8' : isMenu ? '#38bdf8' : '#60a5fa';
+      ctx.shadowColor = isVlmFixed ? 'rgba(129, 140, 248, 0.90)' : 'rgba(0, 140, 255, 0.85)';
+      ctx.shadowBlur = 10 + 6 * (1 - rawT);
+      ctx.lineWidth = isPhoto || isVlmFixed ? 2.0 : 1.7;
+      ctx.beginPath();
+      ctx.roundRect(bx, by, bw, bh, 6);
+      ctx.fill();
+      ctx.stroke();
+      ctx.restore();
+
+      if ((isPhoto || isMenu) && item.label) {
+        drawCompactSemanticTag(bx + 6, Math.max(10, by - 20), item.label, '#0284c7');
+      }
+    }
+  }
+
+  function drawCompactSemanticTag(x, y, text, accent) {
+    ctx.save();
+    ctx.font = '600 11px system-ui, -apple-system, "Segoe UI", "PingFang SC", sans-serif';
+    const padX = 7;
+    const h = 19;
+    const w = Math.ceil(ctx.measureText(text).width) + padX * 2;
+    const cx = Math.max(6, Math.min(window.innerWidth - w - 6, x));
+    const cy = Math.max(6, Math.min(window.innerHeight - h - 6, y));
+    ctx.fillStyle = 'rgba(15, 23, 42, 0.86)';
+    ctx.strokeStyle = accent || '#38bdf8';
+    ctx.lineWidth = 1.1;
+    ctx.beginPath();
+    ctx.roundRect(cx, cy, w, h, 999);
+    ctx.fill();
+    ctx.stroke();
+    ctx.fillStyle = '#e0f2fe';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(text, cx + padX, cy + h / 2 + 0.5);
+    ctx.restore();
+  }
 
   // Mirrors Rust `classify_blue_gesture`: monotonic diagonal drag -> 'box';
   // curving, reversing, or looping trajectory -> 'lasso'.
@@ -258,6 +404,9 @@
     ctx.clearRect(0, 0, window.innerWidth, window.innerHeight);
     if (!state.active) return;
 
+    // 0. Green-Brush Deep Scan Inspection View (yellow water + emerged crystal-clear blue buttons)
+    drawScanInspectionLayer(now);
+
     // 1. Picked items during current selection session
     for (const item of state.pickedItems) {
       const isBlueStroke =
@@ -343,6 +492,7 @@
         const fy = Math.max(3, r.y);
         const fw = Math.min(window.innerWidth - 3, r.x + r.w) - fx;
         const fh = Math.min(window.innerHeight - 3, r.y + r.h) - fy;
+        if (fw <= 2 || fh <= 2) continue;
         const isExcel = item.mode === 'excel_box' || item.mode === 'excel_cell';
         const isWord = item.mode === 'word_text';
         const strokeColor = isExcel ? '#10b981' : isWord ? '#38bdf8' : '#ffffff';
@@ -556,10 +706,42 @@
 
     // 4. Short, restrained electric-blue light trail
     drawRestrainedLightTrail(now);
+
+    // 5. Subtle Shake-to-Wake cursor pulse (Dose 1 amber / Dose 2 violet-cyan)
+    if (state.scoutPulse) {
+      const elapsed = now - state.scoutPulse.startTs;
+      const dur = 420;
+      if (elapsed >= dur) {
+        state.scoutPulse = null;
+      } else {
+        const t = Math.max(0, Math.min(1, elapsed / dur));
+        const ease = 1 - Math.pow(1 - t, 3);
+        const c = toCssPt(state.scoutPulse.x, state.scoutPulse.y);
+        const isDose2 = state.scoutPulse.tier >= 2;
+        const color = isDose2 ? '168, 85, 247' : '245, 158, 11';
+        const r = 12 + ease * (isDose2 ? 44 : 32);
+        ctx.save();
+        ctx.strokeStyle = `rgba(${color}, ${((1 - t) * 0.85).toFixed(3)})`;
+        ctx.shadowColor = `rgba(${color}, 0.72)`;
+        ctx.shadowBlur = 10;
+        ctx.lineWidth = Math.max(1.0, 2.4 * (1 - t));
+        ctx.beginPath();
+        ctx.arc(c.x, c.y, r, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.restore();
+      }
+    }
   }
 
   function needsAnimationLoop() {
     if (!state.active) return false;
+    if (state.scoutPulse && performance.now() - state.scoutPulse.startTs < 440) return true;
+    if (state.scan.active) {
+      const now = performance.now();
+      for (const item of state.scan.revealed) {
+        if (now - item.revealedAt < 480) return true;
+      }
+    }
     if (state.trail.length > 0) return true;
     if (
       state.liveStroke.length > 1 &&
@@ -596,6 +778,7 @@
     if (typeof x !== 'number' || typeof y !== 'number') return;
     const now = performance.now();
     state.cursor = { x, y };
+    positionStatusPill(state.cursor);
     state.trail.push({ x, y, ts: now });
     if (state.trail.length > MAX_TRAIL_POINTS) {
       state.trail.shift();
@@ -612,6 +795,84 @@
     scheduleAnimTick();
   }
 
+  let statusPillEl = null;
+  let statusPillTimer = null;
+
+  function ensureStatusPillEl() {
+    if (statusPillEl) return statusPillEl;
+    if (typeof document === 'undefined' || !document.body) return null;
+    const el = document.createElement('div');
+    el.id = 'atp-cursor-status-pill';
+    el.style.position = 'fixed';
+    el.style.zIndex = '999999';
+    el.style.pointerEvents = 'none';
+    el.style.display = 'none';
+    el.style.padding = '5px 10px';
+    el.style.borderRadius = '999px';
+    el.style.fontSize = '12px';
+    el.style.fontWeight = '500';
+    el.style.fontFamily = '"Segoe UI", "Microsoft YaHei UI", system-ui, sans-serif';
+    el.style.color = '#f8fafc';
+    el.style.background = 'rgba(15, 23, 42, 0.86)';
+    el.style.border = '1px solid rgba(56, 189, 248, 0.45)';
+    el.style.boxShadow = '0 4px 16px rgba(0, 0, 0, 0.35)';
+    el.style.backdropFilter = 'blur(8px)';
+    el.style.whiteSpace = 'nowrap';
+    el.style.transition = 'opacity 140ms ease';
+    document.body.appendChild(el);
+    statusPillEl = el;
+    return el;
+  }
+
+  function positionStatusPill(cursorPt) {
+    if (!statusPillEl || statusPillEl.style.display === 'none') return;
+    const pt = cursorPt || state.cursor;
+    if (!pt || typeof pt.x !== 'number' || typeof pt.y !== 'number') return;
+    const css = toCssPt(pt.x, pt.y);
+    const vw = window.innerWidth || 1920;
+    const vh = window.innerHeight || 1080;
+    const w = statusPillEl.offsetWidth || 170;
+    const h = statusPillEl.offsetHeight || 28;
+    const left = Math.max(10, Math.min(vw - w - 12, css.x + 18));
+    const top = Math.max(10, Math.min(vh - h - 12, css.y + 20));
+    statusPillEl.style.left = Math.round(left) + 'px';
+    statusPillEl.style.top = Math.round(top) + 'px';
+  }
+
+  function showCursorStatusPill(text, cursorPt, phase, durationMs = 2000) {
+    const el = ensureStatusPillEl();
+    if (!el) return;
+    const prefix = phase === 'done' ? '✓ ' : '✦ ';
+    el.textContent = prefix + String(text || '');
+    el.style.borderColor =
+      phase === 'done' ? 'rgba(52, 211, 153, 0.55)' : 'rgba(56, 189, 248, 0.5)';
+    el.style.display = 'block';
+    el.style.opacity = '1';
+    positionStatusPill(cursorPt);
+    if (statusPillTimer) clearTimeout(statusPillTimer);
+    statusPillTimer = setTimeout(() => {
+      if (statusPillEl) {
+        statusPillEl.style.opacity = '0';
+        setTimeout(() => {
+          if (statusPillEl && statusPillEl.style.opacity === '0') {
+            statusPillEl.style.display = 'none';
+          }
+        }, 160);
+      }
+    }, Math.max(400, Number(durationMs) || 2000));
+  }
+
+  function hideCursorStatusPill() {
+    if (statusPillTimer) {
+      clearTimeout(statusPillTimer);
+      statusPillTimer = null;
+    }
+    if (statusPillEl) {
+      statusPillEl.style.display = 'none';
+      statusPillEl.style.opacity = '0';
+    }
+  }
+
   function showToast(text, durationMs = 1500) {
     if (!toastEl) return;
     toastEl.textContent = text;
@@ -624,7 +885,11 @@
 
   function composeScreenshot(payload) {
     const tauriCore = window.__TAURI__ && window.__TAURI__.core;
-    if (!tauriCore || !payload || !payload.id || !payload.pngBase64) return;
+    if (!tauriCore || !payload || !payload.id) return;
+    if (!payload.pngBase64) {
+      tauriCore.invoke('overlay_compose_done', { id: payload.id, dataUrl: '' }).catch(() => {});
+      return;
+    }
     const img = new Image();
     img.onload = () => {
       const off = document.createElement('canvas');
@@ -637,6 +902,61 @@
       const oy = payload.originY || 0;
       let badgeX = 24;
       let badgeY = 24;
+
+      // If Green-Brush Scan Inspection View is active (or just finished within 3s before pen:hide),
+      // composite the yellow-water mask + emerged blue boxes onto the annotated screenshot so
+      // right-drag red doodle screenshots faithfully show the blue scan frames (while clean screenshot stays untouched!).
+      const scanSnap = state.scan.active
+        ? {
+            monX: state.monX,
+            monY: state.monY,
+            scale: state.scale || window.devicePixelRatio || 1,
+            revealed: state.scan.revealed,
+          }
+        : lastScanSnapshotForCompose && performance.now() - lastScanSnapshotForCompose.ts < 3000
+          ? lastScanSnapshotForCompose
+          : null;
+      if (scanSnap) {
+        if (Array.isArray(scanSnap.revealed) && scanSnap.revealed.length > 0) {
+          octx.save();
+          octx.lineWidth = 2;
+          for (const item of scanSnap.revealed) {
+            if (!item || !item.rect) continue;
+            if (Array.isArray(item.polygon) && item.polygon.length >= 3) {
+              octx.fillStyle = 'rgba(224, 242, 254, 0.12)';
+              octx.strokeStyle = '#22d3ee';
+              octx.lineWidth = 2.4;
+              octx.beginPath();
+              octx.moveTo(item.polygon[0][0] - ox, item.polygon[0][1] - oy);
+              for (let i = 1; i < item.polygon.length; i += 1) {
+                octx.lineTo(item.polygon[i][0] - ox, item.polygon[i][1] - oy);
+              }
+              octx.closePath();
+              octx.fill();
+              octx.stroke();
+              continue;
+            }
+            const bx = item.rect.x - ox;
+            const by = item.rect.y - oy;
+            const bw = item.rect.w;
+            const bh = item.rect.h;
+            if (bw <= 2 || bh <= 2) continue;
+            octx.fillStyle = 'rgba(255, 255, 255, 0.08)';
+            octx.strokeStyle =
+              item.semanticKind === 'ui_vlm_fixed'
+                ? '#818cf8'
+                : item.isExpandable
+                  ? '#60a5fa'
+                  : '#38bdf8';
+            octx.lineWidth = 2;
+            octx.beginPath();
+            octx.roundRect(bx, by, bw, bh, 6);
+            octx.fill();
+            octx.stroke();
+          }
+          octx.restore();
+        }
+      }
 
       octx.strokeStyle = '#ef4444';
       octx.lineWidth = 3;
@@ -683,6 +1003,31 @@
 
   window.addEventListener('resize', () => redraw());
 
+  function resetSessionState() {
+    stopAnimLoop();
+    clearScanLayer();
+    if (state.toastTimer) {
+      clearTimeout(state.toastTimer);
+      state.toastTimer = null;
+    }
+    state.cursor = null;
+    state.hover = null;
+    state.dwell = null;
+    state.trail = [];
+    state.liveStroke = [];
+    state.liveStrokeColor = 'blue';
+    state.blueMorph = { lockedLasso: false, morphStartTs: 0, lastBox: null };
+    state.liveDrag = null;
+    state.pickedItems = [];
+    state.scoutPulse = null;
+  }
+
+  function requestDraw() {
+    if (!state.rafId) {
+      scheduleAnimTick();
+    }
+  }
+
   function bindEvents() {
     const evApi = window.__TAURI__ && window.__TAURI__.event;
     if (!evApi || typeof evApi.listen !== 'function') {
@@ -693,17 +1038,12 @@
     evApi.listen('pen:show', (ev) => {
       const p = ev.payload || {};
       const mr = p.monitorRect || {};
+      resetSessionState();
       state.active = true;
       state.monX = mr.x || 0;
       state.monY = mr.y || 0;
       state.scale = p.scale || window.devicePixelRatio || 1;
       state.cursor = p.cursor && typeof p.cursor.x === 'number' ? p.cursor : null;
-      state.hover = null;
-      state.dwell = null;
-      state.liveStroke = [];
-      state.liveDrag = null;
-      state.pickedItems = [];
-      state.trail = [];
       redraw();
     });
 
@@ -729,12 +1069,11 @@
             startTs: performance.now(),
             unlocked: false,
           };
-          scheduleAnimTick();
         }
       } else {
         state.dwell = null;
       }
-      redraw();
+      requestDraw();
     });
 
     evApi.listen('pen:stroke', (ev) => {
@@ -759,12 +1098,11 @@
         if (nextColor === 'blue' && !state.blueMorph.lockedLasso && classifyBlueGesture(pts) === 'lasso') {
           state.blueMorph.lockedLasso = true;
           state.blueMorph.morphStartTs = performance.now();
-          scheduleAnimTick();
         }
       }
       state.trail = [];
       state.dwell = null;
-      redraw();
+      requestDraw();
     });
 
     evApi.listen('pen:picked', (ev) => {
@@ -788,21 +1126,102 @@
       if (p.text) showToast(p.text, p.durationMs || 1500);
     });
 
+    evApi.listen('pen:status_hint', (ev) => {
+      const p = ev.payload || {};
+      if (p.text) {
+        showCursorStatusPill(p.text, p.cursor, p.phase || 'working', p.durationMs || 2000);
+      }
+    });
+
+    evApi.listen('pen:scout_pulse', (ev) => {
+      const p = ev.payload || {};
+      if (typeof p.x === 'number' && typeof p.y === 'number') {
+        state.scoutPulse = {
+          tier: Number(p.tier) || 1,
+          x: p.x,
+          y: p.y,
+          startTs: performance.now(),
+        };
+        scheduleAnimTick();
+      }
+    });
+
+    evApi.listen('pen:scan_clear', () => {
+      clearScanLayer();
+      redraw();
+    });
+
+    evApi.listen('pen:scan_reveal', (ev) => {
+      const p = ev.payload || {};
+      const items = Array.isArray(p.items) ? p.items : [];
+      const replaceKeys = Array.isArray(p.replaceKeys) ? p.replaceKeys : [];
+      if (items.length === 0 && replaceKeys.length === 0) return;
+      state.scan.active = true;
+      let replacedAny = false;
+      if (replaceKeys.length > 0) {
+        const dropSet = new Set(replaceKeys.map(String));
+        const beforeLen = state.scan.revealed.length;
+        state.scan.revealed = state.scan.revealed.filter((ex) => {
+          if (ex && dropSet.has(ex.key)) {
+            state.scan.revealedSet.delete(ex.key);
+            return false;
+          }
+          return true;
+        });
+        replacedAny = state.scan.revealed.length !== beforeLen;
+      }
+      const baseNow = performance.now();
+      let added = 0;
+      const overlapsExisting = (nr) => {
+        for (const ex of state.scan.revealed) {
+          const r = ex && ex.rect;
+          if (!r) continue;
+          const ix0 = Math.max(nr.x, r.x);
+          const iy0 = Math.max(nr.y, r.y);
+          const ix1 = Math.min(nr.x + nr.w, r.x + r.w);
+          const iy1 = Math.min(nr.y + nr.h, r.y + r.h);
+          const iw = Math.max(0, ix1 - ix0);
+          const ih = Math.max(0, iy1 - iy0);
+          if (iw > 0 && ih > 0) {
+            const inter = iw * ih;
+            const minArea = Math.max(1, Math.min(nr.w * nr.h, r.w * r.h));
+            if (inter / minArea >= 0.38) return true;
+          }
+        }
+        return false;
+      };
+      for (const it of items) {
+        if (!it || !it.rect) continue;
+        const k = String(it.key || `${it.rect.x}:${it.rect.y}:${it.rect.w}:${it.rect.h}`);
+        const isPhoto = it.semanticKind === 'photo_object';
+        // CRITICAL: Never drop replacement items via overlapsExisting after deleting replaceKeys!
+        if (state.scan.revealedSet.has(k) || (!isPhoto && !replacedAny && overlapsExisting(it.rect))) continue;
+        state.scan.revealedSet.add(k);
+        // Stagger emergence slightly (20ms each, capped at 320ms) so buttons visibly rise one by one!
+        const delay = replacedAny ? 0 : Math.min(320, added * 20);
+        state.scan.revealed.push({
+          key: k,
+          rect: it.rect,
+          polygon: Array.isArray(it.polygon) && it.polygon.length >= 3 ? it.polygon : null,
+          semanticKind: it.semanticKind || 'ui',
+          label: it.label || '',
+          isExpandable: Boolean(it.isExpandable),
+          revealedAt: baseNow + delay,
+        });
+        added += 1;
+      }
+      if (added > 0 || replacedAny) scheduleAnimTick();
+    });
+
     evApi.listen('pen:compose', (ev) => {
       composeScreenshot(ev.payload);
     });
 
     evApi.listen('pen:hide', () => {
       state.active = false;
-      state.cursor = null;
-      state.hover = null;
-      state.dwell = null;
-      state.trail = [];
-      state.liveStroke = [];
-      state.liveDrag = null;
-      state.pickedItems = [];
-      stopAnimLoop();
+      resetSessionState();
       if (toastEl) toastEl.style.display = 'none';
+      hideCursorStatusPill();
       redraw();
     });
   }

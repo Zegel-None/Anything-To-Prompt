@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-adapter-plugins-fetch-registry"
+description = "Enables the adapter_plugins_fetch_registry command without any pre-configured scope."
+commands.allow = ["adapter_plugins_fetch_registry"]
+
+[[permission]]
+identifier = "deny-adapter-plugins-fetch-registry"
+description = "Denies the adapter_plugins_fetch_registry command without any pre-configured scope."
+commands.deny = ["adapter_plugins_fetch_registry"]

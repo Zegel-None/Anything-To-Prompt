@@ -21,7 +21,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
     GetForegroundWindow, GetMessageW, PostThreadMessageW, RegisterClassW,
     SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx, HHOOK, HWND_MESSAGE, MSG,
     MSLLHOOKSTRUCT, WH_MOUSE_LL, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_INPUT, WM_LBUTTONDOWN,
-    WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MOUSEMOVE, WM_RBUTTONDOWN, WM_RBUTTONUP, WNDCLASSW,
+    WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_RBUTTONDOWN, WM_RBUTTONUP,
+    WNDCLASSW,
 };
 
 const DUMMY_EXTRA_INFO: usize = 0xD5B0_00E8;
@@ -508,10 +509,18 @@ fn is_any_chord_key_down_os() -> bool {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PenButton {
-    /// Left button in Ctrl selection mode: tap picks single element; drag draws BLUE freehand lasso (element group, never background).
+    /// Left button in selection mode: tap picks single element; drag draws BLUE freehand lasso.
     Left,
-    /// Right button in Ctrl selection mode: drag draws RED doodle screenshot capsule; right-click context menu is suppressed.
+    /// Right button in selection mode: drag draws RED doodle screenshot capsule.
     Right,
+}
+
+static SUPPRESS_SYNTHETIC_ESC: AtomicBool = AtomicBool::new(false);
+
+/// Temporarily masks synthetic `VK_ESCAPE` injected by our own menu-dismiss helper so Raw Input
+/// never mistakes it for a user cancel and prematurely aborts Selection Mode.
+pub fn set_suppress_synthetic_esc(suppress: bool) {
+    SUPPRESS_SYNTHETIC_ESC.store(suppress, Ordering::Release);
 }
 
 const SWALLOW_NONE: u8 = 0;
@@ -530,6 +539,8 @@ pub enum HookEvent {
     PenTap { x: i32, y: i32 },
     PenStroke { points: Vec<(i32, i32)>, button: PenButton },
     PenEnd { picked_any: bool, cancelled_by_other_key: bool },
+    PenWheelScroll,
+    ScanAbort,
 }
 
 pub struct HookSharedConfig {
@@ -610,6 +621,7 @@ enum RawSignal {
         swallowed: bool,
         button: PenButton,
     },
+    WheelScroll,
 }
 
 struct GlobalHookBridge {
@@ -667,6 +679,9 @@ unsafe extern "system" fn raw_input_wnd_proc(
                 // Ctrl down/up transitions are driven by 8ms OS physical state polling (GetAsyncKeyState).
                 // Here we only passively observe physical non-Ctrl keys so fast chords (Ctrl+Alt, Ctrl+C/V/A)
                 // taint Ctrl immediately without ever touching the OS keyboard hook chain.
+                if vk == 0x1B && SUPPRESS_SYNTHETIC_ESC.load(Ordering::Acquire) {
+                    return LRESULT(0);
+                }
                 if !DoubleCtrlDetector::is_ctrl_vk(vk) && !is_ignored_pseudo_vk(vk) {
                     let now_ms = bridge.epoch.elapsed().as_millis() as u64;
                     if !is_up {
@@ -863,23 +878,24 @@ unsafe extern "system" fn low_level_mouse_proc(
                         }
                     }
                     WM_MBUTTONDOWN => {
+                        // Middle mouse button is NEVER intercepted (even inside Selection Mode!)
+                        // so SolidWorks 3D orbit/pan & browser middle-click work 100% natively.
                         let bar_vis = bridge.shared.bar_visible.load(Ordering::Acquire);
                         let on_bar = bar_vis
                             && is_pt_inside_bar_rect(
                                 ms.pt,
                                 bridge.shared.bar_hwnd_raw.load(Ordering::Relaxed),
                             );
-                        let os_ctrl = is_ctrl_down_os();
-                        let pen_on =
-                            os_ctrl && bridge.shared.pen_overlay_active.load(Ordering::Acquire);
-                        let fast_second_hold =
-                            os_ctrl && bridge.second_ctrl_fast.load(Ordering::Acquire);
-                        let fast_first_hold = os_ctrl
-                            && bridge.shared.is_bar_summoned()
-                            && bridge.ctrl_down_fast.load(Ordering::Acquire);
+                        let pen_on = bridge.shared.pen_overlay_active.load(Ordering::Acquire);
                         bridge.first_ctrl_tainted.store(true, Ordering::Release);
-                        if bar_vis && !on_bar && !pen_on && !fast_second_hold && !fast_first_hold {
+                        if bar_vis && !on_bar && !pen_on {
                             let _ = bridge.raw_tx.send(RawSignal::OutsideClick { x, y });
+                        }
+                    }
+                    WM_MOUSEWHEEL => {
+                        // Passively notify Stealth Scout to invalidate scrolled visual cache (never swallows!)
+                        if bridge.shared.pen_overlay_active.load(Ordering::Acquire) {
+                            let _ = bridge.raw_tx.send(RawSignal::WheelScroll);
                         }
                     }
                     WM_MOUSEMOVE => {
@@ -1015,7 +1031,7 @@ pub fn start_input_hooks(shared: Arc<HookSharedConfig>, event_tx: mpsc::Sender<H
                 raw_hwnd.is_some()
             );
             let mut msg = MSG::default();
-            while GetMessageW(&mut msg, Some(HWND::default()), 0, 0).as_bool() {
+            while GetMessageW(&mut msg, Some(HWND::default()), 0, 0).0 > 0 {
                 if msg.message == WM_APP_REINSTALL_HOOKS {
                     let _ = UnhookWindowsHookEx(ms_hook);
                     if let Some(new_ms) = install_mouse_hook() {
@@ -1164,6 +1180,9 @@ pub fn start_input_hooks(shared: Arc<HookSharedConfig>, event_tx: mpsc::Sender<H
                 for sig in batch {
                     match sig {
                         RawSignal::KeyDown { vk, now_ms } => {
+                            if vk == 0x1B && ctrl.is_pen_open() {
+                                let _ = event_tx.send(HookEvent::ScanAbort);
+                            }
                             if DoubleCtrlDetector::is_ctrl_vk(vk) || is_ignored_pseudo_vk(vk) {
                                 continue;
                             }
@@ -1297,6 +1316,12 @@ pub fn start_input_hooks(shared: Arc<HookSharedConfig>, event_tx: mpsc::Sender<H
                             active_button = None;
                             down_at_ms = None;
                             max_drag_dist_sq = 0;
+                        }
+
+                        RawSignal::WheelScroll => {
+                            if ctrl.is_pen_open() {
+                                let _ = event_tx.send(HookEvent::PenWheelScroll);
+                            }
                         }
                     }
                 }

@@ -1,6 +1,4 @@
 use std::collections::HashMap;
-use std::ffi::OsStr;
-use std::os::windows::ffi::OsStrExt;
 use std::path::PathBuf;
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::{CloseHandle, GENERIC_READ, HANDLE, INVALID_HANDLE_VALUE};
@@ -92,12 +90,7 @@ pub struct NtfsIncrementalDelta {
     pub removed_lower: Vec<String>,
 }
 
-fn to_wide_null(s: &str) -> Vec<u16> {
-    OsStr::new(s)
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect()
-}
+use crate::win32_util::to_wide as to_wide_null;
 
 pub fn list_fixed_ntfs_drives() -> Vec<char> {
     let mut drives = Vec::new();

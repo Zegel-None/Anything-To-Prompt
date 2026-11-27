@@ -7,7 +7,6 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Write};
-use std::os::windows::ffi::OsStrExt;
 use std::os::windows::fs::OpenOptionsExt;
 use std::os::windows::io::FromRawHandle;
 use std::os::windows::process::CommandExt;
@@ -17,14 +16,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Manager};
-use windows::core::{PCWSTR, PSTR};
+use windows::core::PCWSTR;
 use windows::Win32::Foundation::{CloseHandle, LocalFree, HANDLE, HLOCAL, INVALID_HANDLE_VALUE};
 use windows::Win32::Security::Authorization::{
-    ConvertSidToStringSidA, ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
+    ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
 };
 use windows::Win32::Security::{
-    GetTokenInformation, TokenUser, PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES, TOKEN_QUERY,
-    TOKEN_USER,
+    PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES,
 };
 use windows::Win32::Storage::FileSystem::{
     FlushFileBuffers, PIPE_ACCESS_DUPLEX, PIPE_ACCESS_INBOUND,
@@ -33,9 +31,7 @@ use windows::Win32::System::Pipes::{
     ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, PIPE_READMODE_BYTE,
     PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_WAIT,
 };
-use windows::Win32::System::Threading::{
-    GetCurrentProcess, OpenProcessToken, CREATE_NO_WINDOW,
-};
+use windows::Win32::System::Threading::CREATE_NO_WINDOW;
 
 const SYNC_PIPE_SHORT: &str = "atp-harness-sync-v1";
 const ANTIGRAVITY_SIDECAR_PIPE_SHORT: &str = "atp-antigravity-sidecar-v1";
@@ -138,49 +134,7 @@ fn now_ms() -> i64 {
         .unwrap_or(0)
 }
 
-fn to_wide(s: &str) -> Vec<u16> {
-    std::ffi::OsStr::new(s)
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect()
-}
-
-fn current_user_sid_string() -> Option<String> {
-    unsafe {
-        let mut token = HANDLE::default();
-        if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token).is_err() {
-            return None;
-        }
-        let mut needed = 0u32;
-        let _ = GetTokenInformation(token, TokenUser, None, 0, &mut needed);
-        if needed == 0 {
-            let _ = CloseHandle(token);
-            return None;
-        }
-        let mut buf = vec![0u8; needed as usize];
-        let ok = GetTokenInformation(
-            token,
-            TokenUser,
-            Some(buf.as_mut_ptr() as *mut _),
-            needed,
-            &mut needed,
-        )
-        .is_ok();
-        let _ = CloseHandle(token);
-        if !ok {
-            return None;
-        }
-        let token_user = &*(buf.as_ptr() as *const TOKEN_USER);
-        let mut str_sid = PSTR::null();
-        if ConvertSidToStringSidA(token_user.User.Sid, &mut str_sid).is_err() || str_sid.is_null() {
-            return None;
-        }
-        let cstr = std::ffi::CStr::from_ptr(str_sid.0 as *const i8);
-        let res = cstr.to_string_lossy().into_owned();
-        let _ = LocalFree(Some(HLOCAL(str_sid.0 as *mut std::ffi::c_void)));
-        Some(res)
-    }
-}
+use crate::win32_util::{current_user_sid_string, to_wide};
 
 /// Fast-path CLI subcommand executed by Antigravity / Claude Code / Codex hooks:
 /// `anything-to-prompt.exe --hook-event <antigravity|claude_code|codex> [optional_json]`
@@ -513,6 +467,7 @@ pub fn ensure_runtime_exe_installed() -> PathBuf {
 /// - Antigravity (`~/.gemini/config/plugins/anything-to-prompt-sync`: `plugin.json` + `hooks.json` + `mcp_config.json`)
 /// - Claude Code (`~/.claude/skills/anything-to-prompt-sync`: `.claude-plugin/plugin.json` + `hooks/hooks.json` + `.mcp.json`)
 /// - Codex (`~/.codex/plugins/anything-to-prompt-sync`: `.codex-plugin/plugin.json` + `.mcp.json`, plus zero-invasion JSONL live tail)
+///
 /// Never mutates third-party databases or `config.toml`.
 pub fn apply_external_sync_plugins(enable: bool) -> ExternalSyncPluginStatus {
     let dsh_ok = crate::config::AppConfig::dsh_home_dir()
@@ -1085,29 +1040,37 @@ pub fn start_live_sync_services(app: AppHandle, enabled_flag: Arc<AtomicBool>) {
                     }
                     continue;
                 }
-                let file = unsafe { std::fs::File::from_raw_handle(handle.0) };
-                let reader = BufReader::new(file);
-                for line in reader.lines().map_while(Result::ok) {
-                    let trimmed = line.trim();
-                    if trimmed.is_empty() {
-                        continue;
-                    }
-                    if let Ok(ctrl) = serde_json::from_str::<PipeControlCommand>(trimmed) {
-                        crate::handle_pipe_control_command(&app_pipe, &ctrl.control, ctrl.arg.as_deref());
-                        continue;
-                    }
-                    if !flag_pipe.load(Ordering::Acquire) {
-                        continue;
-                    }
-                    if let Ok(notice) = serde_json::from_str::<HookSyncNotice>(trimmed) {
-                        if let Some(payload) = build_sync_payload_from_hook(&notice) {
-                            push_harness_sync_to_bar(&app_pipe, &payload);
+                let mut file = unsafe { std::fs::File::from_raw_handle(handle.0) };
+                {
+                    let reader = BufReader::new(&mut file);
+                    for line in reader.lines().map_while(Result::ok) {
+                        let trimmed = line.trim();
+                        if trimmed.is_empty() {
+                            continue;
+                        }
+                        if let Ok(ctrl) = serde_json::from_str::<PipeControlCommand>(trimmed) {
+                            crate::handle_pipe_control_command(
+                                &app_pipe,
+                                &ctrl.control,
+                                ctrl.arg.as_deref(),
+                            );
+                            continue;
+                        }
+                        if !flag_pipe.load(Ordering::Acquire) {
+                            continue;
+                        }
+                        if let Ok(notice) = serde_json::from_str::<HookSyncNotice>(trimmed) {
+                            if let Some(payload) = build_sync_payload_from_hook(&notice) {
+                                push_harness_sync_to_bar(&app_pipe, &payload);
+                            }
                         }
                     }
                 }
                 unsafe {
+                    // Disconnect while `file` still owns `handle` (prevents Use-After-Close!).
                     let _ = DisconnectNamedPipe(handle);
                 }
+                drop(file);
             }
         });
 
@@ -1380,6 +1343,87 @@ fn resolve_agentapi_command() -> Option<(PathBuf, Vec<String>)> {
     None
 }
 
+/// Guards against Windows's 32,767-char `CreateProcessW` command-line limit when passing
+/// prompts containing many `[SW-TARGET v2]` JSON capsules to CLI tools like `agentapi`.
+/// If `prompt` exceeds 24,000 UTF-16 code units, writes the full UTF-8 prompt to a temp file
+/// and returns a compact reference prompt pointing to that file.
+pub fn bound_cli_prompt_arg(prompt: &str) -> String {
+    const MAX_CLI_UTF16_CHARS: usize = 24_000;
+    let utf16_len = prompt.encode_utf16().count();
+    if utf16_len <= MAX_CLI_UTF16_CHARS {
+        return prompt.to_string();
+    }
+    let dir = std::env::temp_dir().join("atp-prompts");
+    let _ = fs::create_dir_all(&dir);
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let path = dir.join(format!("prompt-{}-{ts}.md", std::process::id()));
+    if fs::write(&path, prompt).is_ok() {
+        let preview: String = prompt.chars().take(1200).collect();
+        return format!(
+            "[提示：本次消息总长 {utf16_len} 字符，超过 Windows 命令行安全上限，完整正文与所有引用胶囊已写入文件，请先读取该文件再作答]\n完整内容路径: {}\n\n--- 前 1200 字预览 ---\n{}",
+            path.display(),
+            preview
+        );
+    }
+    prompt.chars().take(16_000).collect()
+}
+
+fn run_command_with_timeout(
+    mut cmd: Command,
+    timeout: Duration,
+) -> std::io::Result<std::process::Output> {
+    use std::io::Read;
+    let mut child = cmd
+        .creation_flags(CREATE_NO_WINDOW.0)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let mut out_pipe = child.stdout.take();
+    let mut err_pipe = child.stderr.take();
+    let out_thread = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(ref mut r) = out_pipe {
+            let _ = r.read_to_end(&mut buf);
+        }
+        buf
+    });
+    let err_thread = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(ref mut r) = err_pipe {
+            let _ = r.read_to_end(&mut buf);
+        }
+        buf
+    });
+    let deadline = std::time::Instant::now() + timeout;
+    let status = loop {
+        if let Some(st) = child.try_wait()? {
+            break st;
+        }
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = out_thread.join();
+            let _ = err_thread.join();
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                format!("agentapi 执行超时（>{}s）", timeout.as_secs()),
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    let stdout = out_thread.join().unwrap_or_default();
+    let stderr = err_thread.join().unwrap_or_default();
+    Ok(std::process::Output {
+        status,
+        stdout,
+        stderr,
+    })
+}
+
 fn execute_agentapi_request(req: &AntigravitySidecarRequest) -> AntigravitySidecarResponse {
     if req.action == "ping" {
         return AntigravitySidecarResponse {
@@ -1402,8 +1446,8 @@ fn execute_agentapi_request(req: &AntigravitySidecarRequest) -> AntigravitySidec
     }
     match req.action.as_str() {
         "send_message" => {
-            let cid = req.conversation_id.as_deref().unwrap_or("").trim();
-            let prompt = req.prompt.as_deref().unwrap_or("");
+            let cid = req.conversation_id.as_deref().unwrap_or("").trim().replace('\0', "");
+            let prompt = bound_cli_prompt_arg(&req.prompt.as_deref().unwrap_or("").replace('\0', ""));
             if cid.is_empty() || prompt.trim().is_empty() {
                 return AntigravitySidecarResponse {
                     ok: false,
@@ -1414,15 +1458,17 @@ fn execute_agentapi_request(req: &AntigravitySidecarRequest) -> AntigravitySidec
             let title = req
                 .title
                 .as_deref()
+                .map(|s| s.replace('\0', ""))
                 .filter(|s| !s.trim().is_empty())
-                .unwrap_or("Anything-to-Prompt");
+                .unwrap_or_else(|| "Anything-to-Prompt".to_string());
             cmd.arg("send-message")
                 .arg(format!("--title={title}"))
+                .arg("--")
                 .arg(cid)
                 .arg(prompt);
         }
         "new_conversation" => {
-            let prompt = req.prompt.as_deref().unwrap_or("");
+            let prompt = bound_cli_prompt_arg(&req.prompt.as_deref().unwrap_or("").replace('\0', ""));
             if prompt.trim().is_empty() {
                 return AntigravitySidecarResponse {
                     ok: false,
@@ -1431,13 +1477,23 @@ fn execute_agentapi_request(req: &AntigravitySidecarRequest) -> AntigravitySidec
                 };
             }
             cmd.arg("new-conversation");
-            if let Some(model) = req.model.as_deref().filter(|s| !s.trim().is_empty()) {
-                cmd.arg(format!("--model={}", model.trim()));
+            if let Some(model) = req
+                .model
+                .as_deref()
+                .map(|s| s.trim().replace('\0', ""))
+                .filter(|s| !s.is_empty())
+            {
+                cmd.arg(format!("--model={model}"));
             }
-            if let Some(title) = req.title.as_deref().filter(|s| !s.trim().is_empty()) {
+            if let Some(title) = req
+                .title
+                .as_deref()
+                .map(|s| s.replace('\0', ""))
+                .filter(|s| !s.trim().is_empty())
+            {
                 cmd.arg(format!("--title={title}"));
             }
-            cmd.arg(prompt);
+            cmd.arg("--").arg(prompt);
         }
         other => {
             return AntigravitySidecarResponse {
@@ -1448,12 +1504,7 @@ fn execute_agentapi_request(req: &AntigravitySidecarRequest) -> AntigravitySidec
         }
     }
 
-    cmd.creation_flags(CREATE_NO_WINDOW.0)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-
-    match cmd.output() {
+    match run_command_with_timeout(cmd, Duration::from_secs(45)) {
         Ok(out) => {
             let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
             let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
@@ -1582,32 +1633,40 @@ pub fn run_antigravity_sidecar_cli() {
             }
             continue;
         }
-        let mut file = unsafe { std::fs::File::from_raw_handle(handle.0) };
-        let mut line = String::new();
-        {
-            let mut reader = BufReader::new(&mut file);
-            let _ = reader.read_line(&mut line);
-        }
-        let resp = match serde_json::from_str::<AntigravitySidecarRequest>(line.trim()) {
-            Ok(req) => execute_agentapi_request(&req),
-            Err(e) => AntigravitySidecarResponse {
-                ok: false,
-                conversation_id: None,
-                error: Some(format!("无效请求: {e}")),
-            },
-        };
-        if let Ok(resp_json) = serde_json::to_string(&resp) {
-            let _ = file.write_all(resp_json.as_bytes());
-            let _ = file.write_all(b"\n");
-            let _ = file.flush();
-        }
-        unsafe {
-            // CRITICAL on Win32 Named Pipes: wait until the client has read all response bytes
-            // before calling DisconnectNamedPipe, otherwise the client hits ERROR_PIPE_NOT_CONNECTED (233)!
-            let _ = FlushFileBuffers(handle);
-            let _ = DisconnectNamedPipe(handle);
-        }
-        drop(file);
+        // Spawn a worker per accepted connection so the accept loop immediately creates the next
+        // listening pipe instance (prevents concurrent calls or rapid retries from hitting SIDE_OFFLINE).
+        let raw_handle = handle.0 as isize;
+        let _ = std::thread::Builder::new()
+            .name("atp-ag-sidecar-req".to_string())
+            .spawn(move || {
+                let h = HANDLE(raw_handle as *mut std::ffi::c_void);
+                let mut file = unsafe { std::fs::File::from_raw_handle(h.0) };
+                let mut line = String::new();
+                {
+                    let mut reader = BufReader::new(&mut file);
+                    let _ = reader.read_line(&mut line);
+                }
+                let resp = match serde_json::from_str::<AntigravitySidecarRequest>(line.trim()) {
+                    Ok(req) => execute_agentapi_request(&req),
+                    Err(e) => AntigravitySidecarResponse {
+                        ok: false,
+                        conversation_id: None,
+                        error: Some(format!("无效请求: {e}")),
+                    },
+                };
+                if let Ok(resp_json) = serde_json::to_string(&resp) {
+                    let _ = file.write_all(resp_json.as_bytes());
+                    let _ = file.write_all(b"\n");
+                    let _ = file.flush();
+                }
+                unsafe {
+                    // CRITICAL on Win32 Named Pipes: wait until client reads all response bytes
+                    // before DisconnectNamedPipe, and keep `file` alive until after disconnect!
+                    let _ = FlushFileBuffers(h);
+                    let _ = DisconnectNamedPipe(h);
+                }
+                drop(file);
+            });
     }
 }
 

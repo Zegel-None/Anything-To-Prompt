@@ -12,9 +12,7 @@ use crate::harness_sync::{
     apply_external_sync_plugins, query_external_sync_status, send_control_to_pipe,
 };
 use serde_json::{json, Value};
-use std::ffi::OsStr;
 use std::io::{self, BufRead, BufReader, Read, Write};
-use std::os::windows::ffi::OsStrExt;
 use windows::core::{PCWSTR, PWSTR};
 use windows::Win32::Foundation::CloseHandle;
 use windows::Win32::System::Threading::{
@@ -30,12 +28,7 @@ enum FramingMode {
     ContentLength,
 }
 
-fn to_wide(s: &str) -> Vec<u16> {
-    OsStr::new(s)
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect()
-}
+use crate::win32_util::to_wide;
 
 /// Spawns the single-instance Anything-to-Prompt desktop bar completely decoupled from the
 /// calling Harness's Windows Job Object so closing Antigravity / Codex / Claude Code / DSH
@@ -200,10 +193,7 @@ pub fn handle_mcp_request(req: &Value) -> Option<Value> {
     let params = req.get("params");
 
     // Notifications carry no `id` and require no reply
-    if id.is_none() {
-        return None;
-    }
-    let id = id.unwrap();
+    let id = id?;
 
     let result = match method {
         "initialize" => {

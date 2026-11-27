@@ -225,6 +225,7 @@ pub fn setup_tray(app: &AppHandle) -> tauri::Result<TrayHandles> {
             }
             "quit" => {
                 crate::cursor::restore_system_cursors();
+                crate::pick::vision::sidecar_client::shutdown_sidecar();
                 app_handle.exit(0);
             }
             _ => {}

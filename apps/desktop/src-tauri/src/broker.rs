@@ -1,4 +1,5 @@
-use crate::elevation::{is_elevated, spawn_medium, to_wide};
+use crate::elevation::{is_elevated, spawn_medium};
+use crate::win32_util::{current_user_sid_string, to_wide};
 use anyhow::{anyhow, Context, Result};
 use base64::Engine;
 use serde::{Deserialize, Serialize};
@@ -12,21 +13,20 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
-use windows::core::{PCWSTR, PSTR};
+use windows::core::PCWSTR;
 use windows::Win32::Foundation::{CloseHandle, LocalFree, HANDLE, HLOCAL, INVALID_HANDLE_VALUE};
 use windows::Win32::Security::Authorization::{
-    ConvertSidToStringSidA, ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
+    ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
 };
 use windows::Win32::Security::{
-    GetTokenInformation, TokenUser, PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES, TOKEN_QUERY,
-    TOKEN_USER,
+    PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES,
 };
 use windows::Win32::Storage::FileSystem::PIPE_ACCESS_DUPLEX;
 use windows::Win32::System::Pipes::{
     ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, PIPE_READMODE_BYTE,
     PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_WAIT,
 };
-use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken, CREATE_NO_WINDOW};
+use windows::Win32::System::Threading::CREATE_NO_WINDOW;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
@@ -42,6 +42,14 @@ pub enum BrokerRequest {
     },
     RunPs51 {
         script: String,
+        timeout_ms: u64,
+    },
+    SolidWorksPick {
+        screen_x: Option<i32>,
+        screen_y: Option<i32>,
+        allow_viewport_ray: bool,
+        #[serde(default)]
+        pick_mode: String,
         timeout_ms: u64,
     },
     Spawn {
@@ -161,22 +169,44 @@ pub fn execute_ps51_local(script: &str, timeout_ms: u64) -> Result<String> {
         .spawn()
         .context("failed to spawn powershell.exe")?;
 
+    // Drain stdout & stderr concurrently on background threads so large Explorer multi-select
+    // outputs (>4KB pipe buffer) NEVER deadlock PowerShell before `try_wait()` completes!
+    let mut out_pipe = child.stdout.take();
+    let mut err_pipe = child.stderr.take();
+    let out_thread = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(ref mut r) = out_pipe {
+            let _ = std::io::Read::read_to_end(r, &mut buf);
+        }
+        buf
+    });
+    let err_thread = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(ref mut r) = err_pipe {
+            let _ = std::io::Read::read_to_end(r, &mut buf);
+        }
+        buf
+    });
+
     let deadline = Instant::now() + Duration::from_millis(timeout_ms.max(250));
     loop {
         match child.try_wait()? {
-            Some(_status) => {
-                let output = child.wait_with_output()?;
-                let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                if !stdout.is_empty() || output.status.success() {
+            Some(status) => {
+                let out_bytes = out_thread.join().unwrap_or_default();
+                let err_bytes = err_thread.join().unwrap_or_default();
+                let stdout = String::from_utf8_lossy(&out_bytes).trim().to_string();
+                if !stdout.is_empty() || status.success() {
                     return Ok(stdout);
                 }
-                let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+                let stderr = String::from_utf8_lossy(&err_bytes).trim().to_string();
                 return Err(anyhow!("powershell error: {stderr}"));
             }
             None => {
                 if Instant::now() >= deadline {
                     let _ = child.kill();
                     let _ = child.wait();
+                    let _ = out_thread.join();
+                    let _ = err_thread.join();
                     return Err(anyhow!("powershell script timed out after {timeout_ms}ms"));
                 }
                 std::thread::sleep(Duration::from_millis(20));
@@ -262,6 +292,32 @@ foreach ($w in $sh.Windows()) {{
             match execute_ps51_local(&script, timeout_ms) {
                 Ok(text) => BrokerResponse::ok_text(text),
                 Err(e) => BrokerResponse::err(e.to_string()),
+            }
+        }
+
+        BrokerRequest::SolidWorksPick {
+            screen_x,
+            screen_y,
+            allow_viewport_ray,
+            pick_mode,
+            timeout_ms,
+        } => {
+            let pos = screen_x.zip(screen_y);
+            let mode = if !pick_mode.trim().is_empty() {
+                crate::pick::adapters::solidworks::SwPickMode::parse(&pick_mode)
+            } else if allow_viewport_ray {
+                crate::pick::adapters::solidworks::SwPickMode::Auto
+            } else {
+                crate::pick::adapters::solidworks::SwPickMode::CurrentSelectionOnly
+            };
+            let outcome = crate::pick::adapters::solidworks_com::probe_solidworks_in_medium(
+                pos,
+                mode,
+                timeout_ms,
+            );
+            match serde_json::to_string(&outcome) {
+                Ok(json) => BrokerResponse::ok_text(json),
+                Err(e) => BrokerResponse::err(format!("solidworks serialize failed: {e}")),
             }
         }
 
@@ -364,6 +420,14 @@ fn parse_json_string_list(raw: &str) -> Vec<String> {
 
 /// Entry point when invoked as `anything-to-prompt.exe --broker <pipe_name>` at medium integrity.
 pub fn run_broker_client(pipe_name: &str) -> Result<()> {
+    // Ensure the medium-integrity broker sees identical Per-Monitor DPI physical pixel coordinates
+    // as the elevated main process (critical for SolidWorks 3D viewport ray-pick at 125–200% DPI).
+    unsafe {
+        let _ = windows::Win32::UI::HiDpi::SetProcessDpiAwarenessContext(
+            windows::Win32::UI::HiDpi::DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
+        );
+    }
+
     let full_pipe = if pipe_name.starts_with(r"\\.\pipe\") {
         pipe_name.to_string()
     } else {
@@ -401,43 +465,6 @@ pub fn run_broker_client(pipe_name: &str) -> Result<()> {
         writer.flush()?;
     }
     Ok(())
-}
-
-fn current_user_sid_string() -> Option<String> {
-    unsafe {
-        let mut token = HANDLE::default();
-        if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token).is_err() {
-            return None;
-        }
-        let mut needed = 0u32;
-        let _ = GetTokenInformation(token, TokenUser, None, 0, &mut needed);
-        if needed == 0 {
-            let _ = CloseHandle(token);
-            return None;
-        }
-        let mut buf = vec![0u8; needed as usize];
-        let ok = GetTokenInformation(
-            token,
-            TokenUser,
-            Some(buf.as_mut_ptr() as *mut _),
-            needed,
-            &mut needed,
-        )
-        .is_ok();
-        let _ = CloseHandle(token);
-        if !ok {
-            return None;
-        }
-        let token_user = &*(buf.as_ptr() as *const TOKEN_USER);
-        let mut str_sid = PSTR::null();
-        if ConvertSidToStringSidA(token_user.User.Sid, &mut str_sid).is_err() || str_sid.is_null() {
-            return None;
-        }
-        let cstr = std::ffi::CStr::from_ptr(str_sid.0 as *const i8);
-        let res = cstr.to_string_lossy().into_owned();
-        let _ = LocalFree(Some(HLOCAL(str_sid.0 as *mut std::ffi::c_void)));
-        Some(res)
-    }
 }
 
 struct ActivePipeConn {
@@ -582,13 +609,16 @@ impl BrokerClient {
             Err(poisoned) => poisoned.into_inner(),
         };
 
-        for attempt in 0..2 {
+        let is_non_idempotent = matches!(req, BrokerRequest::StartHarnessTurn { .. });
+        let max_attempts = if is_non_idempotent { 1 } else { 2 };
+
+        for attempt in 0..max_attempts {
             if guard.is_none() {
                 match Self::spawn_and_connect_pipe() {
                     Ok(c) => *guard = Some(c),
                     Err(e) => {
                         log::warn!("Failed to start medium broker (attempt {attempt}): {e}");
-                        if attempt == 1 {
+                        if attempt + 1 >= max_attempts {
                             return BrokerResponse::err(e.to_string());
                         }
                         continue;
@@ -602,6 +632,9 @@ impl BrokerClient {
                     Err(e) => {
                         log::warn!("Broker pipe roundtrip failed (restarting): {e}");
                         *guard = None;
+                        if is_non_idempotent {
+                            return BrokerResponse::err(format!("broker roundtrip error: {e}"));
+                        }
                     }
                 }
             }

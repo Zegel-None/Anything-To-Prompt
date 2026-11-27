@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 1,
+  "id": "blender-scene-deep",
+  "name": "Blender 3D 场景与工程追踪",
+  "version": "1.0.0",
+  "author": "Anything-to-Prompt Community",
+  "description": "追踪 Blender 当前 .blend 文件路径并优化 OpenGL 视口防误触与工具栏找框",
+  "homepage": "https://github.com/Zegel-None/Anything-To-Prompt/tree/main/adapter-registry/plugins/blender-scene-deep",
+  "category": "cad_3d",
+  "match": {
+    "exes": ["blender.exe"]
+  },
+  "capabilities": ["enrich_pick", "ui_profile"],
+  "priority": 115,
+  "timeoutMs": 600,
+  "uiProfile": {
+    "uiaPolicy": "watchdog_only",
+    "preferredLayers": ["static_visual_hit_map", "msaa_hit_map"],
+    "ignoreBackground": true,
+    "ignoreCanvasClasses": ["ghost_windowclass"]
+  },
+  "runtime": {
+    "kind": "declarative",
+    "rules": [
+      { "field": "cmdline", "op": "file_ext", "arg1": ".blend", "outputKey": "blend_file_path", "isPath": true, "setBadge": true },
+      { "field": "window_title", "op": "between", "arg1": "[", "arg2": "]", "outputKey": "blend_title_path", "isPath": true, "setBadge": true }
+    ]
+  }
+}

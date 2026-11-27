@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-adapter-plugins-reload"
+description = "Enables the adapter_plugins_reload command without any pre-configured scope."
+commands.allow = ["adapter_plugins_reload"]
+
+[[permission]]
+identifier = "deny-adapter-plugins-reload"
+description = "Denies the adapter_plugins_reload command without any pre-configured scope."
+commands.deny = ["adapter_plugins_reload"]

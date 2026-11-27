@@ -165,7 +165,7 @@
     const prefs = ctx.prefs || {};
     const mode = ctx.resolvedMode || DEFAULTS.defaultMode;
     return {
-      projectId: (ctx.selection && ctx.selection.workspaceId) || 'default-cli-project',
+      projectId: (ctx.selection && ctx.selection.workspaceId) || null,
       executionMode: mode,
       model: ctx.resolvedModel || DEFAULTS.defaultModel,
       effort: ctx.resolvedEffort || DEFAULTS.defaultEffort,

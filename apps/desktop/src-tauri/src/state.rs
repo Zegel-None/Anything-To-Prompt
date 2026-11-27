@@ -101,6 +101,9 @@ pub enum StateEvent {
         edge: DockEdge,
         start_collapsed: bool,
     },
+    SetDockEdgeFromDrag {
+        edge: DockEdge,
+    },
     DockEdgePeekEnter,
     DockEdgeClickExpand,
     DockAutoCollapseIfUnlocked,
@@ -395,7 +398,11 @@ impl BarStateMachine {
                 if picked_any || self.visibility == VisibilityState::Summon {
                     self.visibility = VisibilityState::Summon;
                     return TransitionEffects {
-                        window_action: Some(WindowAction::ActivateAndFocus),
+                        window_action: Some(if self.dock_edge.is_docked() {
+                            WindowAction::DockExpandAndFocus
+                        } else {
+                            WindowAction::ActivateAndFocus
+                        }),
                         bridge_mode: Some(BridgeMode::Summon),
                         reset_pick_counter: false,
                         record_sent_message: false,
@@ -408,9 +415,13 @@ impl BarStateMachine {
                 let was_summon = self.visibility == VisibilityState::Summon;
                 self.visibility = VisibilityState::Summon;
                 if !self.pen_active {
-                    // Alt already released: activate Bar and place blinking caret in composer right after capsule insertion
+                    // Ctrl already released: activate Bar and place blinking caret in composer right after capsule insertion
                     TransitionEffects {
-                        window_action: Some(WindowAction::ActivateAndFocus),
+                        window_action: Some(if self.dock_edge.is_docked() {
+                            WindowAction::DockExpandAndFocus
+                        } else {
+                            WindowAction::ActivateAndFocus
+                        }),
                         bridge_mode: if was_summon {
                             None
                         } else {
@@ -519,6 +530,22 @@ impl BarStateMachine {
                         reset_pick_counter: false,
                         record_sent_message: false,
                     }
+                }
+            }
+
+            StateEvent::SetDockEdgeFromDrag { edge } => {
+                self.dock_edge = edge;
+                self.dock_locked_open = false;
+                self.composer_focused = false;
+                if !edge.is_docked() {
+                    return TransitionEffects::none();
+                }
+                self.visibility = VisibilityState::Summon;
+                TransitionEffects {
+                    window_action: Some(WindowAction::DockExpandNoActivate),
+                    bridge_mode: Some(BridgeMode::Summon),
+                    reset_pick_counter: false,
+                    record_sent_message: false,
                 }
             }
 

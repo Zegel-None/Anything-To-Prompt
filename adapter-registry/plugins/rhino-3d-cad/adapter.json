@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 1,
+  "id": "rhino-3d-cad",
+  "name": "Rhino 3D 曲面建模深度追踪（COM 脚本）",
+  "version": "1.0.0",
+  "author": "Anything-to-Prompt Community",
+  "description": "通过中权限 PowerShell COM 读取 Rhino 活动 .3dm 文档路径与选中物体数量",
+  "homepage": "https://github.com/Zegel-None/Anything-To-Prompt/tree/main/adapter-registry/plugins/rhino-3d-cad",
+  "category": "cad_3d",
+  "match": {
+    "exes": ["rhino.exe"]
+  },
+  "capabilities": ["enrich_pick", "ui_profile"],
+  "priority": 120,
+  "timeoutMs": 1500,
+  "integrity": "medium",
+  "uiProfile": {
+    "uiaPolicy": "watchdog_only",
+    "preferredLayers": ["static_visual_hit_map", "msaa_hit_map"],
+    "ignoreBackground": true
+  },
+  "runtime": {
+    "kind": "command",
+    "command": "powershell.exe",
+    "args": ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "adapter.ps1"],
+    "inlineFilename": "adapter.ps1",
+    "inlineScript": "$raw = [Console]::In.ReadToEnd()\n$req = if ($raw) { $raw | ConvertFrom-Json } else { $null }\n$lines = @()\n$paths = @()\n$badge = $null\ntry {\n  $rh = [Runtime.InteropServices.Marshal]::GetActiveObject('Rhino.Application')\n  $rs = $rh.GetScriptObject()\n  if ($null -ne $rs) {\n    $docName = [string]$rs.DocumentName()\n    $docPath = [string]$rs.DocumentPath()\n    if ($docName) { $badge = $docName; $lines += \"rhino_doc: $docName\" }\n    if ($docPath -and $docName) { $full = Join-Path $docPath $docName; if (Test-Path $full) { $paths += $full } }\n    $sel = $rs.SelectedObjects()\n    if ($null -ne $sel) { $lines += \"rhino_selected_count: $($sel.Count)\" }\n  }\n} catch {\n  if ($req -and $req.windowTitle) { $lines += \"rhino_window: $($req.windowTitle)\" }\n}\n@{ ok = $true; badge = $badge; lines = $lines; paths = $paths } | ConvertTo-Json -Compress\n",
+    "protocol": "json_stdio_v1"
+  }
+}

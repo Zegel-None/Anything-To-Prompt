@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-bar-set-vertical-mode"
+description = "Enables the bar_set_vertical_mode command without any pre-configured scope."
+commands.allow = ["bar_set_vertical_mode"]
+
+[[permission]]
+identifier = "deny-bar-set-vertical-mode"
+description = "Denies the bar_set_vertical_mode command without any pre-configured scope."
+commands.deny = ["bar_set_vertical_mode"]

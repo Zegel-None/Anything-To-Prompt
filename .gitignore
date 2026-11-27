@@ -8,3 +8,4 @@ release/*.msi
 
 __pycache__/
 *.pyc
+.donegate/

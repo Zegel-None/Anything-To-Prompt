@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-pick-list-profiles"
+description = "Enables the pick_list_profiles command without any pre-configured scope."
+commands.allow = ["pick_list_profiles"]
+
+[[permission]]
+identifier = "deny-pick-list-profiles"
+description = "Denies the pick_list_profiles command without any pre-configured scope."
+commands.deny = ["pick_list_profiles"]

@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "id": "jetbrains-workspace-pro",
+  "name": "JetBrains 全家桶深度工作区追踪",
+  "version": "1.0.0",
+  "author": "Anything-to-Prompt Community",
+  "description": "适配 IntelliJ / PyCharm / CLion / GoLand / Rider / RustRover，提取工程名与当前编辑文件",
+  "homepage": "https://github.com/Zegel-None/Anything-To-Prompt/tree/main/adapter-registry/plugins/jetbrains-workspace-pro",
+  "category": "dev",
+  "match": {
+    "exes": ["idea64.exe", "pycharm64.exe", "clion64.exe", "goland64.exe", "rider64.exe", "webstorm64.exe", "rustrover64.exe"]
+  },
+  "capabilities": ["enrich_pick"],
+  "priority": 110,
+  "timeoutMs": 600,
+  "runtime": {
+    "kind": "declarative",
+    "rules": [
+      { "field": "window_title", "op": "split", "arg1": " – ", "index": 0, "outputKey": "jetbrains_project", "isPath": false, "setBadge": false },
+      { "field": "window_title", "op": "split", "arg1": " – ", "index": 1, "outputKey": "jetbrains_active_file", "isPath": false, "setBadge": true },
+      { "field": "window_title", "op": "between", "arg1": "[", "arg2": "]", "outputKey": "jetbrains_workspace_hint", "isPath": true, "setBadge": false }
+    ]
+  }
+}

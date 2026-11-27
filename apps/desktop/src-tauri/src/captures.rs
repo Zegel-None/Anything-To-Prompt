@@ -29,7 +29,7 @@ extern "system" {
 
 const PW_RENDERFULLCONTENT: u32 = 0x0000_0002;
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScreenRect {
     pub x: i32,
     pub y: i32,
@@ -182,13 +182,33 @@ pub fn rotate_captures_on_send(cfg: &AppConfig) {
     let _ = idx.save(&dir);
 }
 
+/// Returns true for processes whose single-threaded STA UI / OpenGL message pump stalls
+/// when sent synchronous `PrintWindow(PW_RENDERFULLCONTENT)` (`WM_PRINT`) requests
+/// (notably SolidWorks `SLDWORKS.exe`, where `WM_PRINT` directly contends with out-of-proc COM).
+pub fn is_print_window_unsafe_hwnd(target_hwnd: HWND) -> bool {
+    if target_hwnd.0.is_null() {
+        return false;
+    }
+    let mut pid = 0u32;
+    unsafe {
+        GetWindowThreadProcessId(target_hwnd, Some(&mut pid));
+    }
+    if pid == 0 {
+        return false;
+    }
+    let exe = crate::pick::adapters::office::fast_exe_basename_for_pid(pid);
+    crate::pick::adapters::solidworks::is_solidworks_exe(&exe)
+}
+
 pub fn capture_target_window_bitblt(
     target_hwnd: HWND,
     cursor_x: i32,
     cursor_y: i32,
 ) -> Result<RawScreenCapture> {
-    // 1. Prefer DWM PrintWindow(PW_RENDERFULLCONTENT) on target_hwnd: works even when occluded or in restricted sessions, and never captures our own overlays
-    if !target_hwnd.0.is_null() {
+    // 1. Prefer DWM PrintWindow(PW_RENDERFULLCONTENT) on target_hwnd for normal apps: works even
+    // when occluded and never captures our own overlays. Skip for SolidWorks (`SLDWORKS.exe`),
+    // where synchronous `WM_PRINT` forces an OpenGL+MFC redraw on the STA thread and stalls COM!
+    if !target_hwnd.0.is_null() && !is_print_window_unsafe_hwnd(target_hwnd) {
         if let Ok(cap) = capture_hwnd_via_print_window(target_hwnd) {
             return Ok(cap);
         }

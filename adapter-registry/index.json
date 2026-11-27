@@ -1,0 +1,54 @@
+{
+  "schemaVersion": 1,
+  "updatedAt": "2026-11-27",
+  "plugins": [
+    {
+      "id": "kicad-eda-deep",
+      "name": "KiCad 原理图/PCB 深度追踪",
+      "version": "1.0.0",
+      "author": "Anything-to-Prompt Community",
+      "description": "自动识别 KiCad 原理图/PCB 工程路径、当前图纸名，并配置防误触画布与工具栏识别规则（零代码即装即用）",
+      "category": "cad_3d",
+      "exes": ["kicad.exe", "pcbnew.exe", "eeschema.exe"],
+      "runtimeKind": "declarative",
+      "downloadUrl": "https://raw.githubusercontent.com/Zegel-None/Anything-To-Prompt/main/adapter-registry/plugins/kicad-eda-deep/adapter.json",
+      "homepage": "https://github.com/Zegel-None/Anything-To-Prompt/tree/main/adapter-registry/plugins/kicad-eda-deep"
+    },
+    {
+      "id": "jetbrains-workspace-pro",
+      "name": "JetBrains 全家桶深度工作区追踪",
+      "version": "1.0.0",
+      "author": "Anything-to-Prompt Community",
+      "description": "适配 IntelliJ IDEA / PyCharm / CLion / GoLand / Rider / WebStorm / RustRover，精准提取工程名与当前编辑文件",
+      "category": "dev",
+      "exes": ["idea64.exe", "pycharm64.exe", "clion64.exe", "goland64.exe", "rider64.exe", "webstorm64.exe", "rustrover64.exe"],
+      "runtimeKind": "declarative",
+      "downloadUrl": "https://raw.githubusercontent.com/Zegel-None/Anything-To-Prompt/main/adapter-registry/plugins/jetbrains-workspace-pro/adapter.json",
+      "homepage": "https://github.com/Zegel-None/Anything-To-Prompt/tree/main/adapter-registry/plugins/jetbrains-workspace-pro"
+    },
+    {
+      "id": "blender-scene-deep",
+      "name": "Blender 3D 场景与工程追踪",
+      "version": "1.0.0",
+      "author": "Anything-to-Prompt Community",
+      "description": "追踪 Blender 当前 .blend 工程路径、场景标题，并自动配置 OpenGL 视口防误触与静态工具栏找框",
+      "category": "cad_3d",
+      "exes": ["blender.exe"],
+      "runtimeKind": "declarative",
+      "downloadUrl": "https://raw.githubusercontent.com/Zegel-None/Anything-To-Prompt/main/adapter-registry/plugins/blender-scene-deep/adapter.json",
+      "homepage": "https://github.com/Zegel-None/Anything-To-Prompt/tree/main/adapter-registry/plugins/blender-scene-deep"
+    },
+    {
+      "id": "rhino-3d-cad",
+      "name": "Rhino 3D 曲面建模深度追踪（COM 脚本）",
+      "version": "1.0.0",
+      "author": "Anything-to-Prompt Community",
+      "description": "通过中权限 PowerShell COM 读取 Rhino 活动 .3dm 文档路径与选中物体数量（需用户信任启用）",
+      "category": "cad_3d",
+      "exes": ["rhino.exe"],
+      "runtimeKind": "command",
+      "downloadUrl": "https://raw.githubusercontent.com/Zegel-None/Anything-To-Prompt/main/adapter-registry/plugins/rhino-3d-cad/adapter.json",
+      "homepage": "https://github.com/Zegel-None/Anything-To-Prompt/tree/main/adapter-registry/plugins/rhino-3d-cad"
+    }
+  ]
+}

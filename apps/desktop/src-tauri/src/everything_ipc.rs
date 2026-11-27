@@ -1,6 +1,4 @@
 use std::cell::RefCell;
-use std::ffi::OsStr;
-use std::os::windows::ffi::OsStrExt;
 use std::path::PathBuf;
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
@@ -27,12 +25,7 @@ thread_local! {
     static REPLY_BUFFER: RefCell<Option<Vec<EverythingHit>>> = const { RefCell::new(None) };
 }
 
-fn to_wide_null(s: &str) -> Vec<u16> {
-    OsStr::new(s)
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect()
-}
+use crate::win32_util::to_wide as to_wide_null;
 
 /// Fast (<0.05ms) check for a live Everything 1.4 or 1.5a IPC notification window.
 pub fn find_everything_ipc_hwnd() -> Option<HWND> {

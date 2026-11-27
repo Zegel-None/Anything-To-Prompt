@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-vision-get-config"
+description = "Enables the vision_get_config command without any pre-configured scope."
+commands.allow = ["vision_get_config"]
+
+[[permission]]
+identifier = "deny-vision-get-config"
+description = "Denies the vision_get_config command without any pre-configured scope."
+commands.deny = ["vision_get_config"]
